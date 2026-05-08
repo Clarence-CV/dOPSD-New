@@ -52,8 +52,11 @@ def section(title):
 @torch.no_grad()
 def _basic_forward(model, input_ids, attention_mask):
     """Forward + Dream's logits-shift, mirroring the trainer."""
+    # Dream's modeling_dream.py passes attention_mask straight to SDPA without
+    # _prepare_4d_attention_mask, so we expand (B, L) -> (B, 1, 1, L) here.
+    mask = attention_mask[:, None, None, :].bool()
     with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-        out = model(input_ids=input_ids, attention_mask=attention_mask)
+        out = model(input_ids=input_ids, attention_mask=mask)
     return torch.cat([out.logits[:, :1], out.logits[:, :-1]], dim=1)
 
 
