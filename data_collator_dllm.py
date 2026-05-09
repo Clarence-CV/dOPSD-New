@@ -20,10 +20,28 @@ class SelfDistillationDLLMDataCollator:
     attention treats every position equally.
     """
 
-    def __init__(self, tokenizer, max_prompt_length=1024, max_answer_length=1024):
+    def __init__(
+        self,
+        tokenizer,
+        max_prompt_length=1024,
+        max_answer_length=1024,
+        instruction_field: str = "instruction",
+        response_field: str = "response",
+        context_field: str | None = "context",
+    ):
+        """
+        Args:
+            instruction_field: dataset column for the user instruction (Dolly: "instruction").
+            response_field:    dataset column for the gold response (Dolly: "response").
+            context_field:     optional dataset column for supporting context (Dolly: "context";
+                               often empty string for open-ended tasks). Pass None if absent.
+        """
         self.tokenizer = tokenizer
         self.max_prompt_length = max_prompt_length
         self.max_answer_length = max_answer_length
+        self.instruction_field = instruction_field
+        self.response_field = response_field
+        self.context_field = context_field
 
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -31,33 +49,31 @@ class SelfDistillationDLLMDataCollator:
         print(
             f"[DLLMCollator] pad_id={self.tokenizer.pad_token_id}, "
             f"mask_id={getattr(self.tokenizer, 'mask_token_id', None)}, "
-            f"max_prompt_len={self.max_prompt_length}, max_answer_len={self.max_answer_length}"
+            f"max_prompt_len={self.max_prompt_length}, max_answer_len={self.max_answer_length}, "
+            f"fields=(instr={self.instruction_field}, resp={self.response_field}, ctx={self.context_field})"
         )
 
-    def _build_prompts(self, problem, solution):
-        student_user = (
-            f"Problem: {problem}\n\n"
-            "Please reason step by step, and put your final answer within \\boxed{}."
+    def _build_prompts(self, instruction: str, response: str, context: str | None = None):
+        ctx_block = f"\n\nContext:\n{context.strip()}" if context and context.strip() else ""
+
+        student_user = f"{instruction.strip()}{ctx_block}"
+        teacher_user = (
+            f"{instruction.strip()}{ctx_block}\n\n"
+            "Here is a reference response to this instruction:\n"
+            f"=== Reference Response Begin ===\n{response.strip()}\n=== Reference Response End ===\n\n"
+            "Using the reference response above as guidance, write your own response in your own words."
         )
+
         student_prompt = self.tokenizer.apply_chat_template(
             [{"role": "user", "content": student_user}],
             tokenize=False,
             add_generation_prompt=True,
-        )
-
-        teacher_user = (
-            f"Problem: {problem}\n\n"
-            "Here is a reference solution to this problem:\n"
-            f"=== Reference Solution Begin ===\n{solution}\n=== Reference Solution End ===\n\n"
-            "Using the reference solution above as guidance, derive the answer in your own words. "
-            "Please reason step by step, and put your final answer within \\boxed{}."
         )
         teacher_prompt = self.tokenizer.apply_chat_template(
             [{"role": "user", "content": teacher_user}],
             tokenize=False,
             add_generation_prompt=True,
         )
-
         return student_prompt, teacher_prompt
 
     def _left_pad(self, seqs, max_len, pad_id):
@@ -79,10 +95,13 @@ class SelfDistillationDLLMDataCollator:
     def __call__(self, features):
         student_prompts, teacher_prompts, answers = [], [], []
         for feat in features:
-            sp, tp = self._build_prompts(feat["problem"], feat["solution"])
+            instruction = feat[self.instruction_field]
+            response = feat[self.response_field]
+            context = feat.get(self.context_field) if self.context_field else None
+            sp, tp = self._build_prompts(instruction, response, context)
             student_prompts.append(sp)
             teacher_prompts.append(tp)
-            answers.append(feat["solution"])
+            answers.append(response)
 
         s_ids = self.tokenizer(
             student_prompts,

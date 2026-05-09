@@ -129,7 +129,14 @@ class OPSDDLLMTrainer(SFTTrainer):
 
     def _set_signature_columns_if_needed(self):
         super()._set_signature_columns_if_needed()
-        for column in ("problem", "solution"):
+        # Keep whichever dataset columns the collator reads from.
+        collator = self.data_collator
+        keep = []
+        for attr in ("instruction_field", "response_field", "context_field"):
+            val = getattr(collator, attr, None)
+            if val:
+                keep.append(val)
+        for column in keep:
             if self._signature_columns is None:
                 self._signature_columns = []
             if column not in self._signature_columns:
