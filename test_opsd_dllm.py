@@ -49,10 +49,18 @@ def section(title):
     print(f"\n{'='*80}\n{title}\n{'='*80}")
 
 
+def _expand_mask_4d(attention_mask):
+    """Dream's modeling_dream.py passes attention_mask straight to SDPA without
+    _prepare_4d_attention_mask, so callers must expand (B, L) -> (B, 1, 1, L) bool."""
+    return attention_mask[:, None, None, :].bool()
+
+
+@torch.no_grad()
 def _shifted_forward(model, input_ids, attention_mask):
-    """Forward + Dream's right-shift convention; mirrors the trainer."""
+    """No-grad forward + Dream's right-shift logits convention; mirrors the trainer."""
+    mask = _expand_mask_4d(attention_mask)
     with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-        out = model(input_ids=input_ids, attention_mask=attention_mask)
+        out = model(input_ids=input_ids, attention_mask=mask)
     return torch.cat([out.logits[:, :1], out.logits[:, :-1]], dim=1)
 
 
@@ -232,7 +240,8 @@ def main():
 
     section("7. Backward pass: gradient flows through student forward only")
     model.train()
-    out_s = model(input_ids=student_input_ids, attention_mask=student_attn_mask)
+    student_attn_4d = _expand_mask_4d(student_attn_mask)
+    out_s = model(input_ids=student_input_ids, attention_mask=student_attn_4d)
     s_logits = torch.cat([out_s.logits[:, :1], out_s.logits[:, :-1]], dim=1)
     s_answer = s_logits[:, s_prompt_len : s_prompt_len + A, :]
     s_masked = s_answer[mask_pattern].float()

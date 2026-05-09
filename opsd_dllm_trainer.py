@@ -153,7 +153,15 @@ class OPSDDLLMTrainer(SFTTrainer):
         return torch.cat([logits[:, :1], logits[:, :-1]], dim=1)
 
     def _forward(self, model, input_ids, attention_mask):
-        """One forward pass returning shift-aligned logits."""
+        """One forward pass returning shift-aligned logits.
+
+        Dream's modeling_dream.py passes attention_mask straight to SDPA without
+        `_prepare_4d_attention_mask`, so we expand the (B, L) mask to (B, 1, 1, L)
+        bool here. Without this, SDPA receives the wrong shape and either errors
+        or silently treats every position as visible.
+        """
+        if attention_mask is not None and attention_mask.dim() == 2:
+            attention_mask = attention_mask[:, None, None, :].bool()
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
         return self._shift_logits_dream(outputs.logits)
