@@ -16,7 +16,12 @@ Usage:
 """
 
 import argparse
+import faulthandler
 import os
+import sys
+
+# Print a Python stack trace when a segfault hits, instead of dying silently.
+faulthandler.enable(file=sys.stderr, all_threads=True)
 
 import torch
 from datasets import load_dataset
