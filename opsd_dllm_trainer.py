@@ -3,9 +3,28 @@
 
 Same model plays both roles: the *teacher* receives the ground-truth solution
 in its prompt as privileged context, while the *student* receives only the
-problem. We mask N random tokens of the answer (LLaDA / Dream-style antithetic
-sampling of t ~ U(eps, 1)) and ask both to predict the masked tokens, then
-distill student → teacher via JSD on the masked-position distributions.
+problem. The student rolls out a completion via Dream's `diffusion_generate`;
+a random mask pattern is then sampled over the valid (non-pad / non-post-EOS)
+completion positions; both prompts are concatenated with the *noisy* (masked)
+completion and run through a forward pass; JSD is computed only at the
+masked positions:
+
+    student_prompt  ─►  model.diffusion_generate()  ─►  completion (concrete)
+                                                              │
+                                          random mask over valid positions
+                                                              │
+                                              noisy_completion (with <mask>)
+                                                              │
+                       ┌──────────────────────────────────────┤
+                       │                                      │
+                       ▼                                      ▼
+   [s_prompt | noisy_completion]            [t_prompt | noisy_completion]
+                       │                                      │
+                  forward (grad)                       forward (no_grad)
+                       │                                      │
+                  student_logits                        teacher_logits
+                       │                                      │
+                       └──── JSD on MASKED positions only ────┘
 """
 
 import os
@@ -31,6 +50,7 @@ from transformers.trainer_callback import TrainerCallback
 from transformers.trainer_utils import EvalPrediction
 from transformers.utils import is_peft_available
 
+from trl.models.utils import unwrap_model_for_generation
 from trl.trainer.sft_trainer import SFTTrainer
 from trl.trainer.utils import disable_dropout_in_model, empty_cache
 from trl.experimental.gold.gold_config import GOLDConfig
@@ -67,13 +87,19 @@ class OPSDDLLMTrainer(SFTTrainer):
         preprocess_logits_for_metrics: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
         peft_config: Optional["PeftConfig"] = None,
         fixed_teacher: bool = False,
-        sampling_eps: float = 1e-3,
         mask_token_id: int | None = None,
+        sampling_eps: float = 1e-3,
         max_prompt_length: int = 1024,
         max_answer_length: int = 1024,
-        weight_loss_by_p_mask: bool = False,
         top_k_loss: int | None = None,
         jsd_token_clip: float | None = None,
+        # Generation hyperparameters for Dream's diffusion_generate (student rollout).
+        gen_max_new_tokens: int = 256,
+        gen_steps: int = 256,
+        gen_temperature: float = 0.2,
+        gen_top_p: float = 0.95,
+        gen_alg: str = "entropy",
+        gen_alg_temp: float = 0.0,
     ):
         if data_collator is None:
             data_collator = SelfDistillationDLLMDataCollator(
@@ -102,10 +128,17 @@ class OPSDDLLMTrainer(SFTTrainer):
         self.beta = args.beta
         self.temperature = getattr(args, "temperature", 1.0) or 1.0
         self.fixed_teacher = fixed_teacher
-        self.sampling_eps = sampling_eps
-        self.weight_loss_by_p_mask = weight_loss_by_p_mask
         self.top_k_loss = top_k_loss
         self.jsd_token_clip = jsd_token_clip
+        self.sampling_eps = sampling_eps
+
+        # diffusion_generate hyperparameters
+        self.gen_max_new_tokens = gen_max_new_tokens
+        self.gen_steps = gen_steps
+        self.gen_temperature = gen_temperature
+        self.gen_top_p = gen_top_p
+        self.gen_alg = gen_alg
+        self.gen_alg_temp = gen_alg_temp
 
         if mask_token_id is not None:
             self.mask_token_id = mask_token_id
@@ -113,7 +146,8 @@ class OPSDDLLMTrainer(SFTTrainer):
             self.mask_token_id = processing_class.mask_token_id
         else:
             raise ValueError(
-                "Could not infer mask_token_id from tokenizer; pass mask_token_id= explicitly."
+                "Could not infer mask_token_id from tokenizer; pass mask_token_id= explicitly. "
+                "It is required to noise the on-policy completion before the loss forward."
             )
 
         if self.fixed_teacher and peft_config is None:
@@ -166,34 +200,89 @@ class OPSDDLLMTrainer(SFTTrainer):
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
         return self._shift_logits_dream(outputs.logits)
 
-    def _sample_mask(self, batch_size: int, max_answer_len: int, answer_lengths: torch.Tensor, device):
-        """Antithetic-sampled mask pattern in answer-relative coordinates.
+    def _build_completion_mask(self, completion_ids: torch.Tensor) -> torch.Tensor:
+        """Mark valid positions in a generated completion (1=keep, 0=ignore for loss).
+
+        A completion-span position is invalid if (a) it is a pad token, or (b) it
+        sits *strictly after* the first EOS in the same sequence. The EOS itself
+        is kept so the model is rewarded for terminating at the right step.
+        """
+        eos_id = self.processing_class.eos_token_id
+        pad_id = self.processing_class.pad_token_id
+        B, _ = completion_ids.shape
+        mask = torch.ones_like(completion_ids)
+        if eos_id is not None:
+            for i in range(B):
+                eos_positions = (completion_ids[i] == eos_id).nonzero(as_tuple=False)
+                if eos_positions.numel() > 0:
+                    first = int(eos_positions[0].item())
+                    mask[i, first + 1:] = 0
+        if pad_id is not None:
+            mask[completion_ids == pad_id] = 0
+        return mask
+
+    def _generate_student_completion(self, model, prompt_ids, prompt_mask):
+        """On-policy student rollout via Dream's diffusion_generate.
+
+        Generation is non-differentiable (it samples discrete tokens), so this
+        runs under torch.no_grad. The wrapped model is unwrapped via
+        `unwrap_model_for_generation` so DeepSpeed/FSDP-sharded weights are
+        gathered for the rollout, then re-sharded on context exit.
 
         Returns:
-            mask:           bool tensor [B, max_answer_len], True at masked positions
-            p_mask_sample:  float tensor [B], the per-example mask rate (used for the
-                            optional 1/p_mask reweighting of the loss).
+            completion_ids:  [B, gen_max_new_tokens] generated tokens
+            completion_mask: [B, gen_max_new_tokens] 1 = real generated token,
+                             0 = pad / strictly-post-EOS (ignored by JSD)
         """
+        prompt_len = prompt_ids.shape[1]
+        with unwrap_model_for_generation(model, self.accelerator) as unwrapped:
+            with torch.no_grad():
+                gen_out = unwrapped.diffusion_generate(
+                    prompt_ids,
+                    attention_mask=prompt_mask,
+                    max_new_tokens=self.gen_max_new_tokens,
+                    output_history=False,
+                    return_dict_in_generate=True,
+                    steps=self.gen_steps,
+                    temperature=self.gen_temperature,
+                    top_p=self.gen_top_p,
+                    alg=self.gen_alg,
+                    alg_temp=self.gen_alg_temp,
+                )
+        completion_ids = gen_out.sequences[:, prompt_len:].contiguous()
+        completion_mask = self._build_completion_mask(completion_ids)
+        return completion_ids, completion_mask
+
+    def _sample_mask(self, valid: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Antithetic per-example mask rate, restricted to *valid* positions.
+
+        Args:
+            valid: [B, L] bool/int — 1 where the position is allowed to be masked
+                   (real generated token, i.e. completion_mask).
+
+        Returns:
+            mask:           [B, L] bool — True at randomly masked positions
+            p_mask_sample:  [B] float  — the per-example mask rate (diagnostics)
+        """
+        device = valid.device
+        valid_b = valid.bool()
+        B, L = valid_b.shape
+
         u0 = torch.rand(1, device=device, dtype=torch.float32)
-        idx = torch.arange(batch_size, device=device, dtype=torch.float32)
-        t = (u0 + idx / batch_size) % 1
+        idx = torch.arange(B, device=device, dtype=torch.float32)
+        t = (u0 + idx / B) % 1
         p_mask_sample = (1 - self.sampling_eps) * t + self.sampling_eps  # [B]
-        p_mask_grid = p_mask_sample[:, None].expand(batch_size, max_answer_len)
+        p_mask_grid = p_mask_sample[:, None].expand(B, L)
+        rand = torch.rand((B, L), device=device)
+        mask = (rand < p_mask_grid) & valid_b
 
-        rand = torch.rand((batch_size, max_answer_len), device=device)
-        random_mask = rand < p_mask_grid
-
-        positions = torch.arange(max_answer_len, device=device)[None, :].expand(batch_size, -1)
-        valid = positions < answer_lengths[:, None]
-        mask = random_mask & valid
-
-        # Guarantee at least one masked position per example so the loss is non-degenerate.
-        for i in range(batch_size):
-            ai = int(answer_lengths[i].item())
-            if ai > 0 and not bool(mask[i].any()):
-                pos = int(torch.randint(0, ai, (1,), device=device).item())
-                mask[i, pos] = True
-
+        # Guarantee at least one masked position per example with valid tokens —
+        # otherwise that row contributes zero JSD terms.
+        for i in range(B):
+            if valid_b[i].any() and not mask[i].any():
+                valid_idx = valid_b[i].nonzero(as_tuple=False).flatten()
+                j = int(torch.randint(0, valid_idx.numel(), (1,), device=device).item())
+                mask[i, int(valid_idx[j].item())] = True
         return mask, p_mask_sample
 
     @staticmethod
@@ -270,39 +359,41 @@ class OPSDDLLMTrainer(SFTTrainer):
             return per_token_jsd  # raw [N]
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        device = self.accelerator.device
-
         student_prompt_ids = inputs["student_prompt_input_ids"]
         student_prompt_mask = inputs["student_prompt_attention_mask"]
         teacher_prompt_ids = inputs["teacher_prompt_input_ids"]
         teacher_prompt_mask = inputs["teacher_prompt_attention_mask"]
-        answer_ids = inputs["answer_input_ids"]
-        answer_mask = inputs["answer_attention_mask"]
-        answer_lengths = inputs["answer_lengths"]
-
-        B, A = answer_ids.shape
-
-        # 1. Sample mask pattern in answer-relative coordinates (same for student & teacher).
-        mask_pattern, p_mask_sample = self._sample_mask(B, A, answer_lengths, device)
-
-        # 2. Build noisy answer (mask token at masked positions; pad positions stay pad).
-        noisy_answer = torch.where(
-            mask_pattern, torch.full_like(answer_ids, self.mask_token_id), answer_ids
-        )
-
-        # 3. Concat [prompt | noisy_answer]. Left-padded prompts + right-padded answer means
-        #    pad tokens only appear on the outer edges.
-        student_input_ids = torch.cat([student_prompt_ids, noisy_answer], dim=1)
-        student_attn_mask = torch.cat([student_prompt_mask, answer_mask], dim=1)
-        teacher_input_ids = torch.cat([teacher_prompt_ids, noisy_answer], dim=1)
-        teacher_attn_mask = torch.cat([teacher_prompt_mask, answer_mask], dim=1)
 
         s_prompt_len = student_prompt_ids.shape[1]
         t_prompt_len = teacher_prompt_ids.shape[1]
 
-        # 4. Student forward (with grad).
-        student_logits = self._forward(model, student_input_ids, student_attn_mask)
-        student_answer_logits = student_logits[:, s_prompt_len : s_prompt_len + A, :]  # [B, A, V]
+        # 1. Student rollout via diffusion_generate (no grad — sampling is discrete).
+        completion_ids, completion_mask = self._generate_student_completion(
+            model, student_prompt_ids, student_prompt_mask
+        )
+        _, L_c = completion_ids.shape
+
+        # 2. Sample a random mask pattern over the valid (real) completion positions
+        #    and build the noisy completion that the model will actually see.
+        mask_pattern, p_mask_sample = self._sample_mask(completion_mask)
+        noisy_completion = torch.where(
+            mask_pattern,
+            torch.full_like(completion_ids, self.mask_token_id),
+            completion_ids,
+        )
+
+        # 3. Concat [prompt | noisy_completion] for student & teacher. The attention mask
+        #    over the completion span is `completion_mask` (1 for real or masked, 0 for
+        #    pad / post-EOS).
+        student_full_ids = torch.cat([student_prompt_ids, noisy_completion], dim=1)
+        student_full_mask = torch.cat([student_prompt_mask, completion_mask], dim=1)
+        teacher_full_ids = torch.cat([teacher_prompt_ids, noisy_completion], dim=1)
+        teacher_full_mask = torch.cat([teacher_prompt_mask, completion_mask], dim=1)
+
+        # 4. Student forward (with grad). Slice out the completion span only.
+        student_logits = self._forward(model, student_full_ids, student_full_mask)
+        student_completion_logits = student_logits[:, s_prompt_len : s_prompt_len + L_c, :]
+        del student_logits
 
         # 5. Teacher forward (no grad). For fixed_teacher, run the base model w/o LoRA.
         if self.fixed_teacher and is_peft_model(model):
@@ -311,24 +402,17 @@ class OPSDDLLMTrainer(SFTTrainer):
             teacher_ctx = nullcontext()
 
         with torch.no_grad(), teacher_ctx:
-            teacher_logits = self._forward(model, teacher_input_ids, teacher_attn_mask)
-            teacher_answer_logits = teacher_logits[:, t_prompt_len : t_prompt_len + A, :].float().detach()
+            teacher_logits = self._forward(model, teacher_full_ids, teacher_full_mask)
+            teacher_completion_logits = (
+                teacher_logits[:, t_prompt_len : t_prompt_len + L_c, :].float().detach()
+            )
         del teacher_logits
         empty_cache()
 
-        # 6. Token-level KL/JSD: compute ONLY at masked positions of the answer span.
-        #    `mask_pattern` is [B, A] bool — selecting it from the [B, A, V] answer logits
-        #    yields [N, V] where N = total masked tokens in the batch (one row per masked token).
-        student_masked = student_answer_logits[mask_pattern]  # [N, V]
-        teacher_masked = teacher_answer_logits[mask_pattern]  # [N, V]
+        # 6. Token-level JSD over MASKED completion positions only.
+        student_masked = student_completion_logits[mask_pattern]  # [N, V]
+        teacher_masked = teacher_completion_logits[mask_pattern]  # [N, V]
 
-        per_token_weight = None
-        if self.weight_loss_by_p_mask:
-            # LLaDA-style 1/p_mask reweighting (broadcast per-sample p_mask to its masked tokens).
-            p_mask_grid = p_mask_sample[:, None].expand(B, A)
-            per_token_weight = (1.0 / p_mask_grid)[mask_pattern].detach().to(student_masked.dtype)
-
-        # Per-token JSD (each entry = JSD between student and teacher at one masked token).
         per_token_jsd = self.generalized_jsd_loss(
             student_masked.float(),
             teacher_masked,
@@ -336,20 +420,21 @@ class OPSDDLLMTrainer(SFTTrainer):
             temperature=self.temperature,
             top_k=self.top_k_loss,
             token_clip=self.jsd_token_clip,
-            per_token_weight=per_token_weight,
-            reduction="none",  # keep token-level vector for diagnostics
+            reduction="none",
         )  # [N]
 
         loss = per_token_jsd.mean() if per_token_jsd.numel() > 0 else per_token_jsd.sum()
 
-        # 7. Per-step diagnostics (token-level KL stats over the masked tokens).
+        # 7. Per-step diagnostics.
         with torch.no_grad():
             mode = "train" if model.training else "eval"
+            comp_lens = completion_mask.sum(dim=1).float()
+            self._metrics[mode]["completion_len_mean"].append(float(comp_lens.mean().item()))
             self._metrics[mode]["mean_p_mask"].append(float(p_mask_sample.mean().item()))
-            self._metrics[mode]["frac_masked_in_answer"].append(
-                float(mask_pattern.sum().item()) / max(1.0, float(answer_lengths.sum().item()))
-            )
             self._metrics[mode]["num_masked_tokens"].append(float(mask_pattern.sum().item()))
+            self._metrics[mode]["frac_masked_in_completion"].append(
+                float(mask_pattern.sum().item()) / max(1.0, float(completion_mask.sum().item()))
+            )
             if per_token_jsd.numel() > 0:
                 self._metrics[mode]["per_token_jsd_mean"].append(float(per_token_jsd.mean().item()))
                 self._metrics[mode]["per_token_jsd_max"].append(float(per_token_jsd.max().item()))
