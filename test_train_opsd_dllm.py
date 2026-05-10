@@ -149,6 +149,10 @@ def main():
     )
     # SFTTrainer skips re-loading the model when this is None.
     training_args.model_init_kwargs = None
+    # SelfDistillationDLLMDataCollator tokenizes instruction/response/context at
+    # collate time, so SFTTrainer's default `dataset.map(tokenize_fn)` (which
+    # expects a "text" column) must be bypassed.
+    training_args.dataset_kwargs = {"skip_prepare_dataset": True}
 
     loss_callback = LossLogger()
 

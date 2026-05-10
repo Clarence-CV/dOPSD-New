@@ -108,6 +108,14 @@ class OPSDDLLMTrainer(SFTTrainer):
                 max_answer_length=max_answer_length,
             )
 
+        # SelfDistillationDLLMDataCollator tokenizes instruction/response/context
+        # at collate time. SFTTrainer's default pre-tokenization expects a "text"
+        # column and would crash on Dolly-style data; bypass it unconditionally.
+        if args is not None:
+            dk = dict(getattr(args, "dataset_kwargs", None) or {})
+            dk.setdefault("skip_prepare_dataset", True)
+            args.dataset_kwargs = dk
+
         super().__init__(
             model,
             args=args,
