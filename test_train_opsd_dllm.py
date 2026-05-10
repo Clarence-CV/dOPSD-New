@@ -149,13 +149,16 @@ def main():
 
     peft_config = None
     if args.use_peft:
-        # Default LoRA targets work for Qwen2.5/Dream architectures.
+        # NOTE: do NOT set task_type="CAUSAL_LM" — PEFT's PeftModelForCausalLM
+        # hard-fetches `base_model.prepare_inputs_for_generation` at __init__,
+        # which Dream (a diffusion LM) does not provide. Leaving task_type=None
+        # selects the generic PeftModel wrapper, which delegates attribute access
+        # to the base model so `model.diffusion_generate(...)` still works.
         peft_config = LoraConfig(
             r=args.lora_r,
             lora_alpha=args.lora_alpha,
             lora_dropout=args.lora_dropout,
             bias="none",
-            task_type="CAUSAL_LM",
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                             "gate_proj", "up_proj", "down_proj"],
         )
