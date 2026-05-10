@@ -176,6 +176,17 @@ class OPSDDLLMTrainer(SFTTrainer):
             if column not in self._signature_columns:
                 self._signature_columns.append(column)
 
+    def _prepare_dataset(self, dataset, processing_class, args, packing, formatting_func, dataset_name):
+        """Bypass SFTTrainer's tokenization pipeline.
+
+        SFTTrainer's default `_prepare_dataset` looks for a `"text"` column and
+        tokenizes it via a chat template — but our `SelfDistillationDLLMDataCollator`
+        reads raw `instruction / response / context` fields and produces the full
+        student/teacher prompt + answer tensors itself. Returning the dataset
+        unchanged lets the collator do all the work at batch time.
+        """
+        return dataset
+
     @staticmethod
     def _shift_logits_dream(logits: torch.Tensor) -> torch.Tensor:
         """Dream-7B convention: logits[:, i] should predict the token at position i.
