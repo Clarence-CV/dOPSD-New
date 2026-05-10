@@ -9,7 +9,7 @@ deepspeed_config:
   overlap_comm: true
   contiguous_gradients: true
   gradient_clip: 1
-  gradient_accumulation_steps: 'auto'
+  gradient_accumulation_steps: 1
 distributed_type: DEEPSPEED
 downcast_bf16: 'auto'
 machine_rank: 0
