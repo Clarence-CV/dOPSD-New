@@ -20,6 +20,7 @@ import os
 
 import torch
 from datasets import load_dataset
+from peft import LoraConfig
 from transformers import AutoModel, AutoTokenizer
 from transformers.trainer_callback import TrainerCallback
 
@@ -67,7 +68,16 @@ def parse_args():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--dtype", default="bfloat16",
                    choices=["bfloat16", "float16", "float32"])
-    p.add_argument("--gradient_checkpointing", action="store_true")
+    p.add_argument("--gradient_checkpointing", action=argparse.BooleanOptionalAction,
+                   default=True, help="Use --no-gradient_checkpointing to disable.")
+    p.add_argument("--use_peft", action=argparse.BooleanOptionalAction, default=True,
+                   help="LoRA adapters (default ON). --no-use_peft = full fine-tune (needs ~100 GB).")
+    p.add_argument("--lora_r", type=int, default=16)
+    p.add_argument("--lora_alpha", type=int, default=32)
+    p.add_argument("--lora_dropout", type=float, default=0.05)
+    p.add_argument("--attn_implementation", default="sdpa",
+                   choices=["sdpa", "eager", "flash_attention_2"],
+                   help="sdpa is the safest default for Dream-7B.")
     return p.parse_args()
 
 
@@ -78,7 +88,8 @@ def main():
     dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16,
              "float32": torch.float32}[args.dtype]
 
-    print(f"\n[1/4] Loading {args.model_name_or_path} (dtype={dtype}) ...")
+    print(f"\n[1/4] Loading {args.model_name_or_path} (dtype={dtype}, "
+          f"attn={args.attn_implementation}) ...")
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name_or_path, trust_remote_code=True
     )
@@ -89,10 +100,15 @@ def main():
     print(f"      mask_token_id = {tokenizer.mask_token_id}")
 
     model = AutoModel.from_pretrained(
-        args.model_name_or_path, trust_remote_code=True, torch_dtype=dtype
+        args.model_name_or_path,
+        trust_remote_code=True,
+        torch_dtype=dtype,
+        attn_implementation=args.attn_implementation,
     )
     if args.gradient_checkpointing:
-        model.gradient_checkpointing_enable()
+        # use_reentrant=False is required when training with PEFT/LoRA so the
+        # backward pass can find adapter parameters that aren't on the recompute path.
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     print(f"      model class   = {type(model).__name__}")
 
     print(f"\n[2/4] Loading {args.num_samples} samples from {args.dataset} ...")
@@ -131,6 +147,21 @@ def main():
 
     loss_callback = LossLogger()
 
+    peft_config = None
+    if args.use_peft:
+        # Default LoRA targets work for Qwen2.5/Dream architectures.
+        peft_config = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            bias="none",
+            task_type="CAUSAL_LM",
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                            "gate_proj", "up_proj", "down_proj"],
+        )
+        print(f"      LoRA r={args.lora_r}, alpha={args.lora_alpha}, "
+              f"dropout={args.lora_dropout}")
+
     trainer = OPSDDLLMTrainer(
         model=model,
         args=training_args,
@@ -138,7 +169,7 @@ def main():
         eval_dataset=None,
         processing_class=tokenizer,
         callbacks=[loss_callback],
-        peft_config=None,
+        peft_config=peft_config,
         fixed_teacher=False,
         mask_token_id=tokenizer.mask_token_id,
         sampling_eps=args.sampling_eps,
