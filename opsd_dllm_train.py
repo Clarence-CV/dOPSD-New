@@ -222,10 +222,26 @@ if __name__ == "__main__":
     dataset = load_dataset("siyanzhao/Openthoughts_math_30k_opsd")
     train_dataset = dataset["train"]
 
+    # The OpenThoughts dataset uses `problem` / `solution`, not the Dolly-style
+    # `instruction` / `response` / `context` the collator defaults to. Build
+    # the collator explicitly so its field names match the dataset columns —
+    # this also drives `_set_signature_columns_if_needed`, so `_remove_unused_columns`
+    # will keep `problem` and `solution` instead of dropping every column.
+    from data_collator_dllm import SelfDistillationDLLMDataCollator
+    data_collator = SelfDistillationDLLMDataCollator(
+        tokenizer=tokenizer,
+        max_prompt_length=script_args.max_prompt_length,
+        max_answer_length=script_args.max_answer_length,
+        instruction_field="problem",
+        response_field="solution",
+        context_field=None,
+    )
+
     # === Trainer ==============================================================
     trainer = OPSDDLLMTrainer(
         model=model,
         args=training_args,
+        data_collator=data_collator,
         train_dataset=train_dataset,
         eval_dataset=None,
         processing_class=tokenizer,
