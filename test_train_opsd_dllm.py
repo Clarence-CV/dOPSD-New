@@ -1,8 +1,10 @@
 """Smoke-test the full OPSDDLLMTrainer training loop on 10 samples × 3 epochs.
 
-Mirrors `opsd_dllm_train.py` but tiny: a 10-row subset of Dolly-15k, 3 epochs,
-short completions (`gen_max_new_tokens=32`, `gen_steps=32`) so the run finishes
-in a few minutes on a single GPU. No wandb, no checkpoint, no LR scheduler tricks.
+Mirrors `opsd_dllm_train.py` exactly on the data path: 10 rows of the canonical
+OPSD training corpus (`siyanzhao/Openthoughts_math_30k_opsd`, `problem` /
+`solution` columns), 3 epochs, short completions (`gen_max_new_tokens=32`,
+`gen_steps=32`) so the run finishes in a few minutes on a single GPU. No wandb,
+no checkpoint, no LR scheduler tricks.
 
 Verifies:
   * The trainer constructs end-to-end with a Dream backbone.
@@ -31,6 +33,7 @@ from transformers.trainer_callback import TrainerCallback
 
 from trl.experimental.gold import GOLDConfig
 
+from data_collator_dllm import SelfDistillationDLLMDataCollator
 from opsd_dllm_trainer import OPSDDLLMTrainer
 
 
@@ -53,7 +56,15 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--model_name_or_path", default="Dream-org/Dream-v0-Instruct-7B")
     p.add_argument("--output_dir", default="./opsd_dllm_smoke_run")
-    p.add_argument("--dataset", default="databricks/databricks-dolly-15k")
+    # Default = the canonical OPSD training data: Siyan Zhao's reformat of
+    # OpenThoughts math, with `problem` / `solution` columns.
+    p.add_argument("--dataset", default="siyanzhao/Openthoughts_math_30k_opsd")
+    p.add_argument("--instruction_field", default="problem",
+                   help="Dataset column for the student's input (Openthoughts: 'problem').")
+    p.add_argument("--response_field", default="solution",
+                   help="Dataset column for the gold response (Openthoughts: 'solution').")
+    p.add_argument("--context_field", default="",
+                   help="Optional context column. Pass '' for none (Openthoughts has none).")
     p.add_argument("--num_samples", type=int, default=10)
     p.add_argument("--num_train_epochs", type=int, default=3)
     p.add_argument("--per_device_train_batch_size", type=int, default=2)
@@ -116,11 +127,21 @@ def main():
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     print(f"      model class   = {type(model).__name__}")
 
+    context_field = args.context_field or None
     print(f"\n[2/4] Loading {args.num_samples} samples from {args.dataset} ...")
+    print(f"      fields  : instruction={args.instruction_field!r}, "
+          f"response={args.response_field!r}, context={context_field!r}")
     ds = load_dataset(args.dataset, split="train")
     ds = ds.shuffle(seed=args.seed).select(range(args.num_samples))
     print(f"      columns: {ds.column_names}")
     print(f"      kept    : {len(ds)} rows")
+    # Sanity: required columns must exist after the load.
+    for required in (args.instruction_field, args.response_field):
+        if required not in ds.column_names:
+            raise ValueError(
+                f"Dataset {args.dataset!r} has no column {required!r}. "
+                f"Available columns: {ds.column_names}"
+            )
 
     print(f"\n[3/4] Configuring trainer "
           f"({args.num_train_epochs} epochs, "
@@ -174,9 +195,19 @@ def main():
         print(f"      LoRA r={args.lora_r}, alpha={args.lora_alpha}, "
               f"dropout={args.lora_dropout}")
 
+    data_collator = SelfDistillationDLLMDataCollator(
+        tokenizer=tokenizer,
+        max_prompt_length=args.max_prompt_length,
+        max_answer_length=args.max_answer_length,
+        instruction_field=args.instruction_field,
+        response_field=args.response_field,
+        context_field=context_field,
+    )
+
     trainer = OPSDDLLMTrainer(
         model=model,
         args=training_args,
+        data_collator=data_collator,
         train_dataset=ds,
         eval_dataset=None,
         processing_class=tokenizer,

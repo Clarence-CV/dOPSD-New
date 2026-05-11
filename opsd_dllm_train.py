@@ -20,10 +20,25 @@ from trl import (
 )
 from trl.experimental.gold import GOLDConfig
 
+from data_collator_dllm import SelfDistillationDLLMDataCollator
 from opsd_dllm_trainer import OPSDDLLMTrainer
 
 
 os.environ.setdefault("TRACKIO_SPACE_ID", "trl-trackio")
+
+
+# === Canonical OPSD training data =============================================
+# Siyan Zhao's reformat of the OpenThoughts math-reasoning corpus, prepared
+# specifically for OPSD: each row carries `problem` (what the student sees) and
+# `solution` (privileged step-by-step reasoning the teacher sees in its prompt).
+# Math is the right domain for the privileged-info paradigm: the gold solution
+# is high-content (sharpens the teacher's distribution) and answers are
+# verifiable. To swap in a different dataset, update both the ID and the field
+# mapping below.
+BASELINE_DATASET_ID = "siyanzhao/Openthoughts_math_30k_opsd"
+BASELINE_INSTRUCTION_FIELD = "problem"
+BASELINE_RESPONSE_FIELD = "solution"
+BASELINE_CONTEXT_FIELD = None  # math problems have no separate "context" column
 
 
 @dataclass
@@ -219,22 +234,23 @@ if __name__ == "__main__":
     training_args.model_init_kwargs = None
 
     # === Dataset ==============================================================
-    dataset = load_dataset("siyanzhao/Openthoughts_math_30k_opsd")
+    print(f"\n[opsd_dllm_train] Loading baseline dataset: {BASELINE_DATASET_ID}")
+    print(f"    instruction_field = {BASELINE_INSTRUCTION_FIELD!r}")
+    print(f"    response_field    = {BASELINE_RESPONSE_FIELD!r}")
+    print(f"    context_field     = {BASELINE_CONTEXT_FIELD!r}")
+    dataset = load_dataset(BASELINE_DATASET_ID)
     train_dataset = dataset["train"]
 
-    # The OpenThoughts dataset uses `problem` / `solution`, not the Dolly-style
-    # `instruction` / `response` / `context` the collator defaults to. Build
-    # the collator explicitly so its field names match the dataset columns —
-    # this also drives `_set_signature_columns_if_needed`, so `_remove_unused_columns`
-    # will keep `problem` and `solution` instead of dropping every column.
-    from data_collator_dllm import SelfDistillationDLLMDataCollator
+    # Build the collator with field names matching the dataset columns. This
+    # also drives `_set_signature_columns_if_needed`, so `_remove_unused_columns`
+    # keeps these columns through to collate time instead of dropping them.
     data_collator = SelfDistillationDLLMDataCollator(
         tokenizer=tokenizer,
         max_prompt_length=script_args.max_prompt_length,
         max_answer_length=script_args.max_answer_length,
-        instruction_field="problem",
-        response_field="solution",
-        context_field=None,
+        instruction_field=BASELINE_INSTRUCTION_FIELD,
+        response_field=BASELINE_RESPONSE_FIELD,
+        context_field=BASELINE_CONTEXT_FIELD,
     )
 
     # === Trainer ==============================================================
