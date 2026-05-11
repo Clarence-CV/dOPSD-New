@@ -112,6 +112,13 @@ if __name__ == "__main__":
     parser = TrlParser((CustomScriptArguments, GOLDConfig, ModelConfig))
     script_args, training_args, model_args = parser.parse_args_and_config()
 
+    # Dream is a diffusion LM, not an AR causal LM. PeftModelForCausalLM
+    # fetches `base_model.prepare_inputs_for_generation` at __init__, which
+    # Dream does not expose — leading to AttributeError. Forcing task_type=None
+    # selects PEFT's generic PeftModel wrapper instead, which delegates
+    # attribute access to the base model so `diffusion_generate` still works.
+    model_args.lora_task_type = None
+
     # === Run / output naming ==================================================
     lr_str = f"{training_args.learning_rate:.0e}".replace("e-0", "e-")
     num_processes = int(os.environ.get("WORLD_SIZE", 1))
