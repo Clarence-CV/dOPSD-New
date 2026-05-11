@@ -40,7 +40,6 @@ accelerate launch \
     --logging_steps 2 \
     --attn_implementation sdpa \
     --torch_dtype bfloat16 \
-    --bf16 \
     --max_prompt_length 1024 \
     --max_answer_length 1024 \
     --gen_max_new_tokens 256 \
