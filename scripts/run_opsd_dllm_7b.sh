@@ -30,12 +30,12 @@ accelerate launch \
     --model_name_or_path Dream-org/Dream-v0-Instruct-7B \
     --learning_rate 5e-6 \
     --max_grad_norm 0.1 \
-    --per_device_train_batch_size 1 \
+    --per_device_train_batch_size 2 \
     --gradient_accumulation_steps 1 \
     --gradient_checkpointing \
     --output_dir ./outputs/opsd_dllm/ \
     --run_config dream7b_gen256_fixteacher_forwardbeta0_clip005 \
-    --num_train_epochs 3 \
+    --num_train_epochs 30 \
     --save_steps 50 \
     --logging_steps 2 \
     --attn_implementation sdpa \
