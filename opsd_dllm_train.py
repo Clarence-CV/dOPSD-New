@@ -228,7 +228,14 @@ if __name__ == "__main__":
     model = AutoModel.from_pretrained(model_args.model_name_or_path, **model_kwargs)
 
     if training_args.gradient_checkpointing:
-        model.gradient_checkpointing_enable()
+        # use_reentrant=False is required when training with PEFT/LoRA: the
+        # default reentrant mode needs at least one input tensor with
+        # requires_grad=True, and integer input_ids / boolean attention_mask
+        # carry no grad. Without this kwarg the backward through the LoRA
+        # adapters can silently produce wrong gradients.
+        model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
 
     # SFTTrainer expects this attr; setting empty avoids it trying to re-load the model from str.
     training_args.model_init_kwargs = None
