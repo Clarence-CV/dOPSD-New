@@ -11,8 +11,8 @@ TORCH_DTYPE="${TORCH_DTYPE:-bfloat16}"
 # NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" python evaluate_aime_dllm.py \
     --base_model "$BASE_MODEL" \
     --dataset "$DATASET" \
-    --val_n 1 \
-    --batch_size 1 \
+    --val_n 12 \
+    --batch_size 8 \
     --max_new_tokens 256 \
     --diffusion_steps 256 \
     --temperature 0.2 \
