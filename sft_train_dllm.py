@@ -219,18 +219,18 @@ class SFTDLLMTrainer(Trainer):
         # by 1/t, then mean over the batch.
         flat_logits = logits[mask]                    # [N, V]
         flat_targets = input_ids[mask]                # [N]
-        per_token_ce = F.cross_entropy(flat_logits, flat_targets, reduction="none")  # [N]
+        per_token_ce = F.cross_entropy(flat_logits.float(), flat_targets, reduction="none")  # [N]
 
         B = input_ids.size(0)
         # Build [N] tensor that pairs each masked token with its example's 1/t.
         ex_idx = mask.nonzero(as_tuple=False)[:, 0]   # [N] which row each masked token came from
-        weights = (1.0 / p_mask)[ex_idx]              # [N]
+        weights = (1.0 / p_mask.float())[ex_idx].to(per_token_ce.dtype)  # [N]
 
         # Average over the (variable) per-example count, then over the batch.
         per_ex_loss = torch.zeros(B, device=input_ids.device, dtype=per_token_ce.dtype)
         per_ex_count = torch.zeros(B, device=input_ids.device, dtype=per_token_ce.dtype)
-        per_ex_loss.index_add_(0, ex_idx, per_token_ce * weights)
-        per_ex_count.index_add_(0, ex_idx, torch.ones_like(per_token_ce))
+        per_ex_loss.index_add_(0, ex_idx, (per_token_ce * weights).to(per_ex_loss.dtype))
+        per_ex_count.index_add_(0, ex_idx, torch.ones_like(per_token_ce, dtype=per_ex_count.dtype))
         per_ex_loss = per_ex_loss / per_ex_count.clamp_min(1.0)
         loss = per_ex_loss[per_ex_count > 0].mean()
 
