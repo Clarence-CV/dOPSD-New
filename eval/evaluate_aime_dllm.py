@@ -1,5 +1,7 @@
 import argparse
+import inspect
 import json
+import textwrap
 from collections import Counter
 from pathlib import Path
 
@@ -75,31 +77,91 @@ def resolve_dtype(dtype_name: str):
         raise ValueError(f"Unsupported --torch_dtype {dtype_name!r}") from exc
 
 
+def iter_diffusion_model_objects(model):
+    """Yield wrapper/base-model objects that may own Dream generation methods."""
+    seen = set()
+    stack = [model]
+    while stack:
+        obj = stack.pop()
+        if obj is None or id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        yield obj
+        stack.extend(
+            getattr(obj, attr, None)
+            for attr in ("base_model", "model")
+            if getattr(obj, attr, None) is not obj
+        )
+
+
 def patch_diffusion_sample_tokens_dtype(model) -> bool:
-    """Keep Dream's sampler confidence dtype aligned with its confidence buffer."""
-    diffusion_generate = getattr(model, "diffusion_generate", None)
-    if diffusion_generate is None:
-        return False
+    """Keep Dream's sample_tokens confidence dtype aligned with logits."""
+    patched = False
+    for obj in iter_diffusion_model_objects(model):
+        for method_name in ("diffusion_generate", "_sample"):
+            method = getattr(obj, method_name, None)
+            method_fn = getattr(method, "__func__", method)
+            generation_globals = getattr(method_fn, "__globals__", None)
+            if not generation_globals or "sample_tokens" not in generation_globals:
+                continue
 
-    diffusion_fn = getattr(diffusion_generate, "__func__", diffusion_generate)
-    generation_globals = getattr(diffusion_fn, "__globals__", None)
-    if not generation_globals or "sample_tokens" not in generation_globals:
-        return False
+            sample_tokens = generation_globals["sample_tokens"]
+            if getattr(sample_tokens, "_opsd_confidence_dtype_patch", False):
+                patched = True
+                continue
 
-    sample_tokens = generation_globals["sample_tokens"]
-    if getattr(sample_tokens, "_opsd_confidence_dtype_patch", False):
-        return False
+            def sample_tokens_dtype_safe(logits, *args, _sample_tokens=sample_tokens, **kwargs):
+                confidence, x0 = _sample_tokens(logits, *args, **kwargs)
+                if torch.is_tensor(confidence) and confidence.dtype != logits.dtype:
+                    confidence = confidence.to(dtype=logits.dtype)
+                return confidence, x0
 
-    def sample_tokens_dtype_safe(logits, *args, **kwargs):
-        confidence, x0 = sample_tokens(logits, *args, **kwargs)
-        if torch.is_tensor(confidence) and confidence.dtype != logits.dtype:
-            confidence = confidence.to(dtype=logits.dtype)
-        return confidence, x0
+            sample_tokens_dtype_safe._opsd_confidence_dtype_patch = True
+            sample_tokens_dtype_safe._opsd_original_sample_tokens = sample_tokens
+            generation_globals["sample_tokens"] = sample_tokens_dtype_safe
+            patched = True
+    return patched
 
-    sample_tokens_dtype_safe._opsd_confidence_dtype_patch = True
-    sample_tokens_dtype_safe._opsd_original_sample_tokens = sample_tokens
-    generation_globals["sample_tokens"] = sample_tokens_dtype_safe
-    return True
+
+def patch_diffusion_sample_assignment_dtype(model) -> bool:
+    """Patch Dream's _sample assignment that can mix bf16 destination and fp32 source."""
+    old = "full_confidence[mask_index] = confidence"
+    new = "full_confidence[mask_index] = confidence.to(dtype=full_confidence.dtype)"
+
+    for obj in iter_diffusion_model_objects(model):
+        sample_method = getattr(obj, "_sample", None)
+        sample_fn = getattr(sample_method, "__func__", sample_method)
+        if not callable(sample_fn):
+            continue
+        if getattr(sample_fn, "_opsd_full_confidence_dtype_patch", False):
+            return True
+
+        try:
+            source = textwrap.dedent(inspect.getsource(sample_fn))
+        except (OSError, TypeError):
+            continue
+
+        if old not in source:
+            continue
+
+        patched_source = source.replace(old, new)
+        generation_globals = sample_fn.__globals__
+        exec(compile(patched_source, inspect.getsourcefile(sample_fn) or "<opsd_dream_patch>", "exec"), generation_globals)
+        patched_fn = generation_globals[sample_fn.__name__]
+        patched_fn._opsd_full_confidence_dtype_patch = True
+        patched_fn._opsd_original_sample = sample_fn
+
+        owner = getattr(sample_method, "__self__", obj)
+        setattr(owner.__class__, sample_fn.__name__, patched_fn)
+        return True
+
+    return False
+
+
+def patch_diffusion_generation_dtype(model) -> bool:
+    patch_diffusion_sample_tokens_dtype(model)
+    sample_assignment_patched = patch_diffusion_sample_assignment_dtype(model)
+    return sample_assignment_patched
 
 
 def load_aime_dataset(dataset_name: str, num_samples: int | None = None):
@@ -191,8 +253,12 @@ def load_dllm_model(
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model = model.to(device)
     model.eval()
-    if patch_diffusion_sample_tokens_dtype(model):
-        print("Patched diffusion sampler confidence dtype handling.")
+    dtype_patch_applied = patch_diffusion_generation_dtype(model)
+    model._opsd_diffusion_dtype_patch_applied = dtype_patch_applied
+    if dtype_patch_applied:
+        print("Patched Dream diffusion generation dtype handling.")
+    else:
+        print("Warning: could not patch Dream generation internals; using fp32 logits fallback.")
 
     device = next(model.parameters()).device
     print(f"Model loaded on {device}; dtype={next(model.parameters()).dtype}")
@@ -251,6 +317,11 @@ def generate_batch(
         if generator == "diffusion":
             if not hasattr(model, "diffusion_generate"):
                 raise AttributeError("Model does not expose diffusion_generate; use --generator generate.")
+            diffusion_kwargs = {}
+            if not getattr(model, "_opsd_diffusion_dtype_patch_applied", False):
+                diffusion_kwargs["generation_logits_hook_func"] = (
+                    lambda _step, _x, logits: logits.float()
+                )
             gen_out = model.diffusion_generate(
                 encoded["input_ids"],
                 attention_mask=encoded["attention_mask"],
@@ -262,6 +333,7 @@ def generate_batch(
                 top_p=top_p,
                 alg=alg,
                 alg_temp=alg_temp,
+                **diffusion_kwargs,
             )
             sequences = gen_out.sequences
         else:
