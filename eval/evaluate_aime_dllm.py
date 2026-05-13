@@ -75,6 +75,33 @@ def resolve_dtype(dtype_name: str):
         raise ValueError(f"Unsupported --torch_dtype {dtype_name!r}") from exc
 
 
+def patch_diffusion_sample_tokens_dtype(model) -> bool:
+    """Keep Dream's sampler confidence dtype aligned with its confidence buffer."""
+    diffusion_generate = getattr(model, "diffusion_generate", None)
+    if diffusion_generate is None:
+        return False
+
+    diffusion_fn = getattr(diffusion_generate, "__func__", diffusion_generate)
+    generation_globals = getattr(diffusion_fn, "__globals__", None)
+    if not generation_globals or "sample_tokens" not in generation_globals:
+        return False
+
+    sample_tokens = generation_globals["sample_tokens"]
+    if getattr(sample_tokens, "_opsd_confidence_dtype_patch", False):
+        return False
+
+    def sample_tokens_dtype_safe(logits, *args, **kwargs):
+        confidence, x0 = sample_tokens(logits, *args, **kwargs)
+        if torch.is_tensor(confidence) and confidence.dtype != logits.dtype:
+            confidence = confidence.to(dtype=logits.dtype)
+        return confidence, x0
+
+    sample_tokens_dtype_safe._opsd_confidence_dtype_patch = True
+    sample_tokens_dtype_safe._opsd_original_sample_tokens = sample_tokens
+    generation_globals["sample_tokens"] = sample_tokens_dtype_safe
+    return True
+
+
 def load_aime_dataset(dataset_name: str, num_samples: int | None = None):
     dataset_key = dataset_name.lower()
     if dataset_key == "aime24":
@@ -164,6 +191,8 @@ def load_dllm_model(
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model = model.to(device)
     model.eval()
+    if patch_diffusion_sample_tokens_dtype(model):
+        print("Patched diffusion sampler confidence dtype handling.")
 
     device = next(model.parameters()).device
     print(f"Model loaded on {device}; dtype={next(model.parameters()).dtype}")
@@ -211,8 +240,11 @@ def generate_batch(
         add_special_tokens=False,
     ).to(device)
     prompt_len = encoded["input_ids"].shape[1]
+    model_dtype = next(model.parameters()).dtype
+    use_autocast = device.type == "cuda" and model_dtype in (torch.bfloat16, torch.float16)
+    autocast_dtype = model_dtype if use_autocast else torch.bfloat16
 
-    with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
+    with torch.amp.autocast("cuda", dtype=autocast_dtype, enabled=use_autocast):
         if generator == "auto":
             generator = "diffusion" if hasattr(model, "diffusion_generate") else "generate"
 

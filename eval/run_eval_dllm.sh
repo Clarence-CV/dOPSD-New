@@ -5,6 +5,7 @@ CHECKPOINT_DIR="${CHECKPOINT_DIR:-}"
 DATASET="${DATASET:-aime24}"
 CUDA_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,3,4}"
 DEVICE_MAP="${DEVICE_MAP:-auto}"
+TORCH_DTYPE="${TORCH_DTYPE:-bfloat16}"
 
 # Base dLLM evaluation on AIME.
 NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" python evaluate_aime_dllm.py \
@@ -12,12 +13,13 @@ NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" python evaluate_aime_dll
     --dataset "$DATASET" \
     --val_n 1 \
     --batch_size 1 \
-    --max_new_tokens 2048 \
-    --diffusion_steps 2048 \
+    --max_new_tokens 256 \
+    --diffusion_steps 256 \
     --temperature 0.2 \
     --top_p 0.95 \
     --alg entropy \
     --alg_temp 0.0 \
+    --torch_dtype "$TORCH_DTYPE" \
     --attn_implementation sdpa \
     --device_map "$DEVICE_MAP"
 wait
@@ -30,12 +32,13 @@ if [ -n "$CHECKPOINT_DIR" ]; then
         --dataset "$DATASET" \
         --val_n 1 \
         --batch_size 1 \
-        --max_new_tokens 2048 \
-        --diffusion_steps 2048 \
+        --max_new_tokens 256 \
+        --diffusion_steps 256 \
         --temperature 0.2 \
         --top_p 0.95 \
         --alg entropy \
         --alg_temp 0.0 \
+        --torch_dtype "$TORCH_DTYPE" \
         --attn_implementation sdpa \
         --device_map "$DEVICE_MAP"
     wait
