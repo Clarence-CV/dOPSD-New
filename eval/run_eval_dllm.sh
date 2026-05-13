@@ -3,7 +3,7 @@
 BASE_MODEL="${BASE_MODEL:-Dream-org/Dream-v0-Instruct-7B}"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-}"
 DATASET="${DATASET:-aime24}"
-CUDA_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,3,4}"
+CUDA_DEVICES="${CUDA_VISIBLE_DEVICES:-2}"
 DEVICE_MAP="${DEVICE_MAP:-auto}"
 TORCH_DTYPE="${TORCH_DTYPE:-bfloat16}"
 
@@ -12,7 +12,7 @@ NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" python evaluate_aime_dll
     --base_model "$BASE_MODEL" \
     --dataset "$DATASET" \
     --val_n 12 \
-    --batch_size 8 \
+    --batch_size 2 \
     --max_new_tokens 256 \
     --diffusion_steps 256 \
     --temperature 0.2 \
@@ -31,7 +31,7 @@ NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" python evaluate_aime_dll
     --checkpoint_dir /home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm/dream7b_gen256_fixteacher_forwardbeta0_clip005/checkpoint-100 \
     --dataset "$DATASET" \
     --val_n 12 \
-    --batch_size 8 \
+    --batch_size 2 \
     --max_new_tokens 256 \
     --diffusion_steps 256 \
     --temperature 0.2 \
