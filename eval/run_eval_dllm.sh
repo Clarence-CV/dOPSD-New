@@ -8,7 +8,7 @@ DEVICE_MAP="${DEVICE_MAP:-auto}"
 TORCH_DTYPE="${TORCH_DTYPE:-bfloat16}"
 
 # Base dLLM evaluation on AIME.
-# NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" python evaluate_aime_dllm.py \
+NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" python evaluate_aime_dllm.py \
     --base_model "$BASE_MODEL" \
     --dataset "$DATASET" \
     --val_n 12 \
