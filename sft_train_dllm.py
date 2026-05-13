@@ -39,6 +39,26 @@ os.environ.setdefault("TRACKIO_SPACE_ID", "trl-trackio")
 
 @dataclass
 class DLLMScriptArguments(ScriptArguments):
+    run_config: str = field(
+        default=None,
+        metadata={
+            "help": "Optional run name suffix/config. Also appended to output_dir when set."
+        },
+    )
+    wandb_entity: str = field(
+        default=None,
+        metadata={
+            "help": "WandB entity/user/team. Defaults to WANDB_ENTITY; leave unset for the logged-in user."
+        },
+    )
+    wandb_project: str = field(
+        default=None,
+        metadata={"help": "WandB project. Defaults to WANDB_PROJECT or 'sft-dllm'."},
+    )
+    disable_wandb: bool = field(
+        default=False,
+        metadata={"help": "Disable WandB logging even if wandb is installed/logged in."},
+    )
     mask_token_id: int = field(
         default=-1,
         metadata={"help": "Mask token id; -1 = use tokenizer.mask_token_id."},
@@ -232,6 +252,36 @@ def _resolve_dtype(model_args):
     return dtype_attr
 
 
+def init_wandb_or_disable(script_args, training_args, run_name: str, config: dict):
+    if os.environ.get("LOCAL_RANK", "0") != "0":
+        return
+
+    if script_args.disable_wandb or os.environ.get("WANDB_MODE") == "disabled":
+        os.environ["WANDB_MODE"] = "disabled"
+        training_args.report_to = []
+        print("[sft_train_dllm] WandB disabled.")
+        return
+
+    entity = script_args.wandb_entity or os.environ.get("WANDB_ENTITY") or None
+    project = script_args.wandb_project or os.environ.get("WANDB_PROJECT") or "sft-dllm"
+
+    try:
+        wandb.init(
+            entity=entity,
+            project=project,
+            name=run_name,
+            config=config,
+        )
+        training_args.run_name = run_name
+    except Exception as exc:
+        os.environ["WANDB_MODE"] = "disabled"
+        training_args.report_to = []
+        print(
+            "[sft_train_dllm] Warning: WandB init failed; continuing with WandB disabled. "
+            f"Reason: {type(exc).__name__}: {exc}"
+        )
+
+
 if __name__ == "__main__":
     parser = TrlParser((DLLMScriptArguments, SFTConfig, ModelConfig))
     script_args, training_args, model_args = parser.parse_args_and_config()
@@ -252,35 +302,33 @@ if __name__ == "__main__":
         * num_processes
     )
     full_wandb_run_name = (
-        f"SFT_DLLM_{model_name}_lr{lr_str}_bs{effective_batch_size}_ep{training_args.num_train_epochs}"
+        script_args.run_config
+        or f"SFT_DLLM_{model_name}_lr{lr_str}_bs{effective_batch_size}_ep{training_args.num_train_epochs}"
     )
+    if script_args.run_config and not training_args.output_dir.endswith(script_args.run_config):
+        training_args.output_dir = str(Path(training_args.output_dir) / script_args.run_config)
 
     ################
     # WandB Initialization
     ################
-    if os.environ.get("LOCAL_RANK", "0") == "0":
-        wandb.init(
-            entity="zsyucla",
-            project="sft-math-reasoning",
-            name=full_wandb_run_name,
-            config={
-                "model_name": model_args.model_name_or_path,
-                "learning_rate": training_args.learning_rate,
-                "per_device_train_batch_size": training_args.per_device_train_batch_size,
-                "gradient_accumulation_steps": training_args.gradient_accumulation_steps,
-                "effective_batch_size": effective_batch_size,
-                "num_train_epochs": training_args.num_train_epochs,
-                "max_prompt_length": script_args.max_prompt_length,
-                "max_answer_length": script_args.max_answer_length,
-                "sampling_eps": script_args.sampling_eps,
-                "use_peft": model_args.use_peft,
-                "lora_r": model_args.lora_r if model_args.use_peft else None,
-                "lora_alpha": model_args.lora_alpha if model_args.use_peft else None,
-                "gradient_checkpointing": training_args.gradient_checkpointing,
-                "num_processes": num_processes,
-                "trainer": "SFTDLLMTrainer",
-            },
-        )
+    wandb_config = {
+        "model_name": model_args.model_name_or_path,
+        "learning_rate": training_args.learning_rate,
+        "per_device_train_batch_size": training_args.per_device_train_batch_size,
+        "gradient_accumulation_steps": training_args.gradient_accumulation_steps,
+        "effective_batch_size": effective_batch_size,
+        "num_train_epochs": training_args.num_train_epochs,
+        "max_prompt_length": script_args.max_prompt_length,
+        "max_answer_length": script_args.max_answer_length,
+        "sampling_eps": script_args.sampling_eps,
+        "use_peft": model_args.use_peft,
+        "lora_r": model_args.lora_r if model_args.use_peft else None,
+        "lora_alpha": model_args.lora_alpha if model_args.use_peft else None,
+        "gradient_checkpointing": training_args.gradient_checkpointing,
+        "num_processes": num_processes,
+        "trainer": "SFTDLLMTrainer",
+    }
+    init_wandb_or_disable(script_args, training_args, full_wandb_run_name, wandb_config)
 
     ################
     # Tokenizer
@@ -308,14 +356,18 @@ if __name__ == "__main__":
         revision=model_args.model_revision,
         trust_remote_code=True,
         attn_implementation=model_args.attn_implementation or "flash_attention_2",
-        torch_dtype=model_dtype,
+        dtype=model_dtype,
     )
     quantization_config = get_quantization_config(model_args)
     if quantization_config is not None:
         model_kwargs["device_map"] = get_kbit_device_map()
         model_kwargs["quantization_config"] = quantization_config
 
-    model = AutoModel.from_pretrained(model_args.model_name_or_path, **model_kwargs)
+    try:
+        model = AutoModel.from_pretrained(model_args.model_name_or_path, **model_kwargs)
+    except TypeError:
+        model_kwargs["torch_dtype"] = model_kwargs.pop("dtype")
+        model = AutoModel.from_pretrained(model_args.model_name_or_path, **model_kwargs)
 
     if training_args.gradient_checkpointing:
         # use_reentrant=False required for PEFT/LoRA — see opsd_dllm_train.py for context.

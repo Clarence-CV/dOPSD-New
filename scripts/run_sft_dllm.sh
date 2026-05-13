@@ -16,7 +16,18 @@ cd "$(dirname "$0")/.."   # cd into OPSD/
 
 export TRL_EXPERIMENTAL_SILENCE=1
 export TOKENIZERS_PARALLELISM=false
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,3,4}
+export WANDB_PROJECT=${WANDB_PROJECT:-sft-dllm}
+export WANDB_ENTITY=${WANDB_ENTITY:-}
+export WANDB_MODE=${WANDB_MODE:-online}
+
+WANDB_ARGS=(--wandb_project "$WANDB_PROJECT")
+if [[ -n "$WANDB_ENTITY" ]]; then
+    WANDB_ARGS+=(--wandb_entity "$WANDB_ENTITY")
+fi
+if [[ "$WANDB_MODE" == "disabled" ]]; then
+    WANDB_ARGS+=(--disable_wandb)
+fi
 
 accelerate launch \
     --config_file accelerate.yaml \
@@ -30,6 +41,7 @@ accelerate launch \
     --per_device_train_batch_size 2 \
     --gradient_accumulation_steps 1 \
     --output_dir ./outputs/sft_dllm/dream7b-4epochs-30k \
+    --run_config sft_dllm_dream7b_4epochs_30k \
     --num_train_epochs 4 \
     --gradient_checkpointing \
     --attn_implementation sdpa \
@@ -43,4 +55,5 @@ accelerate launch \
     --lora_dropout 0.05 \
     --lora_target_modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj \
     --logging_steps 5 \
-    --save_steps 20
+    --save_steps 20 \
+    "${WANDB_ARGS[@]}"
