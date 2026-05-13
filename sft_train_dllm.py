@@ -330,6 +330,7 @@ if __name__ == "__main__":
         "trainer": "SFTDLLMTrainer",
     }
     init_wandb_or_disable(script_args, training_args, full_wandb_run_name, wandb_config)
+    training_args.remove_unused_columns = False
 
     ################
     # Tokenizer
