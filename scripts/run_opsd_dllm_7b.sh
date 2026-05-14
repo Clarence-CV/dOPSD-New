@@ -48,7 +48,7 @@ accelerate launch \
     --gen_top_p 0.95 \
     --gen_alg entropy \
     --gen_alg_temp 0.0 \
-    --beta 0 \
+    --beta 1 \
     --temperature 1.0 \
     --sampling_eps 1e-3 \
     --use_peft \
