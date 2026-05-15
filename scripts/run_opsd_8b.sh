@@ -1,6 +1,6 @@
 accelerate launch \
     --config_file accelerate.yaml \
-    --num_processes 8 \
+    --num_processes 4 \
     --gradient_accumulation_steps 2 \
     --main_process_port 12949 \
     opsd_train.py \
