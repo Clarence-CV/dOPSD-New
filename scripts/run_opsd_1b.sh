@@ -16,7 +16,7 @@ accelerate launch \
     --max_completion_length 1024 \
     --save_steps 25 \
     --logging_steps 2 \
-    --attn_implementation spda \
+    --attn_implementation sdpa \
     --torch_dtype bfloat16 \
     --max_length 20000 \
     --beta 0 \
