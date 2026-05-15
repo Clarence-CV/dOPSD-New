@@ -1,6 +1,6 @@
 #!/bin/bash
 
-BASE_MODEL="/data0/shared/Qwen3-1.7B"
+BASE_MODEL="Qwen/Qwen3-1.7B"
 
 # evaluate base model performance
 NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES=0,1,2,3 python evaluate_math.py \
@@ -18,6 +18,6 @@ NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES=0,1,2,3 python evaluate_math.py \
     --val_n 12 \
     --temperature 1.0 \
     --tensor_parallel_size 4 \
-    --checkpoint_dir /data1/siyanz/opsd/qwen31b_gen2048_fixteacher_temp11_lr2e4/checkpoint-200
+    --checkpoint_dir ../outputs/opsd_baseline_1b/checkpoint-100
 wait
     
