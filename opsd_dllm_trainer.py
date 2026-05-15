@@ -108,9 +108,9 @@ class OPSDDLLMTrainer(SFTTrainer):
                 max_answer_length=max_answer_length,
             )
 
-        # SelfDistillationDLLMDataCollator tokenizes instruction/response/context
-        # at collate time. SFTTrainer's default pre-tokenization expects a "text"
-        # column and would crash on Dolly-style data; bypass it unconditionally.
+        # SelfDistillationDLLMDataCollator tokenizes problem/solution at collate
+        # time. SFTTrainer's default pre-tokenization expects a "text" column
+        # and would crash on this dataset schema; bypass it unconditionally.
         if args is not None:
             dk = dict(getattr(args, "dataset_kwargs", None) or {})
             dk.setdefault("skip_prepare_dataset", True)
@@ -169,12 +169,18 @@ class OPSDDLLMTrainer(SFTTrainer):
 
         self._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
 
+        # Buffer for periodic JSON dumps of (prompt, completion) pairs so we can
+        # eyeball what the student is actually generating during training.
+        # Aligned to `save_steps` so the dump cadence tracks checkpointing.
+        self._generation_outputs_buffer: list[dict] = []
+        self._generation_save_frequency = int(getattr(args, "save_steps", 50) or 50)
+
     def _set_signature_columns_if_needed(self):
         super()._set_signature_columns_if_needed()
         # Keep whichever dataset columns the collator reads from.
         collator = self.data_collator
         keep = []
-        for attr in ("instruction_field", "response_field", "context_field"):
+        for attr in ("problem_field", "solution_field"):
             val = getattr(collator, attr, None)
             if val:
                 keep.append(val)
@@ -209,23 +215,22 @@ class OPSDDLLMTrainer(SFTTrainer):
         return self._shift_logits_dream(outputs.logits)
 
     def _build_completion_mask(self, completion_ids: torch.Tensor) -> torch.Tensor:
-        """Mark valid positions in a generated completion (1=keep, 0=ignore for loss).
+        """Mark valid positions in a Dream completion (1=keep, 0=ignore).
 
-        A completion-span position is invalid if (a) it is a pad token, or (b) it
-        sits *strictly after* the first EOS in the same sequence. The EOS itself
-        is kept so the model is rewarded for terminating at the right step.
+        Dream is a fixed-length bidirectional decoder: every position in the
+        completion window is an intentional model output (including any
+        trailing EOS run used to fill out the requested length). We therefore
+        do NOT apply AR-style "everything after first EOS is invalid" logic,
+        which can zero out legitimate content if Dream emits EOS mid-sequence.
+
+        Only positions holding an explicit pad token *distinct* from EOS are
+        masked out. When pad is aliased to EOS (the typical setup), every
+        completion position is valid.
         """
-        eos_id = self.processing_class.eos_token_id
-        pad_id = self.processing_class.pad_token_id
-        B, _ = completion_ids.shape
         mask = torch.ones_like(completion_ids)
-        if eos_id is not None:
-            for i in range(B):
-                eos_positions = (completion_ids[i] == eos_id).nonzero(as_tuple=False)
-                if eos_positions.numel() > 0:
-                    first = int(eos_positions[0].item())
-                    mask[i, first + 1:] = 0
-        if pad_id is not None:
+        pad_id = self.processing_class.pad_token_id
+        eos_id = self.processing_class.eos_token_id
+        if pad_id is not None and pad_id != eos_id:
             mask[completion_ids == pad_id] = 0
         return mask
 
@@ -376,13 +381,32 @@ class OPSDDLLMTrainer(SFTTrainer):
         t_prompt_len = teacher_prompt_ids.shape[1]
 
         # 1. Student rollout via diffusion_generate (no grad — sampling is discrete).
+        #    Dream's last-step force-unmask guarantees `completion_ids` is fully
+        #    concrete when `gen_steps >= gen_max_new_tokens` (no residual <mask>),
+        #    so what follows is a clean MDM training step on a concrete sequence.
         completion_ids, completion_mask = self._generate_student_completion(
             model, student_prompt_ids, student_prompt_mask
         )
         _, L_c = completion_ids.shape
 
-        # 2. Sample a random mask pattern over the valid (real) completion positions
-        #    and build the noisy completion that the model will actually see.
+        # 1b. Buffer (prompt, completion) for the periodic JSON dump. Decode the
+        #     completion WITHOUT stripping special tokens so any oddities
+        #     (mid-sequence EOS, leftover <mask>) are visible offline.
+        if self.accelerator.is_main_process:
+            prompt_texts = self.processing_class.batch_decode(
+                student_prompt_ids, skip_special_tokens=True
+            )
+            completion_texts = self.processing_class.batch_decode(
+                completion_ids, skip_special_tokens=False
+            )
+            step_now = int(self.state.global_step)
+            for p_text, c_text in zip(prompt_texts, completion_texts):
+                self._generation_outputs_buffer.append(
+                    {"step": step_now, "prompt": p_text, "completion": c_text}
+                )
+
+        # 2. Sample a random mask pattern over the valid completion positions
+        #    and build the noisy completion both student and teacher will see.
         mask_pattern, p_mask_sample = self._sample_mask(completion_mask)
         noisy_completion = torch.where(
             mask_pattern,
@@ -447,6 +471,16 @@ class OPSDDLLMTrainer(SFTTrainer):
                 self._metrics[mode]["per_token_jsd_mean"].append(float(per_token_jsd.mean().item()))
                 self._metrics[mode]["per_token_jsd_max"].append(float(per_token_jsd.max().item()))
 
+        # 8. Periodic generation dump (only flush when gradients have synced this
+        #    step, so we don't write the same file multiple times under gradient
+        #    accumulation).
+        if (
+            self.state.global_step > 0
+            and self.state.global_step % self._generation_save_frequency == 0
+            and getattr(self.accelerator, "sync_gradients", True)
+        ):
+            self._save_generation_outputs(int(self.state.global_step))
+
         if return_outputs:
             class _Out:
                 pass
@@ -455,6 +489,43 @@ class OPSDDLLMTrainer(SFTTrainer):
             o.loss = loss
             return loss, o
         return loss
+
+    def _save_generation_outputs(self, step: int):
+        """Flush the (prompt, completion) buffer to a JSON file under output_dir/generations.
+
+        Decodes were done with `skip_special_tokens=False` on the completion
+        side so any residual <mask> tokens or unusual EOS placement are visible
+        offline — exactly the kinds of issues that don't show up in scalar
+        metrics like `loss` or `per_token_jsd_mean`.
+        """
+        if not self.accelerator.is_main_process:
+            return
+        if len(self._generation_outputs_buffer) == 0:
+            return
+
+        import json
+        from pathlib import Path
+
+        generations_dir = Path(self.args.output_dir) / "generations"
+        generations_dir.mkdir(parents=True, exist_ok=True)
+        output_file = generations_dir / f"generations_step_{step}.json"
+
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "step": step,
+                    "num_samples": len(self._generation_outputs_buffer),
+                    "generations": self._generation_outputs_buffer,
+                },
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
+
+        print(
+            f"\n[OPSD-DLLM] Saved {len(self._generation_outputs_buffer)} generations -> {output_file}\n"
+        )
+        self._generation_outputs_buffer.clear()
 
     def log(self, logs: dict[str, float], start_time: float | None = None) -> None:
         mode = "train" if self.model.training else "eval"

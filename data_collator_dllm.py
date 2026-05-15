@@ -4,20 +4,22 @@ import torch
 class SelfDistillationDLLMDataCollator:
     """Data collator for dLLM (diffusion LM) self-distillation, e.g. Dream-7B.
 
-    For each (problem, solution) example we build:
-      - student prompt: chat template containing only the problem.
-      - teacher prompt: chat template containing the problem AND the solution
-        as a privileged reference ("here is a reference solution: ...").
-      - answer ids:     tokenized solution; the trainer randomly masks tokens
-        inside this span so both student and teacher predict the same masked
-        positions.
+    Processes math-style (problem, solution) datasets. For each example:
+      - student prompt: chat template containing only the problem with the
+        "reason step by step, \\boxed{}" instruction.
+      - teacher prompt: chat template containing the problem AND the reference
+        solution, followed by a transition prompt that asks the teacher to
+        rederive the answer in its own words.
+      - answer ids:     tokenized reference solution; the trainer randomly
+        masks tokens inside this span so both student and teacher predict the
+        same masked positions.
 
     Padding strategy: prompts are LEFT-padded to the per-batch maximum prompt
     length and the answer is RIGHT-padded to the per-batch maximum answer
-    length. When the trainer concatenates `[prompt | answer]`, this places
-    pad tokens only on the outer edges of the full sequence (never between
-    prompt and answer), which is important because the model's bidirectional
-    attention treats every position equally.
+    length. When the trainer concatenates `[prompt | answer]`, pad tokens sit
+    only on the outer edges of the full sequence (never between prompt and
+    answer), which matters because the model's bidirectional attention treats
+    every position equally.
     """
 
     def __init__(
@@ -25,23 +27,25 @@ class SelfDistillationDLLMDataCollator:
         tokenizer,
         max_prompt_length=1024,
         max_answer_length=1024,
-        instruction_field: str = "instruction",
-        response_field: str = "response",
-        context_field: str | None = "context",
+        problem_field: str = "problem",
+        solution_field: str = "solution",
     ):
-        """
-        Args:
-            instruction_field: dataset column for the user instruction (Dolly: "instruction").
-            response_field:    dataset column for the gold response (Dolly: "response").
-            context_field:     optional dataset column for supporting context (Dolly: "context";
-                               often empty string for open-ended tasks). Pass None if absent.
-        """
         self.tokenizer = tokenizer
         self.max_prompt_length = max_prompt_length
         self.max_answer_length = max_answer_length
-        self.instruction_field = instruction_field
-        self.response_field = response_field
-        self.context_field = context_field
+        self.problem_field = problem_field
+        self.solution_field = solution_field
+
+        self.transition_prompt = (
+            "\n\nAfter reading the reference solution above, make sure you truly understand "
+            "the reasoning behind each step — do not copy or paraphrase it. Now, using your "
+            "own words and independent reasoning, derive the same final answer to the problem above. "
+            "Think step by step, explore different approaches, and don't be afraid to backtrack "
+            "or reconsider if something doesn't work out:\n"
+        )
+        self.answer_instruction = (
+            "Please reason step by step, and put your final answer within \\boxed{}."
+        )
 
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -50,31 +54,30 @@ class SelfDistillationDLLMDataCollator:
             f"[DLLMCollator] pad_id={self.tokenizer.pad_token_id}, "
             f"mask_id={getattr(self.tokenizer, 'mask_token_id', None)}, "
             f"max_prompt_len={self.max_prompt_length}, max_answer_len={self.max_answer_length}, "
-            f"fields=(instr={self.instruction_field}, resp={self.response_field}, ctx={self.context_field})"
+            f"fields=(problem={self.problem_field}, solution={self.solution_field})"
         )
 
-    def _build_prompts(self, instruction: str, response: str, context: str | None = None):
-        ctx_block = f"\n\nContext:\n{context.strip()}" if context and context.strip() else ""
-
-        student_user = f"{instruction.strip()}{ctx_block}"
-        teacher_user = (
-            f"{instruction.strip()}{ctx_block}\n\n"
-            "Here is a reference response to this instruction:\n"
-            f"=== Reference Response Begin ===\n{response.strip()}\n=== Reference Response End ===\n\n"
-            "Using the reference response above as guidance, write your own response in your own words."
-        )
-
-        student_prompt = self.tokenizer.apply_chat_template(
-            [{"role": "user", "content": student_user}],
+    def _build_student_prompt(self, problem: str) -> str:
+        user_msg = f"Problem: {problem}\n\n{self.answer_instruction}"
+        return self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": user_msg}],
             tokenize=False,
             add_generation_prompt=True,
         )
-        teacher_prompt = self.tokenizer.apply_chat_template(
-            [{"role": "user", "content": teacher_user}],
+
+    def _build_teacher_prompt(self, problem: str, solution: str) -> str:
+        user_msg = (
+            f"Problem: {problem}\n\n"
+            f"Here is a reference solution to this problem:\n"
+            f"=== Reference Solution Begin ===\n{solution}\n=== Reference Solution End ===\n"
+            f"{self.transition_prompt}\n"
+            f"{self.answer_instruction}"
+        )
+        return self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": user_msg}],
             tokenize=False,
             add_generation_prompt=True,
         )
-        return student_prompt, teacher_prompt
 
     def _left_pad(self, seqs, max_len, pad_id):
         ids, mask = [], []
@@ -92,38 +95,29 @@ class SelfDistillationDLLMDataCollator:
             mask.append([1] * len(s) + [0] * pad_n)
         return torch.tensor(ids, dtype=torch.long), torch.tensor(mask, dtype=torch.long)
 
-    def __call__(self, features):
-        student_prompts, teacher_prompts, answers = [], [], []
-        for feat in features:
-            instruction = feat[self.instruction_field]
-            response = feat[self.response_field]
-            context = feat.get(self.context_field) if self.context_field else None
-            sp, tp = self._build_prompts(instruction, response, context)
-            student_prompts.append(sp)
-            teacher_prompts.append(tp)
-            answers.append(response)
+    def _tokenize(self, texts, max_length):
+        return self.tokenizer(
+            texts,
+            padding=False,
+            truncation=True,
+            max_length=max_length,
+            add_special_tokens=False,
+        )["input_ids"]
 
-        s_ids = self.tokenizer(
-            student_prompts,
-            padding=False,
-            truncation=True,
-            max_length=self.max_prompt_length,
-            add_special_tokens=False,
-        )["input_ids"]
-        t_ids = self.tokenizer(
-            teacher_prompts,
-            padding=False,
-            truncation=True,
-            max_length=self.max_prompt_length,
-            add_special_tokens=False,
-        )["input_ids"]
-        a_ids = self.tokenizer(
-            answers,
-            padding=False,
-            truncation=True,
-            max_length=self.max_answer_length,
-            add_special_tokens=False,
-        )["input_ids"]
+    def __call__(self, features):
+        problems, solutions = [], []
+        for feat in features:
+            problems.append(feat[self.problem_field])
+            solutions.append(feat[self.solution_field])
+
+        student_prompts = [self._build_student_prompt(p) for p in problems]
+        teacher_prompts = [
+            self._build_teacher_prompt(p, s) for p, s in zip(problems, solutions)
+        ]
+
+        s_ids = self._tokenize(student_prompts, self.max_prompt_length)
+        t_ids = self._tokenize(teacher_prompts, self.max_prompt_length)
+        a_ids = self._tokenize(solutions, self.max_answer_length)
 
         pad_id = self.tokenizer.pad_token_id
         max_s = max(len(x) for x in s_ids)

@@ -36,9 +36,8 @@ os.environ.setdefault("TRACKIO_SPACE_ID", "trl-trackio")
 # verifiable. To swap in a different dataset, update both the ID and the field
 # mapping below.
 BASELINE_DATASET_ID = "siyanzhao/Openthoughts_math_30k_opsd"
-BASELINE_INSTRUCTION_FIELD = "problem"
-BASELINE_RESPONSE_FIELD = "solution"
-BASELINE_CONTEXT_FIELD = None  # math problems have no separate "context" column
+BASELINE_PROBLEM_FIELD = "problem"
+BASELINE_SOLUTION_FIELD = "solution"
 
 
 @dataclass
@@ -242,9 +241,8 @@ if __name__ == "__main__":
 
     # === Dataset ==============================================================
     print(f"\n[opsd_dllm_train] Loading baseline dataset: {BASELINE_DATASET_ID}")
-    print(f"    instruction_field = {BASELINE_INSTRUCTION_FIELD!r}")
-    print(f"    response_field    = {BASELINE_RESPONSE_FIELD!r}")
-    print(f"    context_field     = {BASELINE_CONTEXT_FIELD!r}")
+    print(f"    problem_field  = {BASELINE_PROBLEM_FIELD!r}")
+    print(f"    solution_field = {BASELINE_SOLUTION_FIELD!r}")
     dataset = load_dataset(BASELINE_DATASET_ID)
     train_dataset = dataset["train"]
 
@@ -255,9 +253,8 @@ if __name__ == "__main__":
         tokenizer=tokenizer,
         max_prompt_length=script_args.max_prompt_length,
         max_answer_length=script_args.max_answer_length,
-        instruction_field=BASELINE_INSTRUCTION_FIELD,
-        response_field=BASELINE_RESPONSE_FIELD,
-        context_field=BASELINE_CONTEXT_FIELD,
+        problem_field=BASELINE_PROBLEM_FIELD,
+        solution_field=BASELINE_SOLUTION_FIELD,
     )
 
     # === Trainer ==============================================================
