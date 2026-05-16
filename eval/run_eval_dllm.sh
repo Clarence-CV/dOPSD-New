@@ -3,7 +3,7 @@
 BASE_MODEL="${BASE_MODEL:-Dream-org/Dream-v0-Instruct-7B}"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-}"
 DATASET="${DATASET:-aime24}"
-CUDA_DEVICES="${CUDA_VISIBLE_DEVICES:-4}"
+CUDA_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 DEVICE_MAP="${DEVICE_MAP:-auto}"
 TORCH_DTYPE="${TORCH_DTYPE:-bfloat16}"
 
@@ -32,8 +32,8 @@ NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" python evaluate_aime_dll
     --dataset "$DATASET" \
     --val_n 12 \
     --batch_size 2 \
-    --max_new_tokens 4096 \
-    --diffusion_steps 4096 \
+    --max_new_tokens 2048 \
+    --diffusion_steps 512 \
     --temperature 0.2 \
     --top_p 0.95 \
     --alg entropy \
