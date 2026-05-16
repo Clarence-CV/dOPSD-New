@@ -32,8 +32,8 @@ NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" python evaluate_aime_dll
     --dataset "$DATASET" \
     --val_n 12 \
     --batch_size 2 \
-    --max_new_tokens 256 \
-    --diffusion_steps 256 \
+    --max_new_tokens 4096 \
+    --diffusion_steps 4096 \
     --temperature 0.2 \
     --top_p 0.95 \
     --alg entropy \
