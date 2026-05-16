@@ -28,7 +28,7 @@ TORCH_DTYPE="${TORCH_DTYPE:-bfloat16}"
 #if [ -n "$CHECKPOINT_DIR" ]; then
 NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" python evaluate_aime_dllm.py \
     --base_model "$BASE_MODEL" \
-    --checkpoint_dir /home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm/dream7b_gen256_fixteacher_forwardbeta0_clip005/checkpoint-1300 \
+    --checkpoint_dir //home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm/dream7b_gen256_fixteacher_forwardbeta0_clip005/checkpoint-100 \
     --dataset "$DATASET" \
     --val_n 12 \
     --batch_size 2 \
