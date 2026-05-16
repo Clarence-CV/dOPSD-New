@@ -318,8 +318,12 @@ class OPSDDLLMTrainer(SFTTrainer):
         vocabulary. The function returns the mean of jsd_i over the N tokens
         (or sum / raw vector, depending on `reduction`).
 
-        `token_clip` clips each *per-token* JSD value (after vocab summation), so
-        a few high-divergence tokens cannot dominate the gradient.
+        `token_clip` clips each *per-(token, vocab-entry)* KL contribution
+        BEFORE the vocabulary summation — matching the AR trainer's semantics.
+        This caps the contribution of individual vocabulary entries (e.g. rare
+        style/formatting tokens where teacher and student strongly disagree)
+        without flattening the per-token JSD as a whole, which would zero out
+        the gradient on the bulk of the distillation signal.
         """
         student_logits = student_logits / temperature
         teacher_logits = teacher_logits / temperature
@@ -333,15 +337,15 @@ class OPSDDLLMTrainer(SFTTrainer):
         teacher_log_probs = F.log_softmax(teacher_logits, dim=-1)
 
         if beta == 0:
-            # forward KL: D(P_teacher || P_student), per-element then sum over vocab.
-            per_token_jsd = F.kl_div(
+            # forward KL: D(P_teacher || P_student), per-element [N, V].
+            per_element_jsd = F.kl_div(
                 student_log_probs, teacher_log_probs, reduction="none", log_target=True
-            ).sum(dim=-1)  # [N]
+            )
         elif beta == 1:
-            # reverse KL: D(P_student || P_teacher).
-            per_token_jsd = F.kl_div(
+            # reverse KL: D(P_student || P_teacher), per-element [N, V].
+            per_element_jsd = F.kl_div(
                 teacher_log_probs, student_log_probs, reduction="none", log_target=True
-            ).sum(dim=-1)  # [N]
+            )
         else:
             beta_t = torch.tensor(beta, dtype=student_log_probs.dtype, device=student_log_probs.device)
             mixture_log_probs = torch.logsumexp(
@@ -350,15 +354,19 @@ class OPSDDLLMTrainer(SFTTrainer):
             )
             kl_t = F.kl_div(
                 mixture_log_probs, teacher_log_probs, reduction="none", log_target=True
-            ).sum(dim=-1)  # [N]
+            )  # [N, V]
             kl_s = F.kl_div(
                 mixture_log_probs, student_log_probs, reduction="none", log_target=True
-            ).sum(dim=-1)  # [N]
-            per_token_jsd = beta * kl_t + (1 - beta) * kl_s  # [N]
+            )  # [N, V]
+            per_element_jsd = beta * kl_t + (1 - beta) * kl_s  # [N, V]
 
-        # Per-token clip (operates on the already-summed-over-vocab token-level JSD).
+        # Per-element clip (applied to each (token, vocab-entry) before summing
+        # over the vocab). Caps only the rare large entries; the bulk of the
+        # signal passes through. Matches opsd_trainer.py's clip semantics.
         if token_clip is not None:
-            per_token_jsd = per_token_jsd.clamp(max=token_clip)
+            per_element_jsd = per_element_jsd.clamp(max=token_clip)
+
+        per_token_jsd = per_element_jsd.sum(dim=-1)  # [N]
 
         if per_token_weight is not None:
             per_token_jsd = per_token_jsd * per_token_weight
