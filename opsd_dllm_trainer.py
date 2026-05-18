@@ -27,7 +27,9 @@ masked positions:
                        └──── JSD on MASKED positions only ────┘
 """
 
+import inspect
 import os
+import textwrap
 from collections import defaultdict
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -63,6 +65,111 @@ if is_peft_available():
 
 if is_wandb_available():
     import wandb
+
+
+# ---------------------------------------------------------------------------
+# Dream-7B diffusion-sampler dtype patches.
+#
+# Dream's released `_sample` / `sample_tokens` mix bf16 logits with fp32
+# confidence tensors. When the dtypes diverge, the entropy-based unmask
+# ordering silently misranks tokens and the sampler can lock onto a wrong
+# first token, after which the rest of the window collapses into repetitive
+# high-frequency tokens (e.g. "the the the ..."). The eval script
+# (evaluate_aime_dllm.py) already patches this for inference; the same fix
+# is required during the on-policy student rollout, otherwise the LoRA is
+# distilled on garbage rollouts.
+#
+# These functions are deliberately kept identical in behavior (and mostly in
+# code) to the eval-side versions so the two pipelines stay in lockstep.
+# ---------------------------------------------------------------------------
+def _iter_diffusion_model_objects(model):
+    """Yield wrapper/base-model objects that may own Dream generation methods."""
+    seen = set()
+    stack = [model]
+    while stack:
+        obj = stack.pop()
+        if obj is None or id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        yield obj
+        stack.extend(
+            getattr(obj, attr, None)
+            for attr in ("base_model", "model")
+            if getattr(obj, attr, None) is not obj
+        )
+
+
+def _patch_diffusion_sample_tokens_dtype(model) -> bool:
+    """Keep Dream's sample_tokens confidence dtype aligned with logits."""
+    patched = False
+    for obj in _iter_diffusion_model_objects(model):
+        for method_name in ("diffusion_generate", "_sample"):
+            method = getattr(obj, method_name, None)
+            method_fn = getattr(method, "__func__", method)
+            generation_globals = getattr(method_fn, "__globals__", None)
+            if not generation_globals or "sample_tokens" not in generation_globals:
+                continue
+
+            sample_tokens = generation_globals["sample_tokens"]
+            if getattr(sample_tokens, "_opsd_confidence_dtype_patch", False):
+                patched = True
+                continue
+
+            def sample_tokens_dtype_safe(logits, *args, _sample_tokens=sample_tokens, **kwargs):
+                confidence, x0 = _sample_tokens(logits, *args, **kwargs)
+                if torch.is_tensor(confidence) and confidence.dtype != logits.dtype:
+                    confidence = confidence.to(dtype=logits.dtype)
+                return confidence, x0
+
+            sample_tokens_dtype_safe._opsd_confidence_dtype_patch = True
+            sample_tokens_dtype_safe._opsd_original_sample_tokens = sample_tokens
+            generation_globals["sample_tokens"] = sample_tokens_dtype_safe
+            patched = True
+    return patched
+
+
+def _patch_diffusion_sample_assignment_dtype(model) -> bool:
+    """Patch Dream's _sample assignment that can mix bf16 destination and fp32 source."""
+    old = "full_confidence[mask_index] = confidence"
+    new = "full_confidence[mask_index] = confidence.to(dtype=full_confidence.dtype)"
+
+    for obj in _iter_diffusion_model_objects(model):
+        sample_method = getattr(obj, "_sample", None)
+        sample_fn = getattr(sample_method, "__func__", sample_method)
+        if not callable(sample_fn):
+            continue
+        if getattr(sample_fn, "_opsd_full_confidence_dtype_patch", False):
+            return True
+
+        try:
+            source = textwrap.dedent(inspect.getsource(sample_fn))
+        except (OSError, TypeError):
+            continue
+
+        if old not in source:
+            continue
+
+        patched_source = source.replace(old, new)
+        generation_globals = sample_fn.__globals__
+        exec(
+            compile(patched_source, inspect.getsourcefile(sample_fn) or "<opsd_dream_patch>", "exec"),
+            generation_globals,
+        )
+        patched_fn = generation_globals[sample_fn.__name__]
+        patched_fn._opsd_full_confidence_dtype_patch = True
+        patched_fn._opsd_original_sample = sample_fn
+
+        owner = getattr(sample_method, "__self__", obj)
+        setattr(owner.__class__, sample_fn.__name__, patched_fn)
+        return True
+
+    return False
+
+
+def patch_diffusion_generation_dtype(model) -> bool:
+    """Apply both Dream diffusion-sampler dtype patches. Idempotent."""
+    _patch_diffusion_sample_tokens_dtype(model)
+    return _patch_diffusion_sample_assignment_dtype(model)
 
 
 class OPSDDLLMTrainer(SFTTrainer):
@@ -129,6 +236,21 @@ class OPSDDLLMTrainer(SFTTrainer):
             preprocess_logits_for_metrics=preprocess_logits_for_metrics,
             peft_config=peft_config,
         )
+
+        # Dream's released diffusion sampler has a bf16/fp32 dtype bug that
+        # silently corrupts the entropy-based unmask ordering, causing the
+        # on-policy student rollout to collapse into degenerate repetition
+        # ("the the the ..."). The eval script applies the same patch; without
+        # it here, every training-step rollout is at risk and the LoRA
+        # distills on garbage. Apply once, on the unwrapped model.
+        unwrapped_for_patch = self.accelerator.unwrap_model(self.model)
+        if patch_diffusion_generation_dtype(unwrapped_for_patch):
+            print("[OPSD-DLLM] Patched Dream diffusion generation dtype handling.")
+        else:
+            print(
+                "[OPSD-DLLM] Warning: could not patch Dream generation internals; "
+                "on-policy rollouts may collapse to repetitive tokens."
+            )
 
         if getattr(args, "disable_dropout", False):
             disable_dropout_in_model(self.model)
@@ -242,26 +364,35 @@ class OPSDDLLMTrainer(SFTTrainer):
         `unwrap_model_for_generation` so DeepSpeed/FSDP-sharded weights are
         gathered for the rollout, then re-sharded on context exit.
 
+        The model is flipped to eval() mode for the duration of the rollout so
+        dropout doesn't perturb the on-policy samples; mode is restored after.
+
         Returns:
             completion_ids:  [B, gen_max_new_tokens] generated tokens
             completion_mask: [B, gen_max_new_tokens] 1 = real generated token,
                              0 = pad / strictly-post-EOS (ignored by JSD)
         """
         prompt_len = prompt_ids.shape[1]
+        was_training = model.training
         with unwrap_model_for_generation(model, self.accelerator) as unwrapped:
-            with torch.no_grad():
-                gen_out = unwrapped.diffusion_generate(
-                    prompt_ids,
-                    attention_mask=prompt_mask,
-                    max_new_tokens=self.gen_max_new_tokens,
-                    output_history=False,
-                    return_dict_in_generate=True,
-                    steps=self.gen_steps,
-                    temperature=self.gen_temperature,
-                    top_p=self.gen_top_p,
-                    alg=self.gen_alg,
-                    alg_temp=self.gen_alg_temp,
-                )
+            unwrapped.eval()
+            try:
+                with torch.no_grad():
+                    gen_out = unwrapped.diffusion_generate(
+                        prompt_ids,
+                        attention_mask=prompt_mask,
+                        max_new_tokens=self.gen_max_new_tokens,
+                        output_history=False,
+                        return_dict_in_generate=True,
+                        steps=self.gen_steps,
+                        temperature=self.gen_temperature,
+                        top_p=self.gen_top_p,
+                        alg=self.gen_alg,
+                        alg_temp=self.gen_alg_temp,
+                    )
+            finally:
+                if was_training:
+                    unwrapped.train()
         completion_ids = gen_out.sequences[:, prompt_len:].contiguous()
         completion_mask = self._build_completion_mask(completion_ids)
         return completion_ids, completion_mask
@@ -436,18 +567,26 @@ class OPSDDLLMTrainer(SFTTrainer):
         del student_logits
 
         # 5. Teacher forward (no grad). For fixed_teacher, run the base model w/o LoRA.
+        #    Flip to eval() so dropout is off — the teacher's distribution is the
+        #    distillation target and must be deterministic across calls.
         if self.fixed_teacher and is_peft_model(model):
             teacher_ctx = self.accelerator.unwrap_model(model).disable_adapter()
         else:
             teacher_ctx = nullcontext()
 
-        with torch.no_grad(), teacher_ctx:
-            teacher_logits = self._forward(model, teacher_full_ids, teacher_full_mask)
-            teacher_completion_logits = (
-                teacher_logits[:, t_prompt_len : t_prompt_len + L_c, :].float().detach()
-            )
+        was_training = model.training
+        if was_training:
+            model.eval()
+        try:
+            with torch.no_grad(), teacher_ctx:
+                teacher_logits = self._forward(model, teacher_full_ids, teacher_full_mask)
+                teacher_completion_logits = (
+                    teacher_logits[:, t_prompt_len : t_prompt_len + L_c, :].float().detach()
+                )
+        finally:
+            if was_training:
+                model.train()
         del teacher_logits
-        empty_cache()
 
         # 6. Token-level JSD over MASKED completion positions only.
         student_masked = student_completion_logits[mask_pattern]  # [N, V]

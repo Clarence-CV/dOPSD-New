@@ -42,7 +42,7 @@ accelerate launch \
     --torch_dtype bfloat16 \
     --max_prompt_length 1024 \
     --max_answer_length 1024 \
-    --gen_max_new_tokens 2048 \
+    --gen_max_new_tokens 512 \
     --gen_steps 512 \
     --gen_temperature 0.2 \
     --gen_top_p 0.95 \
