@@ -23,27 +23,8 @@ TORCH_DTYPE="${TORCH_DTYPE:-bfloat16}"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-$REPO_ROOT/outputs/opsd_dllm/dream7b_gen768_forwardbeta0_v2/checkpoint-300}"
 
 # --- Base-model baseline (no LoRA). Uncomment to measure vanilla Dream-7B. ---
-# NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" python evaluate_aime_dllm.py \
-#     --base_model          "$BASE_MODEL" \
-#     --dataset             "$DATASET" \
-#     --val_n               16 \
-#     --batch_size          2 \
-#     --max_new_tokens      768 \
-#     --diffusion_steps     768 \
-#     --temperature         0.5 \
-#     --top_p               0.95 \
-#     --alg                 entropy \
-#     --alg_temp            0.5 \
-#     --generator           diffusion \
-#     --torch_dtype         "$TORCH_DTYPE" \
-#     --attn_implementation sdpa \
-#     --device_map          "$DEVICE_MAP"
-# wait
-
-# --- Adapter evaluation (OPSD checkpoint). ---
-NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" python evaluate_aime_dllm.py \
+NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES=4 python evaluate_aime_dllm.py \
     --base_model          "$BASE_MODEL" \
-    --checkpoint_dir      "$CHECKPOINT_DIR" \
     --dataset             "$DATASET" \
     --val_n               16 \
     --batch_size          2 \
@@ -58,3 +39,22 @@ NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" python evaluate_aime_dll
     --attn_implementation sdpa \
     --device_map          "$DEVICE_MAP"
 wait
+
+# --- Adapter evaluation (OPSD checkpoint). ---
+# NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" python evaluate_aime_dllm.py \
+#     --base_model          "$BASE_MODEL" \
+#     --checkpoint_dir      "$CHECKPOINT_DIR" \
+#     --dataset             "$DATASET" \
+#     --val_n               16 \
+#     --batch_size          2 \
+#     --max_new_tokens      768 \
+#     --diffusion_steps     768 \
+#     --temperature         0.5 \
+#     --top_p               0.95 \
+#     --alg                 entropy \
+#     --alg_temp            0.5 \
+#     --generator           diffusion \
+#     --torch_dtype         "$TORCH_DTYPE" \
+#     --attn_implementation sdpa \
+#     --device_map          "$DEVICE_MAP"
+# wait
