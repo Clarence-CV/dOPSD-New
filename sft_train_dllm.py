@@ -69,12 +69,19 @@ class DLLMScriptArguments(ScriptArguments):
         metadata={"help": "Lower bound on the per-example answer mask rate."},
     )
     max_prompt_length: int = field(
-        default=1024,
-        metadata={"help": "Max length (in tokens) of the chat-templated prompt."},
+        default=512,
+        metadata={
+            "help": "Max length (in tokens) of the chat-templated prompt. Keep "
+            "max_prompt_length + max_answer_length < 2048 (Dream-v0 position limit)."
+        },
     )
     max_answer_length: int = field(
-        default=1024,
-        metadata={"help": "Max length (in tokens) of the gold answer span."},
+        default=1408,
+        metadata={
+            "help": "Max length (in tokens) of the gold answer span. Long "
+            "OpenThoughts solutions are truncated from the end, so an oversized "
+            "solution loses its trailing \\boxed{}. 512 + 1408 = 1920 < 2048."
+        },
     )
 
 
@@ -174,9 +181,14 @@ class SFTDLLMTrainer(Trainer):
         B, L = answer_mask.shape
         device = answer_mask.device
 
-        # Antithetic sampling: pair t with (1 - t) across the batch for variance reduction.
-        u = torch.rand(B, device=device)
-        t = torch.where(torch.arange(B, device=device) % 2 == 0, u, 1.0 - u)
+        # Antithetic sampling: example 2k and 2k+1 share a base draw u_k and
+        # receive t = u_k and t = 1 - u_k respectively. Both halves of a pair
+        # must come from the SAME u_k for the variance reduction to apply.
+        half = (B + 1) // 2
+        u = torch.rand(half, device=device)
+        t = torch.empty(B, device=device)
+        t[0::2] = u[: t[0::2].numel()]
+        t[1::2] = 1.0 - u[: t[1::2].numel()]
         p = (1 - self.sampling_eps) * t + self.sampling_eps  # [B]
 
         rand = torch.rand(B, L, device=device)
@@ -211,28 +223,36 @@ class SFTDLLMTrainer(Trainer):
         )
 
         outputs = self._forward(model, noisy_input_ids, attention_mask)
+        # Dream causal convention: raw logits[i] is the prediction slot for
+        # token[i+1]. Right-shift so logits[i] aligns with token[i] before the
+        # masked-position loss. Mirrors OPSDDLLMTrainer._shift_logits_dream;
+        # without it the loss is misaligned by one position and the SFT model
+        # ends up inconsistent with Dream's diffusion_generate.
         logits = outputs.logits  # [B, L, V]
+        logits = torch.cat([logits[:, :1], logits[:, :-1]], dim=1)
 
-        # Loss only on the masked answer positions, weighted by 1/t (the
-        # diffusion ELBO importance weight). Sum-then-normalize per the
-        # standard LLaDA recipe: mean over per-example masked tokens scaled
-        # by 1/t, then mean over the batch.
+        # Loss only on the masked answer positions. Canonical LLaDA ELBO term:
+        # per example, (1/t) * SUM of CE over masked tokens, normalized by the
+        # example's answer length (constant w.r.t. the random mask), then mean
+        # over the batch. Normalizing by the *masked-token count* would be wrong
+        # — that count is proportional to t, so it cancels (in fact double-
+        # counts) the explicit 1/t weight and over-weights low-mask examples.
         flat_logits = logits[mask]                    # [N, V]
         flat_targets = input_ids[mask]                # [N]
         per_token_ce = F.cross_entropy(flat_logits.float(), flat_targets, reduction="none")  # [N]
 
         B = input_ids.size(0)
-        # Build [N] tensor that pairs each masked token with its example's 1/t.
+        # Pair each masked token with its example's 1/t ELBO importance weight.
         ex_idx = mask.nonzero(as_tuple=False)[:, 0]   # [N] which row each masked token came from
         weights = (1.0 / p_mask.float())[ex_idx].to(per_token_ce.dtype)  # [N]
 
-        # Average over the (variable) per-example count, then over the batch.
+        # Per-example (1/t)-weighted SUM of CE, normalized by answer length.
+        answer_lengths = answer_mask.sum(dim=1).to(per_token_ce.dtype)  # [B]
         per_ex_loss = torch.zeros(B, device=input_ids.device, dtype=per_token_ce.dtype)
-        per_ex_count = torch.zeros(B, device=input_ids.device, dtype=per_token_ce.dtype)
         per_ex_loss.index_add_(0, ex_idx, (per_token_ce * weights).to(per_ex_loss.dtype))
-        per_ex_count.index_add_(0, ex_idx, torch.ones_like(per_token_ce, dtype=per_ex_count.dtype))
-        per_ex_loss = per_ex_loss / per_ex_count.clamp_min(1.0)
-        loss = per_ex_loss[per_ex_count > 0].mean()
+        per_ex_loss = per_ex_loss / answer_lengths.clamp_min(1.0)
+        has_answer = answer_lengths > 0
+        loss = per_ex_loss[has_answer].mean()
 
         return (loss, outputs) if return_outputs else loss
 
@@ -357,7 +377,8 @@ if __name__ == "__main__":
     model_kwargs = dict(
         revision=model_args.model_revision,
         trust_remote_code=True,
-        attn_implementation=model_args.attn_implementation or "flash_attention_2",
+        # Default to sdpa: Dream-7B is unsafe with flash_attention_2.
+        attn_implementation=model_args.attn_implementation or "sdpa",
         dtype=model_dtype,
     )
     quantization_config = get_quantization_config(model_args)

@@ -8,6 +8,16 @@
 #     by --max_prompt_length and --max_answer_length).
 #   * --attn_implementation sdpa (Dream-7B is unsafe with flash_attention_2).
 #
+# HARD INVARIANTS for Dream OPSD (do not break these):
+#   * --beta 0  → forward KL. Reverse KL (--beta 1) is zero-forcing and causes
+#     on-policy mode collapse (student degenerates to repeated tokens).
+#   * --gen_steps MUST equal --gen_max_new_tokens. steps < tokens forces the
+#     diffusion sampler to commit multiple tokens per step → quality collapse.
+#   * --max_prompt_length + --gen_max_new_tokens MUST stay < 2048 (Dream-v0's
+#     position-embedding limit). Here: 1024 + 768 = 1792.
+#   * Eval (eval/run_eval_dllm.sh) must use the same generation length and the
+#     same steps==tokens rule, otherwise train/eval mismatch.
+#
 # accelerate.yaml note: this repo's YAML has been updated to use a literal
 # `gradient_accumulation_steps: 1` (the prior 'auto' placeholder failed to
 # resolve in the installed accelerate version). If you want to bump GA, edit
@@ -34,27 +44,27 @@ accelerate launch \
     --gradient_accumulation_steps 1 \
     --gradient_checkpointing \
     --output_dir ./outputs/opsd_dllm/ \
-    --run_config dream7b_gen256_fixteacher_forwardbeta0_clip005 \
-    --num_train_epochs 30 \
+    --run_config dream7b_gen768_forwardbeta0_v2 \
+    --num_train_epochs 3 \
     --save_steps 50 \
     --logging_steps 2 \
     --attn_implementation sdpa \
     --torch_dtype bfloat16 \
     --max_prompt_length 1024 \
     --max_answer_length 1024 \
-    --gen_max_new_tokens 512 \
-    --gen_steps 512 \
-    --gen_temperature 0.2 \
+    --gen_max_new_tokens 768 \
+    --gen_steps 768 \
+    --gen_temperature 0.5 \
     --gen_top_p 0.95 \
     --gen_alg entropy \
-    --gen_alg_temp 0.0 \
-    --beta 1 \
+    --gen_alg_temp 0.5 \
+    --beta 0 \
     --temperature 1.0 \
     --sampling_eps 1e-3 \
     --use_peft \
     --lora_r 64 \
     --lora_alpha 128 \
-    --lora_dropout 0.05 \
+    --lora_dropout 0.0 \
     --lora_target_modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj \
     --fixed_teacher \
     --jsd_token_clip 0.05 \
