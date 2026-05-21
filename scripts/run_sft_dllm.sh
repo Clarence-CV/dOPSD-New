@@ -16,7 +16,7 @@ cd "$(dirname "$0")/.."   # cd into OPSD/
 
 export TRL_EXPERIMENTAL_SILENCE=1
 export TOKENIZERS_PARALLELISM=false
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,3,4}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 export WANDB_PROJECT=${WANDB_PROJECT:-sft-dllm}
 export WANDB_ENTITY=${WANDB_ENTITY:-}
 export WANDB_MODE=${WANDB_MODE:-online}
@@ -48,12 +48,14 @@ accelerate launch \
     --torch_dtype bfloat16 \
     --max_prompt_length 1024 \
     --max_answer_length 1024 \
+    --gen_max_new_tokens 768 \
+    --gen_steps 768 \
     --remove_unused_columns false \
     --sampling_eps 1e-3 \
     --use_peft \
     --lora_r 64 \
     --lora_alpha 128 \
-    --lora_dropout 0.05 \
+    --lora_dropout 0.0 \
     --lora_target_modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj \
     --logging_steps 5 \
     --save_steps 20 \
