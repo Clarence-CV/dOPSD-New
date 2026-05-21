@@ -48,8 +48,6 @@ accelerate launch \
     --torch_dtype bfloat16 \
     --max_prompt_length 1024 \
     --max_answer_length 1024 \
-    --gen_max_new_tokens 768 \
-    --gen_steps 768 \
     --remove_unused_columns false \
     --sampling_eps 1e-3 \
     --use_peft \
