@@ -200,6 +200,9 @@ class OPSDDLLMTrainer(SFTTrainer):
         max_answer_length: int = 1024,
         top_k_loss: int | None = None,
         jsd_token_clip: float | None = None,
+        # Off-policy mode: distill on the dataset's ground-truth answer instead
+        # of an on-policy student rollout (see compute_loss for the contrast).
+        off_policy: bool = False,
         # Generation hyperparameters for Dream's diffusion_generate (student rollout).
         gen_max_new_tokens: int = 256,
         gen_steps: int = 256,
@@ -261,6 +264,7 @@ class OPSDDLLMTrainer(SFTTrainer):
         self.top_k_loss = top_k_loss
         self.jsd_token_clip = jsd_token_clip
         self.sampling_eps = sampling_eps
+        self.off_policy = off_policy
 
         # diffusion_generate hyperparameters
         self.gen_max_new_tokens = gen_max_new_tokens
@@ -288,6 +292,13 @@ class OPSDDLLMTrainer(SFTTrainer):
 
         if self.fixed_teacher:
             print("\n[OPSD-DLLM] FIXED TEACHER MODE — teacher = base model w/o LoRA adapters.\n")
+
+        if self.off_policy:
+            print(
+                "\n[OPSD-DLLM] OFF-POLICY MODE — distilling on the dataset's ground-truth "
+                "answer (no student rollout). Student sees the masked GT; teacher sees "
+                "the concrete GT.\n"
+            )
 
         self._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
 
@@ -561,13 +572,24 @@ class OPSDDLLMTrainer(SFTTrainer):
         s_prompt_len = student_prompt_ids.shape[1]
         t_prompt_len = teacher_prompt_ids.shape[1]
 
-        # 1. Student rollout via diffusion_generate (no grad — sampling is discrete).
-        #    Dream's last-step force-unmask guarantees `completion_ids` is fully
-        #    concrete when `gen_steps >= gen_max_new_tokens` (no residual <mask>),
-        #    so what follows is a clean MDM training step on a concrete sequence.
-        completion_ids, completion_mask = self._generate_student_completion(
-            model, student_prompt_ids, student_prompt_mask
-        )
+        # 1. Obtain the completion that both prompts will be scored on.
+        #    on-policy : the student rolls one out via diffusion_generate (no grad;
+        #                sampling is discrete). With gen_steps >= gen_max_new_tokens
+        #                Dream's last-step force-unmask makes it fully concrete.
+        #    off-policy: use the dataset's ground-truth answer instead — no rollout.
+        if self.off_policy:
+            if "answer_input_ids" not in inputs:
+                raise KeyError(
+                    "off_policy=True requires the collator to provide `answer_input_ids` "
+                    "and `answer_attention_mask` (the ground-truth answer span). "
+                    "SelfDistillationDLLMDataCollator emits both."
+                )
+            completion_ids = inputs["answer_input_ids"]
+            completion_mask = inputs["answer_attention_mask"]
+        else:
+            completion_ids, completion_mask = self._generate_student_completion(
+                model, student_prompt_ids, student_prompt_mask
+            )
         _, L_c = completion_ids.shape
 
         # 1b. Buffer (prompt, completion) for the periodic JSON dump. Decode the
@@ -597,12 +619,20 @@ class OPSDDLLMTrainer(SFTTrainer):
             completion_ids,
         )
 
-        # 3. Concat [prompt | noisy_completion] for student & teacher. The attention mask
-        #    over the completion span is `completion_mask` (1 for real or masked, 0 for
-        #    pad / post-EOS).
+        # 3. Concat [prompt | completion] for student & teacher. The student always
+        #    sees the NOISY (masked) completion. The teacher sees:
+        #      on-policy : the same noisy completion — JSD compares two genuine
+        #                  predictive distributions at the masked positions.
+        #      off-policy: the CONCRETE ground-truth answer — its distribution at
+        #                  the masked positions is conditioned on the true tokens
+        #                  (a privileged, soft-label target).
+        #    `completion_mask` (1 = real/masked, 0 = pad) is the completion-span
+        #    attention mask for both — the concrete and noisy completions share
+        #    the same valid positions.
+        teacher_completion = completion_ids if self.off_policy else noisy_completion
         student_full_ids = torch.cat([student_prompt_ids, noisy_completion], dim=1)
         student_full_mask = torch.cat([student_prompt_mask, completion_mask], dim=1)
-        teacher_full_ids = torch.cat([teacher_prompt_ids, noisy_completion], dim=1)
+        teacher_full_ids = torch.cat([teacher_prompt_ids, teacher_completion], dim=1)
         teacher_full_mask = torch.cat([teacher_prompt_mask, completion_mask], dim=1)
 
         # 4. Student forward (with grad). Slice out the completion span only.

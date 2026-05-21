@@ -51,6 +51,14 @@ class CustomScriptArguments(ScriptArguments):
             "Requires --use_peft."
         },
     )
+    off_policy: bool = field(
+        default=False,
+        metadata={
+            "help": "Off-policy mode: distill on the dataset's ground-truth answer instead "
+            "of an on-policy student rollout. Student sees the masked GT; teacher sees the "
+            "concrete GT. When set, --gen_* generation flags are unused."
+        },
+    )
     mask_token_id: int = field(
         default=-1,
         metadata={"help": "Mask token id; -1 = use tokenizer.mask_token_id."},
@@ -181,6 +189,7 @@ if __name__ == "__main__":
                 "lora_r": model_args.lora_r if model_args.use_peft else None,
                 "lora_alpha": model_args.lora_alpha if model_args.use_peft else None,
                 "fixed_teacher": script_args.fixed_teacher,
+                "off_policy": script_args.off_policy,
                 "sampling_eps": script_args.sampling_eps,
                 "top_k_loss": script_args.top_k_loss if script_args.top_k_loss > 0 else None,
                 "jsd_token_clip": script_args.jsd_token_clip if script_args.jsd_token_clip > 0 else None,
@@ -267,6 +276,7 @@ if __name__ == "__main__":
         processing_class=tokenizer,
         peft_config=get_peft_config(model_args),
         fixed_teacher=script_args.fixed_teacher,
+        off_policy=script_args.off_policy,
         mask_token_id=mask_token_id,
         sampling_eps=script_args.sampling_eps,
         max_prompt_length=script_args.max_prompt_length,
