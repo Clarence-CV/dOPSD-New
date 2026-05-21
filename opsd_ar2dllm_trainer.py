@@ -386,8 +386,10 @@ class OPSDAR2DLLMTrainer(OPSDDLLMTrainer):
                     }
                 )
 
-        # 4. Random mask over the valid completion positions -> noisy completion.
-        mask_pattern, p_mask_sample = self._sample_mask(completion_mask)
+        # 4. Restrict JSD to the loss-eligible positions (trailing <eos> padding
+        #    excluded), sample a random mask there -> noisy completion.
+        jsd_valid_mask = self._build_jsd_valid_mask(completion_ids, completion_mask)
+        mask_pattern, p_mask_sample = self._sample_mask(jsd_valid_mask)
         noisy_completion = torch.where(
             mask_pattern,
             torch.full_like(completion_ids, self.mask_token_id),
@@ -436,8 +438,9 @@ class OPSDAR2DLLMTrainer(OPSDDLLMTrainer):
             self._metrics[mode]["teacher_prompt_len"].append(float(t_prompt_len))
             self._metrics[mode]["mean_p_mask"].append(float(p_mask_sample.mean().item()))
             self._metrics[mode]["num_masked_tokens"].append(float(mask_pattern.sum().item()))
+            self._metrics[mode]["num_jsd_valid_tokens"].append(float(jsd_valid_mask.sum().item()))
             self._metrics[mode]["frac_masked_in_completion"].append(
-                float(mask_pattern.sum().item()) / max(1.0, float(completion_mask.sum().item()))
+                float(mask_pattern.sum().item()) / max(1.0, float(jsd_valid_mask.sum().item()))
             )
             if per_token_jsd.numel() > 0:
                 self._metrics[mode]["per_token_jsd_mean"].append(float(per_token_jsd.mean().item()))

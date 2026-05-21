@@ -356,6 +356,48 @@ class OPSDDLLMTrainer(SFTTrainer):
             mask[completion_ids == pad_id] = 0
         return mask
 
+    def _build_jsd_valid_mask(
+        self, completion_ids: torch.Tensor, completion_mask: torch.Tensor
+    ) -> torch.Tensor:
+        """Loss-eligible positions: `completion_mask` minus the trailing <eos> run.
+
+        Dream emits a fixed-length window, so a finished answer is followed by a
+        long run of <eos> filler. Predicting <eos> there is trivial; masking
+        those positions spends the JSD budget (and gradient) on "emit <eos>"
+        instead of on reasoning tokens. This mask drops the trailing <eos> run
+        from the *loss only* — `completion_mask` is still used unchanged for the
+        forward-pass attention, so train/inference behavior is untouched.
+
+        The first <eos> after the content (the legitimate terminator) is kept as
+        a JSD target so the student still learns when to stop. An <eos> that
+        appears mid-sequence — followed by more real content — also stays valid,
+        so genuine content is never zeroed out.
+        """
+        eos_id = self.processing_class.eos_token_id
+        if eos_id is None:
+            return completion_mask
+
+        device = completion_ids.device
+        B, L = completion_ids.shape
+        positions = torch.arange(L, device=device)
+
+        # "content" = a real token that is not <eos> (completion_mask already
+        # drops any distinct pad token).
+        is_content = (completion_ids != eos_id) & completion_mask.bool()
+
+        # Index of the last content token per row (-1 if the row is all <eos>).
+        content_pos = torch.where(
+            is_content, positions.expand(B, L), torch.full((B, L), -1, device=device)
+        )
+        last_content_idx = content_pos.max(dim=1).values  # [B]
+
+        # Keep up to and including the terminator <eos> (one past the last
+        # content token); drop the rest of the trailing run.
+        keep_until = last_content_idx + 1  # [B]
+        trailing_keep = positions.unsqueeze(0) <= keep_until.unsqueeze(1)  # [B, L]
+
+        return completion_mask * trailing_keep.long()
+
     def _generate_student_completion(self, model, prompt_ids, prompt_mask):
         """On-policy student rollout via Dream's diffusion_generate.
 
@@ -544,9 +586,11 @@ class OPSDDLLMTrainer(SFTTrainer):
                     {"step": step_now, "prompt": p_text, "completion": c_text}
                 )
 
-        # 2. Sample a random mask pattern over the valid completion positions
-        #    and build the noisy completion both student and teacher will see.
-        mask_pattern, p_mask_sample = self._sample_mask(completion_mask)
+        # 2. Restrict JSD to the loss-eligible positions (trailing <eos> padding
+        #    excluded), sample a random mask there, and build the noisy
+        #    completion both student and teacher will see.
+        jsd_valid_mask = self._build_jsd_valid_mask(completion_ids, completion_mask)
+        mask_pattern, p_mask_sample = self._sample_mask(jsd_valid_mask)
         noisy_completion = torch.where(
             mask_pattern,
             torch.full_like(completion_ids, self.mask_token_id),
@@ -611,8 +655,9 @@ class OPSDDLLMTrainer(SFTTrainer):
             self._metrics[mode]["completion_len_mean"].append(float(comp_lens.mean().item()))
             self._metrics[mode]["mean_p_mask"].append(float(p_mask_sample.mean().item()))
             self._metrics[mode]["num_masked_tokens"].append(float(mask_pattern.sum().item()))
+            self._metrics[mode]["num_jsd_valid_tokens"].append(float(jsd_valid_mask.sum().item()))
             self._metrics[mode]["frac_masked_in_completion"].append(
-                float(mask_pattern.sum().item()) / max(1.0, float(completion_mask.sum().item()))
+                float(mask_pattern.sum().item()) / max(1.0, float(jsd_valid_mask.sum().item()))
             )
             if per_token_jsd.numel() > 0:
                 self._metrics[mode]["per_token_jsd_mean"].append(float(per_token_jsd.mean().item()))
