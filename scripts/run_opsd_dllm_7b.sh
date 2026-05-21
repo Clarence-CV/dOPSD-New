@@ -45,7 +45,7 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 
 # --- Mode toggle: on-policy rollout (default) vs off-policy GT distillation ---
 # Separate run_config per mode so output_dir / W&B runs never collide.
-OFF_POLICY="${OFF_POLICY:-1}"
+OFF_POLICY="${OFF_POLICY:-0}"
 if [[ "$OFF_POLICY" == "1" ]]; then
     OFF_POLICY_FLAG="--off_policy"
     RUN_CONFIG="dream7b_offpolicy_gt_v1"
