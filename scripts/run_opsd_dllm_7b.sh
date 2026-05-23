@@ -41,11 +41,11 @@ cd "$(dirname "$0")/.."   # cd into OPSD/
 
 export TRL_EXPERIMENTAL_SILENCE=1
 export TOKENIZERS_PARALLELISM=false
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,2,3,4}
 
 # --- Mode toggle: on-policy rollout (default) vs off-policy GT distillation ---
 # Separate run_config per mode so output_dir / W&B runs never collide.
-OFF_POLICY="${OFF_POLICY:-0}"
+OFF_POLICY="${OFF_POLICY:-1}"
 if [[ "$OFF_POLICY" == "1" ]]; then
     OFF_POLICY_FLAG="--off_policy"
     RUN_CONFIG="dream7b_offpolicy_gt_v1"
