@@ -404,8 +404,16 @@ def evaluate_aime_dllm(
     checkpoint_dir: str | None,
     use_chat_template: bool,
     generator: str,
+    num_shards: int = 1,
+    shard_id: int = 0,
 ):
     examples = load_math_dataset(dataset_name, num_samples)
+    if num_shards > 1:
+        if not (0 <= shard_id < num_shards):
+            raise ValueError(f"shard_id={shard_id} must be in [0, {num_shards})")
+        total = len(examples)
+        examples = examples[shard_id::num_shards]  # round-robin for load balance
+        print(f"Shard {shard_id}/{num_shards}: {len(examples)}/{total} problems")
     prompts = [build_prompt(tokenizer, ex["problem"], use_chat_template) for ex in examples]
 
     print("\n" + "=" * 70)
@@ -613,6 +621,10 @@ def main():
         help="auto uses diffusion_generate when the model exposes it, otherwise generate.",
     )
     parser.add_argument("--no_chat_template", action="store_true")
+    parser.add_argument("--num_shards", type=int, default=1,
+                        help="Split the dataset across this many parallel processes (data parallel).")
+    parser.add_argument("--shard_id", type=int, default=0,
+                        help="0-indexed shard of this process. Examples are sliced round-robin.")
     args = parser.parse_args()
 
     if args.output_file is None:
@@ -625,6 +637,8 @@ def main():
             f"steps{args.diffusion_steps}",
             f"valn{args.val_n}",
         ]
+        if args.num_shards > 1:
+            parts.append(f"shard{args.shard_id}of{args.num_shards}")
         args.output_file = str(Path("eval_results") / ("_".join(parts) + ".json"))
 
     model, tokenizer = load_dllm_model(
@@ -653,6 +667,8 @@ def main():
         checkpoint_dir=args.checkpoint_dir,
         use_chat_template=not args.no_chat_template,
         generator=args.generator,
+        num_shards=args.num_shards,
+        shard_id=args.shard_id,
     )
 
     print("\n" + "=" * 70)
