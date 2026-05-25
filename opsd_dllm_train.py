@@ -35,7 +35,7 @@ os.environ.setdefault("TRACKIO_SPACE_ID", "trl-trackio")
 # is high-content (sharpens the teacher's distribution) and answers are
 # verifiable. To swap in a different dataset, update both the ID and the field
 # mapping below.
-BASELINE_DATASET_ID = "siyanzhao/Openthoughts_math_30k_opsd"
+BASELINE_DATASET_ID = "open-thoughts/OpenThoughts-114k"
 BASELINE_PROBLEM_FIELD = "problem"
 BASELINE_SOLUTION_FIELD = "solution"
 
