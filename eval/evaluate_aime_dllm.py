@@ -164,34 +164,70 @@ def patch_diffusion_generation_dtype(model) -> bool:
     return sample_assignment_patched
 
 
-def load_aime_dataset(dataset_name: str, num_samples: int | None = None):
-    dataset_key = dataset_name.lower()
-    if dataset_key == "aime24":
-        dataset = load_dataset("HuggingFaceH4/aime_2024", split="train")
-        print(f"Loaded HuggingFaceH4/aime_2024 with {len(dataset)} problems")
-    elif dataset_key == "aime25":
-        dataset = load_dataset("yentinglin/aime_2025", split="train", trust_remote_code=True)
-        print(f"Loaded yentinglin/aime_2025 with {len(dataset)} problems")
-    else:
-        raise ValueError("Only AIME datasets are supported here. Choose 'aime24' or 'aime25'.")
+# (hf_id, split, trust_remote_code). Mirrors eval/evaluate_math.py.
+_DATASET_LOADERS = {
+    "math500":   ("HuggingFaceH4/MATH-500",     "test",  False),
+    "aime24":    ("HuggingFaceH4/aime_2024",    "train", False),
+    "aime25":    ("yentinglin/aime_2025",       "train", True),
+    "hmmt25":    ("MathArena/hmmt_feb_2025",    "train", True),
+    "amo-bench": ("meituan-longcat/AMO-Bench",  "test",  False),
+    "minerva":   ("math-ai/minervamath",        "test",  False),
+    "amc23":     ("math-ai/amc23",              "test",  False),
+}
+
+
+def load_math_dataset(dataset_name: str, num_samples: int | None = None):
+    """Load a math benchmark and return [{problem_id, problem, ground_truth}, ...].
+
+    Supports the same set of datasets as eval/evaluate_math.py:
+      math500, aime24, aime25, hmmt25, amo-bench, minerva, amc23.
+    """
+    key = dataset_name.lower()
+    if key not in _DATASET_LOADERS:
+        raise ValueError(
+            f"Unknown dataset: {dataset_name}. Choose one of {sorted(_DATASET_LOADERS)}."
+        )
+    hf_id, split, trust = _DATASET_LOADERS[key]
+    load_kwargs = {"split": split}
+    if trust:
+        load_kwargs["trust_remote_code"] = True
+    dataset = load_dataset(hf_id, **load_kwargs)
+    print(f"Loaded {hf_id} with {len(dataset)} problems")
 
     if num_samples:
         dataset = dataset.select(range(min(num_samples, len(dataset))))
 
     examples = []
     for idx, row in enumerate(dataset):
-        if dataset_key == "aime24":
-            question_id = row.get("id", idx)
-        else:
-            question_id = row.get("problem_idx", idx)
-        examples.append(
-            {
-                "problem_id": question_id,
-                "problem": row["problem"],
-                "ground_truth": str(row["answer"]),
-            }
-        )
+        if key == "math500":
+            problem = row["problem"]
+            # MATH500 stores the answer inside the reference solution as \boxed{...}.
+            gt = extract_boxed_answer(row["solution"]) or row["solution"]
+            qid = idx
+        elif key == "aime24":
+            problem = row["problem"]
+            gt = str(row["answer"])
+            qid = row.get("id", idx)
+        elif key in ("aime25", "hmmt25"):
+            problem = row["problem"]
+            gt = str(row["answer"])
+            qid = row.get("problem_idx", idx)
+        elif key == "amo-bench":
+            problem = row["prompt"]
+            gt = str(row["answer"])
+            qid = row.get("question_id", idx)
+        elif key in ("minerva", "amc23"):
+            problem = row["question"]
+            gt = str(row["answer"])
+            qid = row.get("id", idx)
+        else:  # safety net; should be unreachable thanks to the guard above
+            raise ValueError(f"Field handling missing for dataset key: {key}")
+        examples.append({"problem_id": qid, "problem": problem, "ground_truth": gt})
     return examples
+
+
+# Backwards-compatible alias for any external caller still importing the old name.
+load_aime_dataset = load_math_dataset
 
 
 def build_prompt(tokenizer, problem: str, use_chat_template: bool = True) -> str:
@@ -369,7 +405,7 @@ def evaluate_aime_dllm(
     use_chat_template: bool,
     generator: str,
 ):
-    examples = load_aime_dataset(dataset_name, num_samples)
+    examples = load_math_dataset(dataset_name, num_samples)
     prompts = [build_prompt(tokenizer, ex["problem"], use_chat_template) for ex in examples]
 
     print("\n" + "=" * 70)
@@ -549,7 +585,13 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate diffusion LLMs on AIME.")
     parser.add_argument("--base_model", type=str, default="Dream-org/Dream-v0-Instruct-7B")
     parser.add_argument("--checkpoint_dir", type=str, default=None)
-    parser.add_argument("--dataset", type=str, default="aime24", choices=["aime24", "aime25"])
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="aime24",
+        choices=["math500", "aime24", "aime25", "hmmt25", "amo-bench", "minerva", "amc23"],
+        help="Math benchmark to evaluate on. Same set as eval/evaluate_math.py.",
+    )
     parser.add_argument("--max_new_tokens", type=int, default=2048)
     parser.add_argument("--diffusion_steps", type=int, default=2048)
     parser.add_argument("--temperature", type=float, default=0.2)
