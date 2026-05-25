@@ -43,7 +43,7 @@ CHECKPOINT_DIR="${CHECKPOINT_DIR:-$REPO_ROOT/outputs/opsd_dllm/dream7b_gen768_fo
 # --- Adapter evaluation (OPSD checkpoint). ---
 NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES=3 python evaluate_aime_dllm.py \
     --base_model          "$BASE_MODEL" \
-    --checkpoint_dir      "/home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm/dream7b_gen768_forwardbeta0_v2/checkpoint-150" \
+    --checkpoint_dir      "/home/stud_dat/on_policy_self_distill_dLLM/outputs/sft_dllm/dream7b-4epochs-30k/sft_dllm_dream7b_4epochs_30k/checkpoint-5600" \
     --dataset             "$DATASET" \
     --val_n               16 \
     --batch_size          2 \
