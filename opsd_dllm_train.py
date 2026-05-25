@@ -255,6 +255,37 @@ if __name__ == "__main__":
     dataset = load_dataset(BASELINE_DATASET_ID)
     train_dataset = dataset["train"]
 
+    # OpenThoughts-114k's default config exposes `{system, conversations}`, where
+    # conversations is [{from:'user', value:<problem>}, {from:'assistant', value:<reasoning+solution>}].
+    # OPSD's collator needs flat `problem` / `solution` columns: student sees `problem`;
+    # teacher sees the full DeepSeek-R1 trace as privileged context. Replicate
+    # Siyan Zhao's reformat in-process so we can train from the upstream dataset.
+    if BASELINE_PROBLEM_FIELD not in train_dataset.column_names \
+            or BASELINE_SOLUTION_FIELD not in train_dataset.column_names:
+
+        def _extract_problem_solution(example):
+            problem, solution = None, None
+            for turn in example.get("conversations") or []:
+                role = turn.get("from") or turn.get("role")
+                if role in ("user", "human"):
+                    problem = turn.get("value") or turn.get("content")
+                elif role in ("assistant", "gpt"):
+                    solution = turn.get("value") or turn.get("content")
+            return {BASELINE_PROBLEM_FIELD: problem, BASELINE_SOLUTION_FIELD: solution}
+
+        train_dataset = train_dataset.map(
+            _extract_problem_solution,
+            remove_columns=train_dataset.column_names,
+            desc="Extracting problem/solution from OpenThoughts conversations",
+        )
+        train_dataset = train_dataset.filter(
+            lambda ex: ex[BASELINE_PROBLEM_FIELD] is not None
+            and ex[BASELINE_SOLUTION_FIELD] is not None,
+            desc="Dropping rows with missing problem/solution",
+        )
+        print(f"[opsd_dllm_train] Reformatted dataset: {len(train_dataset)} rows "
+              f"with columns {train_dataset.column_names}")
+
     # Build the collator with field names matching the dataset columns. This
     # also drives `_set_signature_columns_if_needed`, so `_remove_unused_columns`
     # keeps these columns through to collate time instead of dropping them.
