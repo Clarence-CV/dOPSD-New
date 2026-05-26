@@ -1,0 +1,27 @@
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading dLLM base model from: Dream-org/Dream-v0-Instruct-7B
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:00<00:00, 96.69it/s]
+The following generation flags are not valid and may be ignored: ['temperature']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Loading PEFT adapter from: /home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm/dream7b_gen768_forwardbeta0_v2/checkpoint-150
+Patched Dream diffusion generation dtype handling.
+Model loaded on cuda:0; dtype=torch.bfloat16
+mask_token_id=151666, pad_token_id=151643
+Loaded HuggingFaceH4/MATH-500 with 500 problems
+Shard 3/5: 100/500 problems
+
+======================================================================
+DLLM AIME EVALUATION CONFIGURATION
+======================================================================
+Dataset: MATH500
+Problems: 100
+Val-N: 16
+Batch size: 2
+Generator: diffusion
+Max new tokens: 768
+Diffusion steps: 768
+Temperature: 0.5
+Top-p: 0.95
+Alg: entropy, alg_temp: 0.5
+======================================================================
+
+AIME problems:   0%|          | 0/50 [00:00<?, ?it/s]AIME problems:   2%|▏         | 1/50 [1:27:50<71:44:05, 5270.32s/it]
