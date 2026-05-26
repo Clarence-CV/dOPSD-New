@@ -164,15 +164,17 @@ def patch_diffusion_generation_dtype(model) -> bool:
     return sample_assignment_patched
 
 
-# (hf_id, split, trust_remote_code). Mirrors eval/evaluate_math.py.
+# (hf_id, split, trust_remote_code, config). Mirrors eval/evaluate_math.py.
+# `config` is the HF dataset config name; None means no explicit config.
 _DATASET_LOADERS = {
-    "math500":   ("HuggingFaceH4/MATH-500",     "test",  False),
-    "aime24":    ("HuggingFaceH4/aime_2024",    "train", False),
-    "aime25":    ("yentinglin/aime_2025",       "train", True),
-    "hmmt25":    ("MathArena/hmmt_feb_2025",    "train", True),
-    "amo-bench": ("meituan-longcat/AMO-Bench",  "test",  False),
-    "minerva":   ("math-ai/minervamath",        "test",  False),
-    "amc23":     ("math-ai/amc23",              "test",  False),
+    "math500":   ("HuggingFaceH4/MATH-500",     "test",  False, None),
+    "aime24":    ("HuggingFaceH4/aime_2024",    "train", False, None),
+    "aime25":    ("yentinglin/aime_2025",       "train", True,  None),
+    "hmmt25":    ("MathArena/hmmt_feb_2025",    "train", True,  None),
+    "amo-bench": ("meituan-longcat/AMO-Bench",  "test",  False, None),
+    "minerva":   ("math-ai/minervamath",        "test",  False, None),
+    "amc23":     ("math-ai/amc23",              "test",  False, None),
+    "gsm8k":     ("openai/gsm8k",               "test",  False, "main"),
 }
 
 
@@ -187,11 +189,14 @@ def load_math_dataset(dataset_name: str, num_samples: int | None = None):
         raise ValueError(
             f"Unknown dataset: {dataset_name}. Choose one of {sorted(_DATASET_LOADERS)}."
         )
-    hf_id, split, trust = _DATASET_LOADERS[key]
+    hf_id, split, trust, config = _DATASET_LOADERS[key]
     load_kwargs = {"split": split}
     if trust:
         load_kwargs["trust_remote_code"] = True
-    dataset = load_dataset(hf_id, **load_kwargs)
+    if config is not None:
+        dataset = load_dataset(hf_id, config, **load_kwargs)
+    else:
+        dataset = load_dataset(hf_id, **load_kwargs)
     print(f"Loaded {hf_id} with {len(dataset)} problems")
 
     if num_samples:
@@ -220,6 +225,12 @@ def load_math_dataset(dataset_name: str, num_samples: int | None = None):
             problem = row["question"]
             gt = str(row["answer"])
             qid = row.get("id", idx)
+        elif key == "gsm8k":
+            # gsm8k answers are step-by-step rationales ending in "#### <final_number>".
+            problem = row["question"]
+            answer_text = row["answer"]
+            gt = answer_text.split("####")[-1].strip() if "####" in answer_text else answer_text.strip()
+            qid = idx
         else:  # safety net; should be unreachable thanks to the guard above
             raise ValueError(f"Field handling missing for dataset key: {key}")
         examples.append({"problem_id": qid, "problem": problem, "ground_truth": gt})
@@ -404,16 +415,8 @@ def evaluate_aime_dllm(
     checkpoint_dir: str | None,
     use_chat_template: bool,
     generator: str,
-    num_shards: int = 1,
-    shard_id: int = 0,
 ):
     examples = load_math_dataset(dataset_name, num_samples)
-    if num_shards > 1:
-        if not (0 <= shard_id < num_shards):
-            raise ValueError(f"shard_id={shard_id} must be in [0, {num_shards})")
-        total = len(examples)
-        examples = examples[shard_id::num_shards]  # round-robin for load balance
-        print(f"Shard {shard_id}/{num_shards}: {len(examples)}/{total} problems")
     prompts = [build_prompt(tokenizer, ex["problem"], use_chat_template) for ex in examples]
 
     print("\n" + "=" * 70)
@@ -597,7 +600,7 @@ def main():
         "--dataset",
         type=str,
         default="aime24",
-        choices=["math500", "aime24", "aime25", "hmmt25", "amo-bench", "minerva", "amc23"],
+        choices=["math500", "aime24", "aime25", "hmmt25", "amo-bench", "minerva", "amc23", "gsm8k"],
         help="Math benchmark to evaluate on. Same set as eval/evaluate_math.py.",
     )
     parser.add_argument("--max_new_tokens", type=int, default=2048)
@@ -621,10 +624,6 @@ def main():
         help="auto uses diffusion_generate when the model exposes it, otherwise generate.",
     )
     parser.add_argument("--no_chat_template", action="store_true")
-    parser.add_argument("--num_shards", type=int, default=1,
-                        help="Split the dataset across this many parallel processes (data parallel).")
-    parser.add_argument("--shard_id", type=int, default=0,
-                        help="0-indexed shard of this process. Examples are sliced round-robin.")
     args = parser.parse_args()
 
     if args.output_file is None:
@@ -637,8 +636,6 @@ def main():
             f"steps{args.diffusion_steps}",
             f"valn{args.val_n}",
         ]
-        if args.num_shards > 1:
-            parts.append(f"shard{args.shard_id}of{args.num_shards}")
         args.output_file = str(Path("eval_results") / ("_".join(parts) + ".json"))
 
     model, tokenizer = load_dllm_model(
@@ -667,8 +664,6 @@ def main():
         checkpoint_dir=args.checkpoint_dir,
         use_chat_template=not args.no_chat_template,
         generator=args.generator,
-        num_shards=args.num_shards,
-        shard_id=args.shard_id,
     )
 
     print("\n" + "=" * 70)
