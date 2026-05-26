@@ -51,7 +51,7 @@ if [[ "$OFF_POLICY" == "1" ]]; then
     RUN_CONFIG="dream7b_offpolicy_gt_v1"
     # Off-policy completion = GT answer; 1024 + 768 = 1792 keeps the forward
     # under Dream-v0's 2048 limit and matches the on-policy answer budget.
-    MAX_ANSWER_LENGTH=768
+    MAX_ANSWER_LENGTH=1024
 else
     OFF_POLICY_FLAG=""
     RUN_CONFIG="dream7b_gen768_forwardbeta0_v2"
@@ -95,6 +95,6 @@ accelerate launch \
     --lora_dropout 0.0 \
     --lora_target_modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj \
     --fixed_teacher \
-    --jsd_token_clip 0.05 \
+    --jsd_token_clip 0.0 \
     $OFF_POLICY_FLAG \
     --wandb_project OPSD
