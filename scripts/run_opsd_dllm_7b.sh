@@ -95,6 +95,6 @@ accelerate launch \
     --lora_dropout 0.0 \
     --lora_target_modules q_proj v_proj \
     --fixed_teacher \
-    --jsd_token_clip 0.0 \
+    --jsd_token_clip 0.05 \
     $OFF_POLICY_FLAG \
     --wandb_project OPSD
