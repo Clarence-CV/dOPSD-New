@@ -1,13 +1,28 @@
 # Copyright 2026 The Foundation AI Team. Licensed under the Apache License, Version 2.0.
-"""On-Policy Self-Distillation (OPSD) trainer for diffusion LLMs (e.g. Dream-7B).
+"""On-Policy Self-Distillation (OPSD) trainer for diffusion LLMs.
+
+Supports two diffusion-LM backends, selected via `student_backend`:
+  * "dream"  — Dream-7B (AutoModel, bidirectional). Logits follow Dream's
+               shifted convention (`raw[:, i-1]` predicts token `i`), so the
+               trainer applies `_shift_logits_dream` and expands the 2-D
+               attention mask to 4-D bool for SDPA. On-policy rollouts use
+               Dream's `diffusion_generate`.
+  * "llada"  — GSAI LLaDA (AutoModelForCausalLM, mask-diffusion). Logits use
+               the standard `logits[:, i]` predicts position `i` semantics;
+               no shift is applied and the 2-D attention mask is passed
+               straight through (HF CausalLM handles 2D→4D internally).
+               On-policy rollouts use a built-in progressive-unmasking
+               sampler (`_llada_generate`). Mirrors `tabom_test_code.py`'s
+               LLaDA forward path so the two pipelines produce comparable
+               logits.
 
 Same model plays both roles: the *teacher* receives the ground-truth solution
 in its prompt as privileged context, while the *student* receives only the
-problem. The student rolls out a completion via Dream's `diffusion_generate`;
-a random mask pattern is then sampled over the valid (non-pad / non-post-EOS)
-completion positions; both prompts are concatenated with the *noisy* (masked)
-completion and run through a forward pass; JSD is computed only at the
-masked positions:
+problem. The student rolls out a completion (Dream: `diffusion_generate`;
+LLaDA: `_llada_generate`); a random mask pattern is then sampled over the
+valid (non-pad / non-post-EOS) completion positions; both prompts are
+concatenated with the *noisy* (masked) completion and run through a forward
+pass; JSD is computed only at the masked positions:
 
     student_prompt  ─►  model.diffusion_generate()  ─►  completion (concrete)
                                                               │
@@ -203,7 +218,27 @@ class OPSDDLLMTrainer(SFTTrainer):
         # Off-policy mode: distill on the dataset's ground-truth answer instead
         # of an on-policy student rollout (see compute_loss for the contrast).
         off_policy: bool = False,
-        # Generation hyperparameters for Dream's diffusion_generate (student rollout).
+        # Student backend: "dream" (default) or "llada". Selects logits semantics
+        # (Dream-shifted vs. standard CausalLM) and the on-policy sampler.
+        student_backend: str = "dream",
+        # Mask-sampling strategy over the JSD-valid completion positions.
+        # Mirrors tabom_test_code.py's --mask_schedule (minus td, which needs
+        # per-example `decoding_order` trajectories the collator doesn't carry).
+        #   "diffusion" — antithetic per-example rate t ∈ [diffusion_min_t,
+        #                 diffusion_max_t]; i.i.d. Bernoulli per valid position
+        #                 (current OPSD behavior).
+        #   "fixed"     — exact-count k = round(n_valid * fixed_mask_ratio)
+        #                 positions per example. `fixed_mask_ratio` accepts
+        #                 either a single float ("0.75") or a "lo:hi" range
+        #                 ("0.25:0.75") sampled per batch.
+        mask_schedule: str = "diffusion",
+        fixed_mask_ratio: str = "0.75",
+        diffusion_min_t: float = 0.0,
+        diffusion_max_t: float = 1.0,
+        # Generation hyperparameters for the student rollout.
+        # Dream uses these via diffusion_generate; LLaDA uses them in the
+        # built-in progressive-unmasking sampler (gen_alg / gen_alg_temp are
+        # ignored on the LLaDA path).
         gen_max_new_tokens: int = 256,
         gen_steps: int = 256,
         gen_temperature: float = 0.2,
@@ -211,6 +246,16 @@ class OPSDDLLMTrainer(SFTTrainer):
         gen_alg: str = "entropy",
         gen_alg_temp: float = 0.0,
     ):
+        if student_backend not in ("dream", "llada"):
+            raise ValueError(
+                f"student_backend must be 'dream' or 'llada', got {student_backend!r}"
+            )
+        if mask_schedule not in ("diffusion", "fixed"):
+            raise ValueError(
+                f"mask_schedule must be 'diffusion' or 'fixed', got {mask_schedule!r}. "
+                "('td' from tabom_test_code.py is intentionally not supported yet — "
+                "it requires per-example decoding_order trajectories from the collator.)"
+            )
         if data_collator is None:
             data_collator = SelfDistillationDLLMDataCollator(
                 tokenizer=processing_class,
@@ -240,20 +285,27 @@ class OPSDDLLMTrainer(SFTTrainer):
             peft_config=peft_config,
         )
 
+        self.student_backend = student_backend
+
         # Dream's released diffusion sampler has a bf16/fp32 dtype bug that
         # silently corrupts the entropy-based unmask ordering, causing the
         # on-policy student rollout to collapse into degenerate repetition
         # ("the the the ..."). The eval script applies the same patch; without
         # it here, every training-step rollout is at risk and the LoRA
         # distills on garbage. Apply once, on the unwrapped model.
-        unwrapped_for_patch = self.accelerator.unwrap_model(self.model)
-        if patch_diffusion_generation_dtype(unwrapped_for_patch):
-            print("[OPSD-DLLM] Patched Dream diffusion generation dtype handling.")
+        # LLaDA uses a separate sampler (`_llada_generate`) and does not need
+        # this patch.
+        if self.student_backend == "dream":
+            unwrapped_for_patch = self.accelerator.unwrap_model(self.model)
+            if patch_diffusion_generation_dtype(unwrapped_for_patch):
+                print("[OPSD-DLLM] Patched Dream diffusion generation dtype handling.")
+            else:
+                print(
+                    "[OPSD-DLLM] Warning: could not patch Dream generation internals; "
+                    "on-policy rollouts may collapse to repetitive tokens."
+                )
         else:
-            print(
-                "[OPSD-DLLM] Warning: could not patch Dream generation internals; "
-                "on-policy rollouts may collapse to repetitive tokens."
-            )
+            print(f"[OPSD-DLLM] student_backend={self.student_backend!r}; skipping Dream dtype patches.")
 
         if getattr(args, "disable_dropout", False):
             disable_dropout_in_model(self.model)
@@ -265,6 +317,10 @@ class OPSDDLLMTrainer(SFTTrainer):
         self.jsd_token_clip = jsd_token_clip
         self.sampling_eps = sampling_eps
         self.off_policy = off_policy
+        self.mask_schedule = mask_schedule
+        self.fixed_mask_ratio = fixed_mask_ratio
+        self.diffusion_min_t = float(diffusion_min_t)
+        self.diffusion_max_t = float(diffusion_max_t)
 
         # diffusion_generate hyperparameters
         self.gen_max_new_tokens = gen_max_new_tokens
@@ -334,13 +390,32 @@ class OPSDDLLMTrainer(SFTTrainer):
         return torch.cat([logits[:, :1], logits[:, :-1]], dim=1)
 
     def _forward(self, model, input_ids, attention_mask):
-        """One forward pass returning shift-aligned logits.
+        """One forward pass returning logits aligned so that `out[:, i]` predicts token i.
 
-        Dream's modeling_dream.py passes attention_mask straight to SDPA without
-        `_prepare_4d_attention_mask`, so we expand the (B, L) mask to (B, 1, 1, L)
-        bool here. Without this, SDPA receives the wrong shape and either errors
-        or silently treats every position as visible.
+        Backend-specific:
+          * Dream: `modeling_dream.py` passes attention_mask straight to SDPA
+            without `_prepare_4d_attention_mask`, so we expand (B, L) → (B, 1, 1, L)
+            bool. Raw Dream logits use the shifted convention
+            (`raw[:, i-1]` predicts token `i`), so we apply `_shift_logits_dream`
+            to get the canonical alignment.
+          * LLaDA: standard HF CausalLM. Pass the 2-D mask straight through
+            (HF expands it internally) and skip the shift — `logits[:, i]`
+            already predicts position `i`. Mirrors `tabom_test_code.py`'s
+            LLaDA forward path. `nan_to_num` matches the safety clamp used
+            there (LLaDA can emit ±inf at very low-prob vocab slots in bf16).
         """
+        if self.student_backend == "llada":
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                outputs = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    use_cache=False,
+                )
+            return torch.nan_to_num(
+                outputs.logits.float(), nan=0.0, posinf=1e4, neginf=-1e4
+            )
+
+        # Dream path
         if attention_mask is not None and attention_mask.dim() == 2:
             attention_mask = attention_mask[:, None, None, :].bool()
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
@@ -410,7 +485,11 @@ class OPSDDLLMTrainer(SFTTrainer):
         return completion_mask * trailing_keep.long()
 
     def _generate_student_completion(self, model, prompt_ids, prompt_mask):
-        """On-policy student rollout via Dream's diffusion_generate.
+        """On-policy student rollout.
+
+        Backend-specific:
+          * Dream: `unwrapped.diffusion_generate(...)` with the Dream-7B API.
+          * LLaDA: `_llada_generate(...)`, a progressive-unmasking sampler.
 
         Generation is non-differentiable (it samples discrete tokens), so this
         runs under torch.no_grad. The wrapped model is unwrapped via
@@ -431,18 +510,21 @@ class OPSDDLLMTrainer(SFTTrainer):
             unwrapped.eval()
             try:
                 with torch.no_grad():
-                    gen_out = unwrapped.diffusion_generate(
-                        prompt_ids,
-                        attention_mask=prompt_mask,
-                        max_new_tokens=self.gen_max_new_tokens,
-                        output_history=False,
-                        return_dict_in_generate=True,
-                        steps=self.gen_steps,
-                        temperature=self.gen_temperature,
-                        top_p=self.gen_top_p,
-                        alg=self.gen_alg,
-                        alg_temp=self.gen_alg_temp,
-                    )
+                    if self.student_backend == "llada":
+                        gen_out = self._llada_generate(unwrapped, prompt_ids, prompt_mask)
+                    else:
+                        gen_out = unwrapped.diffusion_generate(
+                            prompt_ids,
+                            attention_mask=prompt_mask,
+                            max_new_tokens=self.gen_max_new_tokens,
+                            output_history=False,
+                            return_dict_in_generate=True,
+                            steps=self.gen_steps,
+                            temperature=self.gen_temperature,
+                            top_p=self.gen_top_p,
+                            alg=self.gen_alg,
+                            alg_temp=self.gen_alg_temp,
+                        )
             finally:
                 if was_training:
                     unwrapped.train()
@@ -450,16 +532,163 @@ class OPSDDLLMTrainer(SFTTrainer):
         completion_mask = self._build_completion_mask(completion_ids)
         return completion_ids, completion_mask
 
+    @torch.no_grad()
+    def _llada_generate(self, model, prompt_ids, prompt_mask):
+        """LLaDA-style progressive-unmasking sampler.
+
+        Starts with `gen_max_new_tokens` <mask> tokens appended to the prompt
+        and runs `gen_steps` denoising passes. Each pass:
+          1. Forward [prompt | current_completion] through the (unwrapped) model.
+             Uses the 2-D attention mask path that matches `tabom_test_code.py`
+             so the logits semantics match the training-time forward.
+          2. Apply temperature + top-p, take argmax sample + per-position
+             confidence (max prob) over the vocabulary.
+          3. Unmask the top ceil(remaining_masks / remaining_steps) positions
+             per example, by confidence. Already-unmasked positions are frozen.
+
+        The final pass force-unmasks any residual <mask> with its argmax
+        sample, so the returned completion is always concrete.
+
+        `gen_alg` / `gen_alg_temp` (Dream-only knobs) are ignored on this path.
+
+        Returns: an object with `.sequences = [B, prompt_len + gen_max_new_tokens]`,
+        matching the interface Dream's `diffusion_generate` returns under
+        `return_dict_in_generate=True`.
+        """
+        B, L_p = prompt_ids.shape
+        L_c = self.gen_max_new_tokens
+        device = prompt_ids.device
+
+        completion = torch.full(
+            (B, L_c), self.mask_token_id, dtype=prompt_ids.dtype, device=device
+        )
+        full_ids = torch.cat([prompt_ids, completion], dim=1)
+        comp_attn = torch.ones((B, L_c), dtype=prompt_mask.dtype, device=device)
+        full_mask = torch.cat([prompt_mask, comp_attn], dim=1)
+
+        steps = max(1, self.gen_steps)
+        temp = max(self.gen_temperature, 1e-8) if self.gen_temperature > 0 else 1.0
+        top_p = self.gen_top_p
+
+        for step in range(steps):
+            is_mask = full_ids[:, L_p:] == self.mask_token_id  # [B, L_c]
+            if not is_mask.any():
+                break
+
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                out = model(
+                    input_ids=full_ids,
+                    attention_mask=full_mask,
+                    use_cache=False,
+                )
+            logits = torch.nan_to_num(
+                out.logits[:, L_p:, :].float(), nan=0.0, posinf=1e4, neginf=-1e4
+            )
+
+            if self.gen_temperature > 0:
+                logits = logits / temp
+
+            if top_p is not None and 0.0 < top_p < 1.0:
+                sorted_logits, sorted_idx = torch.sort(logits, dim=-1, descending=True)
+                cumprobs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
+                remove = cumprobs > top_p
+                # Keep at least the top-1 token in every position.
+                remove[..., 1:] = remove[..., :-1].clone()
+                remove[..., 0] = False
+                idx_remove = torch.zeros_like(remove).scatter_(-1, sorted_idx, remove)
+                logits = logits.masked_fill(idx_remove, float("-inf"))
+
+            probs = F.softmax(logits, dim=-1)
+            confidence, sampled = probs.max(dim=-1)  # both [B, L_c]
+
+            # Only currently-masked positions are candidates for this step.
+            confidence = torch.where(
+                is_mask, confidence, torch.full_like(confidence, -1.0)
+            )
+
+            remaining_steps = steps - step
+            for b in range(B):
+                n_mask_b = int(is_mask[b].sum().item())
+                if n_mask_b == 0:
+                    continue
+                # Ceil-div: spread the remaining unmasks across the remaining steps.
+                k = (n_mask_b + remaining_steps - 1) // remaining_steps
+                k = min(k, n_mask_b)
+                _, top_idx = confidence[b].topk(k)
+                full_ids[b, L_p + top_idx] = sampled[b, top_idx]
+
+        # Safety net: force-unmask any residual <mask> with argmax sample so
+        # the rollout is fully concrete before being passed to the JSD pass.
+        residual = full_ids[:, L_p:] == self.mask_token_id
+        if residual.any():
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                out = model(
+                    input_ids=full_ids,
+                    attention_mask=full_mask,
+                    use_cache=False,
+                )
+            logits = torch.nan_to_num(
+                out.logits[:, L_p:, :].float(), nan=0.0, posinf=1e4, neginf=-1e4
+            )
+            sampled = logits.argmax(dim=-1)
+            full_ids[:, L_p:] = torch.where(residual, sampled, full_ids[:, L_p:])
+
+        class _GenOut:
+            pass
+
+        gen_out = _GenOut()
+        gen_out.sequences = full_ids
+        return gen_out
+
     def _sample_mask(self, valid: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Antithetic per-example mask rate, restricted to *valid* positions.
+        """Sample a mask over *valid* positions according to `self.mask_schedule`.
 
         Args:
             valid: [B, L] bool/int — 1 where the position is allowed to be masked
-                   (real generated token, i.e. completion_mask).
+                   (real generated token within the JSD-eligible region, i.e.
+                   `jsd_valid_mask`).
 
         Returns:
             mask:           [B, L] bool — True at randomly masked positions
-            p_mask_sample:  [B] float  — the per-example mask rate (diagnostics)
+            p_mask_sample:  [B] float  — per-example mask rate (diagnostics)
+
+        Strategies (mirroring `tabom_test_code.py`):
+            "diffusion"  — antithetic per-example rate, i.i.d. Bernoulli per
+                           valid position. The original OPSD behavior.
+            "fixed"      — exact-count: pick k = round(n_valid * mask_ratio)
+                           positions uniformly without replacement per example.
+                           Matches tabom_test_code.py:903-922.
+
+        Both schedules then enforce a "≥1 masked position per non-empty row"
+        invariant so every row contributes at least one JSD term.
+        """
+        if self.mask_schedule == "fixed":
+            mask, p_mask_sample = self._fixed_mask(valid)
+        else:
+            mask, p_mask_sample = self._diffusion_mask(valid)
+
+        # Guarantee at least one masked position per example with valid tokens —
+        # otherwise that row contributes zero JSD terms. Done once here so each
+        # strategy doesn't have to re-implement it.
+        valid_b = valid.bool()
+        B = valid_b.shape[0]
+        device = valid.device
+        for i in range(B):
+            if valid_b[i].any() and not mask[i].any():
+                valid_idx = valid_b[i].nonzero(as_tuple=False).flatten()
+                j = int(torch.randint(0, valid_idx.numel(), (1,), device=device).item())
+                mask[i, int(valid_idx[j].item())] = True
+        return mask, p_mask_sample
+
+    def _diffusion_mask(self, valid: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Antithetic per-example mask rate, i.i.d. Bernoulli per valid position.
+
+        Variance-reduced version of `tabom_test_code.py`'s `diffusion` schedule
+        (line 814-825): we use a single antithetic uniform `(u0 + i/B) mod 1`
+        so the B per-example rates evenly stratify [diffusion_min_t,
+        diffusion_max_t], instead of B i.i.d. uniforms. `sampling_eps` acts as
+        a lower bound on the rate (no example ever sees an effectively
+        all-concrete completion).
         """
         device = valid.device
         valid_b = valid.bool()
@@ -467,20 +696,64 @@ class OPSDDLLMTrainer(SFTTrainer):
 
         u0 = torch.rand(1, device=device, dtype=torch.float32)
         idx = torch.arange(B, device=device, dtype=torch.float32)
-        t = (u0 + idx / B) % 1
-        p_mask_sample = (1 - self.sampling_eps) * t + self.sampling_eps  # [B]
+        t_base = (u0 + idx / B) % 1  # antithetic uniform in [0, 1)
+
+        lower = max(self.diffusion_min_t, self.sampling_eps)
+        upper = self.diffusion_max_t
+        if upper <= lower:
+            p_mask_sample = torch.full(
+                (B,), float(lower), device=device, dtype=torch.float32
+            )
+        else:
+            # Linear interpolation [0,1) -> [lower, upper). Preserves the
+            # original OPSD shift-by-eps formula when min_t=0, max_t=1.
+            p_mask_sample = lower + (upper - lower) * t_base
+
         p_mask_grid = p_mask_sample[:, None].expand(B, L)
         rand = torch.rand((B, L), device=device)
         mask = (rand < p_mask_grid) & valid_b
-
-        # Guarantee at least one masked position per example with valid tokens —
-        # otherwise that row contributes zero JSD terms.
-        for i in range(B):
-            if valid_b[i].any() and not mask[i].any():
-                valid_idx = valid_b[i].nonzero(as_tuple=False).flatten()
-                j = int(torch.randint(0, valid_idx.numel(), (1,), device=device).item())
-                mask[i, int(valid_idx[j].item())] = True
         return mask, p_mask_sample
+
+    def _fixed_mask(self, valid: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Exact-count masking: k = round(n_valid * mask_ratio) per example.
+
+        Mirrors `tabom_test_code.py:903-922`. `fixed_mask_ratio` is a single
+        float ("0.75") or a "lo:hi" range ("0.25:0.75"); in the range case one
+        ratio is sampled per call and applied uniformly across the batch (same
+        as tabom's `mr_global`). For each example, k positions are drawn
+        uniformly without replacement from `valid`.
+        """
+        device = valid.device
+        valid_b = valid.bool()
+        B, L = valid_b.shape
+
+        mr = self._sample_fixed_mask_ratio()
+        mask = torch.zeros_like(valid_b)
+        for b in range(B):
+            positions = valid_b[b].nonzero(as_tuple=False).flatten()
+            n = positions.shape[0]
+            if n == 0:
+                continue
+            k = max(1, int(round(n * mr)))
+            k = min(k, n)
+            chosen = positions[torch.randperm(n, device=device)[:k]]
+            mask[b, chosen] = True
+        p_mask_sample = torch.full((B,), float(mr), device=device, dtype=torch.float32)
+        return mask, p_mask_sample
+
+    def _sample_fixed_mask_ratio(self) -> float:
+        """Parse `self.fixed_mask_ratio` ("0.75" or "0.25:0.75") into a scalar.
+
+        Same semantics as `tabom_test_code.py:sample_groundtruth_mask_ratio_from_arg`.
+        """
+        s = self.fixed_mask_ratio
+        if isinstance(s, (int, float)):
+            return float(s)
+        s = str(s)
+        if ":" in s:
+            lo, hi = (float(x) for x in s.split(":", 1))
+            return lo + float(torch.rand(1).item()) * (hi - lo)
+        return float(s)
 
     @staticmethod
     def generalized_jsd_loss(

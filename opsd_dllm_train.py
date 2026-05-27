@@ -1,4 +1,4 @@
-"""Entry point: OPSD self-distillation training for diffusion LLMs (Dream-7B)."""
+"""Entry point: OPSD self-distillation training for diffusion LLMs (Dream-7B or LLaDA-8B)."""
 
 import os
 from dataclasses import dataclass, field
@@ -8,7 +8,7 @@ import torch
 import wandb
 
 from datasets import load_dataset
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
 from trl import (
     ModelConfig,
@@ -59,6 +59,15 @@ class CustomScriptArguments(ScriptArguments):
             "concrete GT. When set, --gen_* generation flags are unused."
         },
     )
+    student_backend: str = field(
+        default="dream",
+        metadata={
+            "help": "Student diffusion backend: 'dream' (Dream-7B, AutoModel) or "
+            "'llada' (GSAI LLaDA, AutoModelForCausalLM). Selects the model class, "
+            "the PEFT task type, and the logits/attention-mask path inside "
+            "OPSDDLLMTrainer (Dream-shifted vs. standard CausalLM)."
+        },
+    )
     mask_token_id: int = field(
         default=-1,
         metadata={"help": "Mask token id; -1 = use tokenizer.mask_token_id."},
@@ -66,6 +75,31 @@ class CustomScriptArguments(ScriptArguments):
     sampling_eps: float = field(
         default=1e-3,
         metadata={"help": "Lower bound on the antithetic per-example mask rate over the on-policy completion."},
+    )
+    mask_schedule: str = field(
+        default="diffusion",
+        metadata={
+            "help": "Mask-sampling strategy over the JSD-valid completion positions: "
+            "'diffusion' (antithetic per-example rate, i.i.d. Bernoulli per valid "
+            "position — original OPSD behavior) or 'fixed' (exact-count "
+            "k = round(n_valid * fixed_mask_ratio) per example, mirroring "
+            "tabom_test_code.py's fixed schedule)."
+        },
+    )
+    fixed_mask_ratio: str = field(
+        default="0.75",
+        metadata={
+            "help": "Only used with --mask_schedule=fixed. Either a single float "
+            "('0.75') or a 'lo:hi' range ('0.25:0.75') sampled uniformly per batch."
+        },
+    )
+    diffusion_min_t: float = field(
+        default=0.0,
+        metadata={"help": "Only used with --mask_schedule=diffusion. Lower bound on per-example mask rate (before sampling_eps floor)."},
+    )
+    diffusion_max_t: float = field(
+        default=1.0,
+        metadata={"help": "Only used with --mask_schedule=diffusion. Upper bound on per-example mask rate."},
     )
     max_prompt_length: int = field(
         default=1024,
@@ -134,12 +168,19 @@ if __name__ == "__main__":
     parser = TrlParser((CustomScriptArguments, GOLDConfig, ModelConfig))
     script_args, training_args, model_args = parser.parse_args_and_config()
 
-    # Dream is a diffusion LM, not an AR causal LM. PeftModelForCausalLM
-    # fetches `base_model.prepare_inputs_for_generation` at __init__, which
-    # Dream does not expose — leading to AttributeError. Forcing task_type=None
-    # selects PEFT's generic PeftModel wrapper instead, which delegates
-    # attribute access to the base model so `diffusion_generate` still works.
-    model_args.lora_task_type = None
+    if script_args.student_backend == "llada":
+        # LLaDA is loaded as AutoModelForCausalLM, so the standard
+        # PeftModelForCausalLM wrapper is correct: prepare_inputs_for_generation
+        # exists on the base, and HF CausalLM forward is what the trainer's
+        # LLaDA path calls.
+        model_args.lora_task_type = "CAUSAL_LM"
+    else:
+        # Dream is a diffusion LM, not an AR causal LM. PeftModelForCausalLM
+        # fetches `base_model.prepare_inputs_for_generation` at __init__, which
+        # Dream does not expose — leading to AttributeError. Forcing task_type=None
+        # selects PEFT's generic PeftModel wrapper instead, which delegates
+        # attribute access to the base model so `diffusion_generate` still works.
+        model_args.lora_task_type = None
 
     # === Run / output naming ==================================================
     lr_str = f"{training_args.learning_rate:.0e}".replace("e-0", "e-")
@@ -156,7 +197,10 @@ if __name__ == "__main__":
             training_args.output_dir = str(Path(training_args.output_dir) / script_args.run_config)
     else:
         model_name = model_args.model_name_or_path.split("/")[-1]
-        run_name = f"opsd_dllm_{model_name}_lr{lr_str}_bs{effective_bs}_ans{script_args.max_answer_length}"
+        run_name = (
+            f"opsd_dllm_{script_args.student_backend}_{model_name}"
+            f"_lr{lr_str}_bs{effective_bs}_ans{script_args.max_answer_length}"
+        )
         if script_args.fixed_teacher:
             run_name += "_fixteach"
 
@@ -190,6 +234,11 @@ if __name__ == "__main__":
                 "lora_alpha": model_args.lora_alpha if model_args.use_peft else None,
                 "fixed_teacher": script_args.fixed_teacher,
                 "off_policy": script_args.off_policy,
+                "student_backend": script_args.student_backend,
+                "mask_schedule": script_args.mask_schedule,
+                "fixed_mask_ratio": script_args.fixed_mask_ratio,
+                "diffusion_min_t": script_args.diffusion_min_t,
+                "diffusion_max_t": script_args.diffusion_max_t,
                 "sampling_eps": script_args.sampling_eps,
                 "top_k_loss": script_args.top_k_loss if script_args.top_k_loss > 0 else None,
                 "jsd_token_clip": script_args.jsd_token_clip if script_args.jsd_token_clip > 0 else None,
@@ -218,9 +267,18 @@ if __name__ == "__main__":
         raise ValueError("Tokenizer has no mask_token_id; pass --mask_token_id explicitly.")
     print(f"[opsd_dllm_train] Using mask_token_id = {mask_token_id}")
 
-    # === Model (Dream-7B is a diffusion LM — use AutoModel + trust_remote_code) ===
+    # === Model ================================================================
+    # Dream-7B: diffusion LM exposed via AutoModel + trust_remote_code (no
+    #           standard HF CausalLM interface; generation is `diffusion_generate`).
+    # LLaDA-8B: standard HF CausalLM, loaded via AutoModelForCausalLM. The
+    #           trainer's LLaDA forward path expects this class so logits keep
+    #           the `logits[:, i] predicts token i` semantics (see
+    #           `tabom_test_code.py` and `OPSDDLLMTrainer._forward`).
     model_dtype = _resolve_dtype(model_args)
-    print(f"\n{'='*80}\nLoading {model_args.model_name_or_path} with dtype={model_dtype}\n{'='*80}\n")
+    print(
+        f"\n{'='*80}\nLoading {model_args.model_name_or_path} "
+        f"(student_backend={script_args.student_backend}, dtype={model_dtype})\n{'='*80}\n"
+    )
 
     model_kwargs = dict(
         revision=model_args.model_revision,
@@ -233,7 +291,10 @@ if __name__ == "__main__":
         model_kwargs["device_map"] = get_kbit_device_map()
         model_kwargs["quantization_config"] = quantization_config
 
-    model = AutoModel.from_pretrained(model_args.model_name_or_path, **model_kwargs)
+    if script_args.student_backend == "llada":
+        model = AutoModelForCausalLM.from_pretrained(model_args.model_name_or_path, **model_kwargs)
+    else:
+        model = AutoModel.from_pretrained(model_args.model_name_or_path, **model_kwargs)
 
     if training_args.gradient_checkpointing:
         # use_reentrant=False is required when training with PEFT/LoRA: the
@@ -308,8 +369,13 @@ if __name__ == "__main__":
         peft_config=get_peft_config(model_args),
         fixed_teacher=script_args.fixed_teacher,
         off_policy=script_args.off_policy,
+        student_backend=script_args.student_backend,
         mask_token_id=mask_token_id,
         sampling_eps=script_args.sampling_eps,
+        mask_schedule=script_args.mask_schedule,
+        fixed_mask_ratio=script_args.fixed_mask_ratio,
+        diffusion_min_t=script_args.diffusion_min_t,
+        diffusion_max_t=script_args.diffusion_max_t,
         max_prompt_length=script_args.max_prompt_length,
         max_answer_length=script_args.max_answer_length,
         top_k_loss=script_args.top_k_loss if script_args.top_k_loss > 0 else None,
