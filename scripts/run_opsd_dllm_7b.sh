@@ -66,7 +66,7 @@ accelerate launch \
     --main_process_port 13379 \
     opsd_dllm_train.py \
     --model_name_or_path Dream-org/Dream-v0-Instruct-7B \
-    --learning_rate 5e-6 \
+    --learning_rate 2e-6 \
     --max_grad_norm 0.1 \
     --per_device_train_batch_size 2 \
     --gradient_accumulation_steps 1 \
@@ -90,10 +90,10 @@ accelerate launch \
     --temperature 1.0 \
     --sampling_eps 1e-3 \
     --use_peft \
-    --lora_r 64 \
-    --lora_alpha 128 \
+    --lora_r 16 \
+    --lora_alpha 16 \
     --lora_dropout 0.0 \
-    --lora_target_modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj \
+    --lora_target_modules q_proj v_proj \
     --fixed_teacher \
     --jsd_token_clip 0.0 \
     $OFF_POLICY_FLAG \
