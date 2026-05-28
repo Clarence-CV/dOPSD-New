@@ -79,7 +79,7 @@ fi
 MODEL_NAME="${MODEL_NAME:-$DEFAULT_MODEL_NAME}"
 
 # --- Mask-schedule toggle: diffusion (default) vs fixed -----------------------
-MASK_SCHEDULE="${MASK_SCHEDULE:-diffusion}"
+MASK_SCHEDULE="${MASK_SCHEDULE:-fixed}"
 FIXED_MASK_RATIO="${FIXED_MASK_RATIO:-0.75}"
 DIFF_MIN_T="${DIFF_MIN_T:-0.0}"
 DIFF_MAX_T="${DIFF_MAX_T:-1.0}"
@@ -137,7 +137,7 @@ accelerate launch \
     --max_answer_length "$MAX_ANSWER_LENGTH" \
     --gen_max_new_tokens 768 \
     --gen_steps 768 \
-    --gen_temperature 0.5 \
+    --gen_temperature 0.7 \
     --gen_top_p 0.95 \
     --gen_alg entropy \
     --gen_alg_temp 0.5 \
