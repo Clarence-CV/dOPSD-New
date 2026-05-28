@@ -124,7 +124,6 @@ accelerate launch \
     --learning_rate 2e-5 \
     --max_grad_norm 1.0 \
     --per_device_train_batch_size 2 \
-    --gradient_accumulation_steps 1 \
     --gradient_checkpointing \
     --output_dir ./outputs/opsd_dllm/ \
     --run_config "$RUN_CONFIG" \
