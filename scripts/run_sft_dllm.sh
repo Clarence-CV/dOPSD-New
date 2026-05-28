@@ -36,13 +36,13 @@ accelerate launch \
     --main_process_port 19347 \
     sft_train_dllm.py \
     --model_name_or_path Dream-org/Dream-v0-Instruct-7B \
-    --learning_rate 5e-6 \
+    --learning_rate 2e-5 \
     --max_grad_norm 0.1 \
     --per_device_train_batch_size 2 \
     --gradient_accumulation_steps 1 \
-    --output_dir ./outputs/sft_dllm/dream7b-4epochs-30k \
-    --run_config sft_dllm_dream7b_4epochs_30k \
-    --num_train_epochs 4 \
+    --output_dir ./outputs/sft_dllm/dream7b-2epochs-30k \
+    --run_config sft_dllm_dream7b_2epochs_30k \
+    --num_train_epochs 2 \
     --gradient_checkpointing \
     --attn_implementation sdpa \
     --torch_dtype bfloat16 \
@@ -51,8 +51,8 @@ accelerate launch \
     --remove_unused_columns false \
     --sampling_eps 1e-3 \
     --use_peft \
-    --lora_r 64 \
-    --lora_alpha 128 \
+    --lora_r 32 \
+    --lora_alpha 32 \
     --lora_dropout 0.0 \
     --lora_target_modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj \
     --logging_steps 5 \
