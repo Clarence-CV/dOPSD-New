@@ -136,10 +136,10 @@ accelerate launch \
     --max_answer_length "$MAX_ANSWER_LENGTH" \
     --gen_max_new_tokens 768 \
     --gen_steps 768 \
-    --gen_temperature 0.0 \
+    --gen_temperature 1.0 \
     --gen_top_p 0.95 \
     --gen_alg entropy \
-    --gen_alg_temp 0.1 \
+    --gen_alg_temp 0.5 \
     --beta 1 \
     --temperature 1.0 \
     --sampling_eps 1e-3 \
