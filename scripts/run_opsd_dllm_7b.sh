@@ -121,8 +121,8 @@ accelerate launch \
     opsd_dllm_train.py \
     --model_name_or_path "$MODEL_NAME" \
     --student_backend "$STUDENT_BACKEND" \
-    --learning_rate 2e-6 \
-    --max_grad_norm 0.1 \
+    --learning_rate 2e-5 \
+    --max_grad_norm 1.0 \
     --per_device_train_batch_size 2 \
     --gradient_accumulation_steps 1 \
     --gradient_checkpointing \
@@ -137,10 +137,10 @@ accelerate launch \
     --max_answer_length "$MAX_ANSWER_LENGTH" \
     --gen_max_new_tokens 768 \
     --gen_steps 768 \
-    --gen_temperature 0.7 \
+    --gen_temperature 0.0 \
     --gen_top_p 0.95 \
     --gen_alg entropy \
-    --gen_alg_temp 0.5 \
+    --gen_alg_temp 0.1 \
     --beta 0 \
     --temperature 1.0 \
     --sampling_eps 1e-3 \
@@ -149,10 +149,10 @@ accelerate launch \
     --diffusion_min_t "$DIFF_MIN_T" \
     --diffusion_max_t "$DIFF_MAX_T" \
     --use_peft \
-    --lora_r 16 \
-    --lora_alpha 16 \
+    --lora_r 32 \
+    --lora_alpha 32 \
     --lora_dropout 0.0 \
-    --lora_target_modules q_proj v_proj \
+    --lora_target_modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj \
     --fixed_teacher \
     --jsd_token_clip 0.05 \
     $OFF_POLICY_FLAG \
