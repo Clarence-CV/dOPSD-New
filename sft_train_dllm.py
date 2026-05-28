@@ -68,6 +68,30 @@ class DLLMScriptArguments(ScriptArguments):
         default=1e-3,
         metadata={"help": "Lower bound on the per-example answer mask rate."},
     )
+    mask_schedule: str = field(
+        default="diffusion",
+        metadata={
+            "help": "Mask-sampling strategy over answer positions (mirrors OPSDDLLMTrainer): "
+            "'diffusion' (antithetic per-example rate t ∈ [diffusion_min_t, diffusion_max_t], "
+            "i.i.d. Bernoulli per valid position — the LLaDA ELBO default) or 'fixed' "
+            "(exact-count k = round(n_valid * fixed_mask_ratio) positions per example)."
+        },
+    )
+    fixed_mask_ratio: str = field(
+        default="0.75",
+        metadata={
+            "help": "Only used with --mask_schedule=fixed. Either a single float ('0.75') "
+            "or a 'lo:hi' range ('0.25:0.75') sampled uniformly once per batch."
+        },
+    )
+    diffusion_min_t: float = field(
+        default=0.0,
+        metadata={"help": "Only used with --mask_schedule=diffusion. Lower bound on the per-example mask rate (before sampling_eps floor)."},
+    )
+    diffusion_max_t: float = field(
+        default=1.0,
+        metadata={"help": "Only used with --mask_schedule=diffusion. Upper bound on the per-example mask rate."},
+    )
     max_prompt_length: int = field(
         default=512,
         metadata={
@@ -166,42 +190,133 @@ class SFTDLLMDataCollator:
 class SFTDLLMTrainer(Trainer):
     """HF Trainer with LLaDA-style masked-prediction loss for diffusion LMs."""
 
-    def __init__(self, *args, mask_token_id: int, sampling_eps: float = 1e-3, **kwargs):
+    def __init__(
+        self,
+        *args,
+        mask_token_id: int,
+        sampling_eps: float = 1e-3,
+        mask_schedule: str = "diffusion",
+        fixed_mask_ratio: str = "0.75",
+        diffusion_min_t: float = 0.0,
+        diffusion_max_t: float = 1.0,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
+        if mask_schedule not in ("diffusion", "fixed"):
+            raise ValueError(
+                f"mask_schedule must be 'diffusion' or 'fixed', got {mask_schedule!r}"
+            )
         self.mask_token_id = mask_token_id
         self.sampling_eps = sampling_eps
+        self.mask_schedule = mask_schedule
+        self.fixed_mask_ratio = fixed_mask_ratio
+        self.diffusion_min_t = float(diffusion_min_t)
+        self.diffusion_max_t = float(diffusion_max_t)
 
     def _sample_answer_mask(self, answer_mask: torch.Tensor):
-        """Sample per-example mask rate t and a Bernoulli(t) mask over the answer span.
+        """Sample a mask over the answer span according to `self.mask_schedule`.
 
         Returns:
             mask:           [B, L] bool — True at positions to replace with <mask>.
-            p_mask_sample:  [B]    float — the per-example mask rate t.
+            p_mask_sample:  [B]    float — per-example mask rate (used as 1/t
+                            ELBO importance weight in compute_loss; in fixed
+                            mode this is just the constant fixed_mask_ratio).
+
+        Strategies (mirror OPSDDLLMTrainer):
+            "diffusion" — antithetic per-example rate, i.i.d. Bernoulli over
+                          valid positions. The LLaDA ELBO default.
+            "fixed"     — exact-count: pick k = round(n_valid * mask_ratio)
+                          positions uniformly without replacement per example.
+                          (1/t weight becomes the constant 1/mask_ratio.)
+
+        Both schedules enforce ≥1 masked position per non-empty row so the
+        loss is always well-defined.
         """
-        B, L = answer_mask.shape
-        device = answer_mask.device
+        if self.mask_schedule == "fixed":
+            mask, p_mask_sample = self._fixed_mask(answer_mask)
+        else:
+            mask, p_mask_sample = self._diffusion_mask(answer_mask)
 
-        # Antithetic sampling: example 2k and 2k+1 share a base draw u_k and
-        # receive t = u_k and t = 1 - u_k respectively. Both halves of a pair
-        # must come from the SAME u_k for the variance reduction to apply.
-        half = (B + 1) // 2
-        u = torch.rand(half, device=device)
-        t = torch.empty(B, device=device)
-        t[0::2] = u[: t[0::2].numel()]
-        t[1::2] = 1.0 - u[: t[1::2].numel()]
-        p = (1 - self.sampling_eps) * t + self.sampling_eps  # [B]
-
-        rand = torch.rand(B, L, device=device)
+        # Guarantee at least one masked position per example with valid tokens
+        # so the loss is well-defined. Done once here so each strategy doesn't
+        # have to re-implement it.
         valid = answer_mask.bool()
-        mask = (rand < p[:, None]) & valid
-
-        # Guarantee at least one masked position per example so the loss is well-defined.
+        B = valid.shape[0]
+        device = answer_mask.device
         for i in range(B):
             if valid[i].any() and not mask[i].any():
                 idx = valid[i].nonzero(as_tuple=False).flatten()
                 pick = idx[torch.randint(0, idx.numel(), (1,), device=device)]
                 mask[i, pick] = True
+        return mask, p_mask_sample
+
+    def _diffusion_mask(self, answer_mask: torch.Tensor):
+        """Antithetic per-example mask rate, i.i.d. Bernoulli per valid position.
+
+        Pair (2k, 2k+1) shares a base draw u_k: example 2k gets t = u_k and
+        example 2k+1 gets t = 1 - u_k. Variance reduction requires both halves
+        of a pair to come from the SAME u_k. The rate is then mapped from
+        [0, 1] to [max(diffusion_min_t, sampling_eps), diffusion_max_t] —
+        preserves the original (1 - eps)·t + eps formula when min_t=0, max_t=1.
+        """
+        B, L = answer_mask.shape
+        device = answer_mask.device
+
+        half = (B + 1) // 2
+        u = torch.rand(half, device=device)
+        t = torch.empty(B, device=device)
+        t[0::2] = u[: t[0::2].numel()]
+        t[1::2] = 1.0 - u[: t[1::2].numel()]
+
+        lower = max(self.diffusion_min_t, self.sampling_eps)
+        upper = self.diffusion_max_t
+        if upper <= lower:
+            p = torch.full((B,), float(lower), device=device)
+        else:
+            p = lower + (upper - lower) * t  # [B]
+
+        rand = torch.rand(B, L, device=device)
+        valid = answer_mask.bool()
+        mask = (rand < p[:, None]) & valid
         return mask, p
+
+    def _fixed_mask(self, answer_mask: torch.Tensor):
+        """Exact-count masking: k = round(n_valid * fixed_mask_ratio) per example.
+
+        Mirrors OPSDDLLMTrainer._fixed_mask. fixed_mask_ratio is a single float
+        ("0.75") or a "lo:hi" range ("0.25:0.75"); in the range case one ratio
+        is sampled per call and applied uniformly across the batch. For each
+        example, k positions are drawn uniformly without replacement from the
+        answer span.
+        """
+        B, L = answer_mask.shape
+        device = answer_mask.device
+        valid = answer_mask.bool()
+
+        mr = self._sample_fixed_mask_ratio()
+        mask = torch.zeros_like(valid)
+        for b in range(B):
+            positions = valid[b].nonzero(as_tuple=False).flatten()
+            n = positions.shape[0]
+            if n == 0:
+                continue
+            k = max(1, int(round(n * mr)))
+            k = min(k, n)
+            chosen = positions[torch.randperm(n, device=device)[:k]]
+            mask[b, chosen] = True
+        p_mask_sample = torch.full((B,), float(mr), device=device, dtype=torch.float32)
+        return mask, p_mask_sample
+
+    def _sample_fixed_mask_ratio(self) -> float:
+        """Parse self.fixed_mask_ratio ('0.75' or '0.25:0.75') into a scalar."""
+        s = self.fixed_mask_ratio
+        if isinstance(s, (int, float)):
+            return float(s)
+        s = str(s)
+        if ":" in s:
+            lo, hi = (float(x) for x in s.split(":", 1))
+            return lo + float(torch.rand(1).item()) * (hi - lo)
+        return float(s)
 
     def _forward(self, model, input_ids, attention_mask):
         # Dream's modeling_dream.py passes attention_mask straight to SDPA, so
@@ -342,6 +457,10 @@ if __name__ == "__main__":
         "max_prompt_length": script_args.max_prompt_length,
         "max_answer_length": script_args.max_answer_length,
         "sampling_eps": script_args.sampling_eps,
+        "mask_schedule": script_args.mask_schedule,
+        "fixed_mask_ratio": script_args.fixed_mask_ratio,
+        "diffusion_min_t": script_args.diffusion_min_t,
+        "diffusion_max_t": script_args.diffusion_max_t,
         "use_peft": model_args.use_peft,
         "lora_r": model_args.lora_r if model_args.use_peft else None,
         "lora_alpha": model_args.lora_alpha if model_args.use_peft else None,
@@ -436,6 +555,10 @@ if __name__ == "__main__":
         processing_class=tokenizer,
         mask_token_id=mask_token_id,
         sampling_eps=script_args.sampling_eps,
+        mask_schedule=script_args.mask_schedule,
+        fixed_mask_ratio=script_args.fixed_mask_ratio,
+        diffusion_min_t=script_args.diffusion_min_t,
+        diffusion_max_t=script_args.diffusion_max_t,
     )
 
     trainer.train()
