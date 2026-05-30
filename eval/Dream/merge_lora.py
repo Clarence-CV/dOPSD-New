@@ -25,12 +25,12 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(name, trust_remote_code=True)
 
-    peft_model = PeftModel.from_pretrained(base_model, "<path_to_lora_checkpoint")
+    peft_model = PeftModel.from_pretrained(base_model, "/home/stud_dat/on_policy_self_distill_dLLM/outputs/sft_dllm/dream7b-fix075-2epochs-30k/sft_dllm_dream7b_fix075_2epochs_30k/checkpoint-6600")
 
     merged_model = peft_model.merge_and_unload()
 
-    merged_model.save_pretrained("<output_model_path>")
-    tokenizer.save_pretrained("<output_model_path>")
+    merged_model.save_pretrained("/home/stud_dat/on_policy_self_distill_dLLM/outputs/sft_dllm/merged_checkpoint_6k6")
+    tokenizer.save_pretrained("/home/stud_dat/on_policy_self_distill_dLLM/outputs/sft_dllm/merged_checkpoint_6k6")
 
 
 if __name__ == "__main__":

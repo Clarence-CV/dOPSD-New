@@ -5,7 +5,7 @@ model:
   torch_dtype: "bfloat16"
 
 training:
-  output_dir: "output_model/dParallel_Dream_Lora"
+  output_dir: "outputs/opsd_dllm"
   num_train_epochs: 3
   gradient_accumulation_steps: 8
   per_device_train_batch_size: 1
