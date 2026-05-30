@@ -180,7 +180,7 @@ if __name__ == "__main__":
         # Dream does not expose — leading to AttributeError. Forcing task_type=None
         # selects PEFT's generic PeftModel wrapper instead, which delegates
         # attribute access to the base model so `diffusion_generate` still works.
-        model_args.lora_task_type = "CAUSAL_LM"
+        model_args.lora_task_type = None
 
     # === Run / output naming ==================================================
     lr_str = f"{training_args.learning_rate:.0e}".replace("e-0", "e-")
