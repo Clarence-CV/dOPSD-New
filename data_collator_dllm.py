@@ -58,26 +58,20 @@ class SelfDistillationDLLMDataCollator:
         )
 
     def _build_student_prompt(self, problem: str) -> str:
-        user_msg = f"Problem: {problem}\n\n{self.answer_instruction}"
+        # Match eval/Dream/dream_train.py: raw question wrapped in the chat
+        # template, no "Problem:" prefix, no boxed/step-by-step instruction.
         return self.tokenizer.apply_chat_template(
-            [{"role": "user", "content": user_msg}],
+            [{"role": "user", "content": problem}],
             tokenize=False,
             add_generation_prompt=True,
         )
 
     def _build_teacher_prompt(self, problem: str, solution: str) -> str:
-        user_msg = (
-            f"Problem: {problem}\n\n"
-            f"Here is a reference solution to this problem:\n"
-            f"=== Reference Solution Begin ===\n{solution}\n=== Reference Solution End ===\n"
-            f"{self.transition_prompt}\n"
-            f"{self.answer_instruction}"
-        )
-        return self.tokenizer.apply_chat_template(
-            [{"role": "user", "content": user_msg}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+        # Zigeng's distillation set has no privileged "reference solution"
+        # structure — `solution` IS the teacher's GT answer. Keep the teacher
+        # prompt identical to the student prompt so on-policy JSD compares two
+        # predictive distributions on the same condition.
+        return self._build_student_prompt(problem)
 
     def _left_pad(self, seqs, max_len, pad_id):
         ids, mask = [], []

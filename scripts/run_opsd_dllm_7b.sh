@@ -80,7 +80,7 @@ MODEL_NAME="${MODEL_NAME:-$DEFAULT_MODEL_NAME}"
 
 # --- Mask-schedule toggle: diffusion (default) vs fixed -----------------------
 MASK_SCHEDULE="${MASK_SCHEDULE:-fixed}"
-FIXED_MASK_RATIO="${FIXED_MASK_RATIO:-0.75}"
+FIXED_MASK_RATIO="${FIXED_MASK_RATIO:-0.5}"
 DIFF_MIN_T="${DIFF_MIN_T:-0.0}"
 DIFF_MAX_T="${DIFF_MAX_T:-1.0}"
 case "$MASK_SCHEDULE" in
@@ -123,7 +123,7 @@ accelerate launch \
     --student_backend "$STUDENT_BACKEND" \
     --learning_rate 2e-5 \
     --max_grad_norm 1.0 \
-    --per_device_train_batch_size 2 \
+    --per_device_train_batch_size 4 \
     --gradient_checkpointing \
     --output_dir ./outputs/opsd_dllm/ \
     --run_config "$RUN_CONFIG" \
@@ -132,10 +132,10 @@ accelerate launch \
     --logging_steps 2 \
     --attn_implementation sdpa \
     --torch_dtype bfloat16 \
-    --max_prompt_length 1024 \
-    --max_answer_length "$MAX_ANSWER_LENGTH" \
-    --gen_max_new_tokens 768 \
-    --gen_steps 768 \
+    --max_prompt_length 512 \
+    --max_answer_length 256 \
+    --gen_max_new_tokens 256 \
+    --gen_steps 256 \
     --gen_temperature 1.0 \
     --gen_top_p 0.95 \
     --gen_alg entropy \
@@ -153,6 +153,6 @@ accelerate launch \
     --lora_dropout 0.0 \
     --lora_target_modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj \
     --fixed_teacher \
-    --jsd_token_clip 0.05 \
+    --jsd_token_clip 0.0 \
     $OFF_POLICY_FLAG \
     --wandb_project OPSD

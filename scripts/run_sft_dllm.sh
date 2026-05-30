@@ -31,7 +31,7 @@ cd "$(dirname "$0")/.."   # cd into OPSD/
 
 export TRL_EXPERIMENTAL_SILENCE=1
 export TOKENIZERS_PARALLELISM=false
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1,2,3,4}
 export WANDB_PROJECT=${WANDB_PROJECT:-sft-dllm}
 export WANDB_ENTITY=${WANDB_ENTITY:-}
 export WANDB_MODE=${WANDB_MODE:-online}
@@ -84,8 +84,8 @@ accelerate launch \
     --gradient_checkpointing \
     --attn_implementation sdpa \
     --torch_dtype bfloat16 \
-    --max_prompt_length 1024 \
-    --max_answer_length 1024 \
+    --max_prompt_length 512 \
+    --max_answer_length 256 \
     --remove_unused_columns false \
     --sampling_eps 1e-3 \
     --mask_schedule "$MASK_SCHEDULE" \
@@ -97,6 +97,6 @@ accelerate launch \
     --lora_alpha 32 \
     --lora_dropout 0.0 \
     --lora_target_modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj \
-    --logging_steps 5 \
+    --logging_steps 10 \
     --save_steps 100 \
     "${WANDB_ARGS[@]}"

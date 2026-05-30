@@ -131,12 +131,8 @@ class SFTDLLMDataCollator:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
     def _build_prompt(self, problem: str) -> str:
-        user_content = (
-            f"{problem}\n\nPlease reason step by step, "
-            "and put your final answer within \\boxed{}."
-        )
         return self.tokenizer.apply_chat_template(
-            [{"role": "user", "content": user_content}],
+            [{"role": "user", "content": problem}],
             tokenize=False,
             add_generation_prompt=True,
         )
@@ -523,8 +519,17 @@ if __name__ == "__main__":
     ################
     # Dataset
     ################
-    dataset = load_dataset("siyanzhao/Openthoughts_math_30k_opsd")
+    dataset = load_dataset("Zigeng/dParallel_Dream_Distill_Data")
     train_dataset = dataset["train"]
+    # Zigeng's columns: question, gt_answer, llm_answer, llm_response.
+    # We use the teacher's full response as supervision:
+    #   question     -> problem (prompt)
+    #   llm_response -> solution (target)
+    # gt_answer / llm_answer (final-answer-only fields) are dropped.
+    train_dataset = train_dataset.rename_columns(
+        {"question": "problem", "llm_response": "solution"}
+    )
+    train_dataset = train_dataset.select_columns(["problem", "solution"])
     split_dataset = train_dataset.train_test_split(test_size=0.01, seed=42)
     train_dataset = split_dataset["train"]
     eval_dataset = split_dataset["test"]
