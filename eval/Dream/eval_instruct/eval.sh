@@ -15,7 +15,7 @@
 ## our dParallel
 NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. accelerate launch --num_processes 4 --num_machines 1 --mixed_precision no --main_process_port 12334 -m lm_eval \
     --model diffllm \
-    --model_args pretrained="/home/stud_dat/on_policy_self_distill_dLLM/outputs/sft_dllm/merged_checkpoint_6k6",trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype="bfloat16",temperature=0.,alg="entropy" \
+    --model_args pretrained="/home/stud_dat/on_policy_self_distill_dLLM/outputs/sft_dllm/merged_checkpoint_30k",trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype="bfloat16",temperature=0.,alg="entropy" \
     --tasks gsm8k_cot_zeroshot \
     --device cuda \
     --batch_size 1 \
@@ -66,9 +66,9 @@ HF_ALLOW_CODE_EVAL=1 NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. acce
     --apply_chat_template
 
 ## our dParallel
-NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=. accelerate launch --num_processes 4 --num_machines 1 --mixed_precision no --main_process_port 12334 -m lm_eval \
+HF_ALLOW_CODE_EVAL=1 NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=. accelerate launch --num_processes 4 --num_machines 1 --mixed_precision no --main_process_port 12334 -m lm_eval \
     --model diffllm \
-    --model_args pretrained="/home/stud_dat/on_policy_self_distill_dLLM/outputs/sft_dllm/merged_checkpoint_6k6",trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype="bfloat16",temperature=0.,alg="entropy_threshold",dParallel=True,threshold=0.5 \
+    --model_args pretrained="/home/stud_dat/on_policy_self_distill_dLLM/outputs/sft_dllm/merged_checkpoint_30k",trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype="bfloat16",temperature=0.,alg="entropy_threshold",dParallel=True,threshold=0.5 \
     --tasks humaneval_instruct \
     --device cuda \
     --batch_size 1 \
