@@ -54,7 +54,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4 PYTHONPATH=. accelerate launch --main_process_por
 ############################################### humaneval evaluations ###############################################
 
 ## Original dllm
-CUDA_VISIBLE_DEVICES=0,1,2,3,4 PYTHONPATH=. accelerate launch --main_process_port 12334 -m lm_eval \
+HF_ALLOW_CODE_EVAL=1 CUDA_VISIBLE_DEVICES=0,1,2,3,4 PYTHONPATH=. accelerate launch --main_process_port 12334 -m lm_eval \
     --model diffllm \
     --model_args pretrained=Dream-org/Dream-v0-Instruct-7B,trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype="bfloat16",temperature=0.1,top_p=0.9,alg="entropy" \
     --tasks humaneval_instruct \
