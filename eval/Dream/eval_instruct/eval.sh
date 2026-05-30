@@ -1,7 +1,7 @@
 ############################################### gsm8k evaluations ###############################################
 
 ## Original dllm
-NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=. accelerate launch --num_processes 4 --num_machines 1 --mixed_precision no --main_process_port 12334 -m lm_eval \
+NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. accelerate launch --num_processes 4 --num_machines 1 --mixed_precision no --main_process_port 12334 -m lm_eval \
     --model diffllm \
     --model_args pretrained=Dream-org/Dream-v0-Instruct-7B,trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype="bfloat16",temperature=0.1,top_p=0.9,alg="entropy" \
     --tasks gsm8k_cot_zeroshot \
@@ -54,7 +54,7 @@ NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=. a
 ############################################### humaneval evaluations ###############################################
 
 ## Original dllm
-NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=. accelerate launch --num_processes 4 --num_machines 1 --mixed_precision no --main_process_port 12334 -m lm_eval \
+NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. accelerate launch --num_processes 4 --num_machines 1 --mixed_precision no --main_process_port 12334 -m lm_eval \
     --model diffllm \
     --model_args pretrained=Dream-org/Dream-v0-Instruct-7B,trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype="bfloat16",temperature=0.1,top_p=0.9,alg="entropy" \
     --tasks humaneval_instruct \
