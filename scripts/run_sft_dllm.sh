@@ -76,7 +76,7 @@ accelerate launch \
     --model_name_or_path Dream-org/Dream-v0-Instruct-7B \
     --learning_rate 2e-5 \
     --max_grad_norm 1.0 \
-    --per_device_train_batch_size 2 \
+    --per_device_train_batch_size 4 \
     --gradient_accumulation_steps 1 \
     --output_dir "$OUTPUT_DIR" \
     --run_config "$RUN_CONFIG" \
