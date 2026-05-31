@@ -134,7 +134,7 @@ echo "[run_opsd_dllm_7b] STUDENT_BACKEND=$STUDENT_BACKEND  MODEL_NAME=$MODEL_NAM
 accelerate launch \
     --config_file accelerate.yaml \
     --num_processes 4 \
-    --gpu_ids "${CUDA_VISIBLE_DEVICES:-1,2,3,4}" \
+    --gpu_ids 1,2,3,4 \
     --gradient_accumulation_steps 1 \
     --main_process_port 13379 \
     opsd_dllm_train.py \
