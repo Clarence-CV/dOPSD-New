@@ -105,7 +105,7 @@ esac
 # --- Dataset toggle: zigeng (default) vs mixchain -----------------------------
 # zigeng   = Zigeng/dParallel_Dream_Distill_Data (question -> problem, llm_response -> solution).
 # mixchain = horseee/MixChain-Z-PRM12K          (question -> problem, answer       -> solution).
-DATASET="${DATASET:-zigeng}"
+DATASET="${DATASET:-mixchain}"
 case "$DATASET" in
     zigeng)   DATA_TAG="zigeng" ;;
     mixchain) DATA_TAG="mixchain" ;;
