@@ -53,7 +53,7 @@ fi
 
 # --- Mask-schedule toggle: diffusion (default) vs fixed -----------------------
 MASK_SCHEDULE="${MASK_SCHEDULE:-fixed}"
-FIXED_MASK_RATIO="${FIXED_MASK_RATIO:-0.75}"
+FIXED_MASK_RATIO="${FIXED_MASK_RATIO:-0.5}"
 DIFF_MIN_T="${DIFF_MIN_T:-0.0}"
 DIFF_MAX_T="${DIFF_MAX_T:-1.0}"
 case "$MASK_SCHEDULE" in
