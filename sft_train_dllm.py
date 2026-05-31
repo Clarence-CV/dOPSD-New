@@ -60,7 +60,7 @@ DATASET_REGISTRY = {
         "solution_field": "answer",
     },
 }
-DEFAULT_DATASET = "zigeng"
+DEFAULT_DATASET = "mixchain"
 # Canonical column names the collator consumes after the rename in main().
 PROBLEM_FIELD = "problem"
 SOLUTION_FIELD = "solution"
