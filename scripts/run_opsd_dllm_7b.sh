@@ -67,7 +67,7 @@ cd "$(dirname "$0")/.."   # cd into OPSD/
 
 export TRL_EXPERIMENTAL_SILENCE=1
 export TOKENIZERS_PARALLELISM=false
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1,2,3,4}
 
 # --- Backend toggle: Dream (default) vs LLaDA ---------------------------------
 STUDENT_BACKEND="${STUDENT_BACKEND:-dream}"
