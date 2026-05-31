@@ -1,0 +1,163 @@
+Metadata-Version: 2.4
+Name: lm_eval
+Version: 0.4.8
+Summary: A framework for evaluating language models
+Author-email: EleutherAI <contact@eleuther.ai>
+License: MIT
+Project-URL: Homepage, https://github.com/EleutherAI/lm-evaluation-harness
+Project-URL: Repository, https://github.com/EleutherAI/lm-evaluation-harness
+Classifier: Development Status :: 3 - Alpha
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: accelerate>=0.26.0
+Requires-Dist: evaluate
+Requires-Dist: datasets>=2.16.0
+Requires-Dist: evaluate>=0.4.0
+Requires-Dist: jsonlines
+Requires-Dist: numexpr
+Requires-Dist: peft>=0.2.0
+Requires-Dist: pybind11>=2.6.2
+Requires-Dist: pytablewriter
+Requires-Dist: rouge-score>=0.0.4
+Requires-Dist: sacrebleu>=1.5.0
+Requires-Dist: scikit-learn>=0.24.1
+Requires-Dist: sqlitedict
+Requires-Dist: torch>=1.8
+Requires-Dist: tqdm-multiprocess
+Requires-Dist: transformers>=4.1
+Requires-Dist: zstandard
+Requires-Dist: dill
+Requires-Dist: word2number
+Requires-Dist: more_itertools
+Provides-Extra: api
+Requires-Dist: requests; extra == "api"
+Requires-Dist: aiohttp; extra == "api"
+Requires-Dist: tenacity; extra == "api"
+Requires-Dist: tqdm; extra == "api"
+Requires-Dist: tiktoken; extra == "api"
+Provides-Extra: audiolm-qwen
+Requires-Dist: librosa; extra == "audiolm-qwen"
+Requires-Dist: soundfile; extra == "audiolm-qwen"
+Provides-Extra: deepsparse
+Requires-Dist: deepsparse-nightly[llm]>=1.8.0.20240404; extra == "deepsparse"
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pytest-cov; extra == "dev"
+Requires-Dist: pytest-xdist; extra == "dev"
+Requires-Dist: pre-commit; extra == "dev"
+Requires-Dist: mypy; extra == "dev"
+Requires-Dist: unitxt; extra == "dev"
+Provides-Extra: gptq
+Requires-Dist: auto-gptq[triton]>=0.6.0; extra == "gptq"
+Provides-Extra: gptqmodel
+Requires-Dist: gptqmodel>=1.0.9; extra == "gptqmodel"
+Provides-Extra: hf-transfer
+Requires-Dist: hf_transfer; extra == "hf-transfer"
+Provides-Extra: ibm-watsonx-ai
+Requires-Dist: ibm_watsonx_ai>=1.1.22; extra == "ibm-watsonx-ai"
+Requires-Dist: python-dotenv; extra == "ibm-watsonx-ai"
+Provides-Extra: ifeval
+Requires-Dist: langdetect; extra == "ifeval"
+Requires-Dist: immutabledict; extra == "ifeval"
+Requires-Dist: nltk>=3.9.1; extra == "ifeval"
+Provides-Extra: ipex
+Requires-Dist: optimum; extra == "ipex"
+Provides-Extra: japanese-leaderboard
+Requires-Dist: emoji==2.14.0; extra == "japanese-leaderboard"
+Requires-Dist: neologdn==0.5.3; extra == "japanese-leaderboard"
+Requires-Dist: fugashi[unidic-lite]; extra == "japanese-leaderboard"
+Requires-Dist: rouge_score>=0.1.2; extra == "japanese-leaderboard"
+Provides-Extra: longbench
+Requires-Dist: jeiba; extra == "longbench"
+Requires-Dist: fuzzywuzzy; extra == "longbench"
+Requires-Dist: rouge; extra == "longbench"
+Provides-Extra: mamba
+Requires-Dist: mamba_ssm; extra == "mamba"
+Requires-Dist: causal-conv1d==1.0.2; extra == "mamba"
+Provides-Extra: math
+Requires-Dist: sympy>=1.12; extra == "math"
+Requires-Dist: antlr4-python3-runtime==4.11; extra == "math"
+Requires-Dist: math_verify[antlr4_11_0]; extra == "math"
+Provides-Extra: multilingual
+Requires-Dist: nagisa>=0.2.7; extra == "multilingual"
+Requires-Dist: jieba>=0.42.1; extra == "multilingual"
+Requires-Dist: pycountry; extra == "multilingual"
+Provides-Extra: neuronx
+Requires-Dist: optimum[neuronx]; extra == "neuronx"
+Provides-Extra: optimum
+Requires-Dist: optimum[openvino]; extra == "optimum"
+Provides-Extra: promptsource
+Requires-Dist: promptsource>=0.2.3; extra == "promptsource"
+Provides-Extra: ruler
+Requires-Dist: nltk; extra == "ruler"
+Requires-Dist: wonderwords; extra == "ruler"
+Requires-Dist: scipy; extra == "ruler"
+Provides-Extra: sae-lens
+Requires-Dist: sae_lens; extra == "sae-lens"
+Provides-Extra: sentencepiece
+Requires-Dist: sentencepiece>=0.1.98; extra == "sentencepiece"
+Provides-Extra: sparseml
+Requires-Dist: sparseml-nightly[llm]>=1.8.0.20240404; extra == "sparseml"
+Provides-Extra: sparsify
+Requires-Dist: sparsify; extra == "sparsify"
+Provides-Extra: testing
+Requires-Dist: pytest; extra == "testing"
+Requires-Dist: pytest-cov; extra == "testing"
+Requires-Dist: pytest-xdist; extra == "testing"
+Provides-Extra: vllm
+Requires-Dist: vllm>=0.4.2; extra == "vllm"
+Provides-Extra: wandb
+Requires-Dist: wandb>=0.16.3; extra == "wandb"
+Requires-Dist: pandas; extra == "wandb"
+Requires-Dist: numpy; extra == "wandb"
+Provides-Extra: zeno
+Requires-Dist: pandas; extra == "zeno"
+Requires-Dist: zeno-client; extra == "zeno"
+Provides-Extra: all
+Requires-Dist: lm_eval[api]; extra == "all"
+Requires-Dist: lm_eval[audiolm_qwen]; extra == "all"
+Requires-Dist: lm_eval[deepsparse]; extra == "all"
+Requires-Dist: lm_eval[dev]; extra == "all"
+Requires-Dist: lm_eval[gptq]; extra == "all"
+Requires-Dist: lm_eval[gptqmodel]; extra == "all"
+Requires-Dist: lm_eval[hf_transfer]; extra == "all"
+Requires-Dist: lm_eval[ibm_watsonx_ai]; extra == "all"
+Requires-Dist: lm_eval[ifeval]; extra == "all"
+Requires-Dist: lm_eval[ipex]; extra == "all"
+Requires-Dist: lm_eval[japanese_leaderboard]; extra == "all"
+Requires-Dist: lm_eval[longbench]; extra == "all"
+Requires-Dist: lm_eval[mamba]; extra == "all"
+Requires-Dist: lm_eval[math]; extra == "all"
+Requires-Dist: lm_eval[multilingual]; extra == "all"
+Requires-Dist: lm_eval[neuronx]; extra == "all"
+Requires-Dist: lm_eval[optimum]; extra == "all"
+Requires-Dist: lm_eval[promptsource]; extra == "all"
+Requires-Dist: lm_eval[ruler]; extra == "all"
+Requires-Dist: lm_eval[sae_lens]; extra == "all"
+Requires-Dist: lm_eval[sentencepiece]; extra == "all"
+Requires-Dist: lm_eval[sparseml]; extra == "all"
+Requires-Dist: lm_eval[sparsify]; extra == "all"
+Requires-Dist: lm_eval[testing]; extra == "all"
+Requires-Dist: lm_eval[vllm]; extra == "all"
+Requires-Dist: lm_eval[wandb]; extra == "all"
+Requires-Dist: lm_eval[zeno]; extra == "all"
+
+# Dream-Instruct Evaluation Toolkit
+This toolkit contains the code Dream-Instruct models make use of for evaluation.
+
+## Quickstart
+To install the toolkit, run:
+```
+pip install -e ".[ifeval,math]"
+```
+
+We provide a script to evaluate [Dream-org/Dream-v0-Instruct-7B](https://huggingface.co/Dream-org/Dream-v0-Instruct-7B):
+```
+bash eval.sh
+```
+
+## Acknowledgement
+This is a fork of [EleutherAI/lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness/tree/main).
