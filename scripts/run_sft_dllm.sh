@@ -117,5 +117,5 @@ accelerate launch \
     --lora_dropout 0.0 \
     --lora_target_modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj \
     --logging_steps 10 \
-    --save_steps 100 \
+    --save_steps 10000 \
     "${WANDB_ARGS[@]}"
