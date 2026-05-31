@@ -27,15 +27,35 @@ from opsd_dllm_trainer import OPSDDLLMTrainer
 os.environ.setdefault("TRACKIO_SPACE_ID", "trl-trackio")
 
 
-# === Canonical OPSD training data =============================================
-# Siyan Zhao's reformat of the OpenThoughts math-reasoning corpus, prepared
-# specifically for OPSD: each row carries `problem` (what the student sees) and
-# `solution` (privileged step-by-step reasoning the teacher sees in its prompt).
-# Math is the right domain for the privileged-info paradigm: the gold solution
-# is high-content (sharpens the teacher's distribution) and answers are
-# verifiable. To swap in a different dataset, update both the ID and the field
-# mapping below.
-BASELINE_DATASET_ID = "Zigeng/dParallel_Dream_Distill_Data"
+# === OPSD training data =======================================================
+# Each row must yield a `problem` (what the student sees) and a `solution` (the
+# privileged step-by-step reasoning the teacher sees in its prompt). Math is the
+# right domain for the privileged-info paradigm: the gold solution is
+# high-content (sharpens the teacher's distribution) and answers are verifiable.
+#
+# DATASET_REGISTRY maps a --dataset choice to its hub id and the source columns
+# that play the problem/solution roles. The loader renames those two columns to
+# the canonical `problem`/`solution` and drops the rest, so adding a dataset is
+# just one entry here.
+#   * zigeng   — Zigeng's dParallel reformat of OpenThoughts. `llm_response` is
+#                the teacher's full CoT (final-answer-only fields are dropped).
+#   * mixchain — horseee/MixChain-Z-PRM12K. `answer` is the reference \boxed{}
+#                solution; the alternative solution_0..4 / token / correctness
+#                columns are dropped.
+DATASET_REGISTRY = {
+    "zigeng": {
+        "id": "Zigeng/dParallel_Dream_Distill_Data",
+        "problem_field": "question",
+        "solution_field": "llm_response",
+    },
+    "mixchain": {
+        "id": "horseee/MixChain-Z-PRM12K",
+        "problem_field": "question",
+        "solution_field": "answer",
+    },
+}
+DEFAULT_DATASET = "mixchain"
+# Canonical column names the collator consumes after the rename below.
 BASELINE_PROBLEM_FIELD = "problem"
 BASELINE_SOLUTION_FIELD = "solution"
 
@@ -44,6 +64,15 @@ BASELINE_SOLUTION_FIELD = "solution"
 class CustomScriptArguments(ScriptArguments):
     """Extra args for dLLM OPSD training."""
 
+    dataset: str = field(
+        default=DEFAULT_DATASET,
+        metadata={
+            "help": "Training dataset key from DATASET_REGISTRY. "
+            f"Choices: {sorted(DATASET_REGISTRY)}. 'zigeng' = dParallel OpenThoughts "
+            "reformat (default); 'mixchain' = horseee/MixChain-Z-PRM12K "
+            "(question -> problem, answer -> solution)."
+        },
+    )
     fixed_teacher: bool = field(
         default=False,
         metadata={
@@ -310,26 +339,34 @@ if __name__ == "__main__":
     training_args.model_init_kwargs = None
 
     # === Dataset ==============================================================
-    print(f"\n[opsd_dllm_train] Loading baseline dataset: {BASELINE_DATASET_ID}")
-    print(f"    problem_field  = {BASELINE_PROBLEM_FIELD!r}")
-    print(f"    solution_field = {BASELINE_SOLUTION_FIELD!r}")
-    dataset = load_dataset(BASELINE_DATASET_ID)
+    if script_args.dataset not in DATASET_REGISTRY:
+        raise ValueError(
+            f"--dataset must be one of {sorted(DATASET_REGISTRY)} (got {script_args.dataset!r})."
+        )
+    ds_cfg = DATASET_REGISTRY[script_args.dataset]
+    src_problem, src_solution = ds_cfg["problem_field"], ds_cfg["solution_field"]
+    print(f"\n[opsd_dllm_train] Loading dataset {script_args.dataset!r}: {ds_cfg['id']}")
+    print(f"    {src_problem!r} -> {BASELINE_PROBLEM_FIELD!r}")
+    print(f"    {src_solution!r} -> {BASELINE_SOLUTION_FIELD!r}")
+    dataset = load_dataset(ds_cfg["id"])
     train_dataset = dataset["train"]
 
-    # Zigeng's dParallel distillation set has 4 columns:
-    #   question, gt_answer, llm_answer, llm_response
-    # We train the student on the teacher's full response, so use
-    #   question     -> problem (the prompt)
-    #   llm_response -> solution (the supervised target)
-    # gt_answer and llm_answer (the final-answer-only fields) are dropped.
-    if "question" in train_dataset.column_names and "llm_response" in train_dataset.column_names:
-        train_dataset = train_dataset.rename_columns(
-            {"question": BASELINE_PROBLEM_FIELD, "llm_response": BASELINE_SOLUTION_FIELD}
+    # Rename the dataset's problem/solution columns to the canonical
+    # `problem`/`solution` the collator consumes, then drop every other column
+    # (final-answer-only fields, alternative solutions, token counts, ...).
+    missing = [c for c in (src_problem, src_solution) if c not in train_dataset.column_names]
+    if missing:
+        raise ValueError(
+            f"Dataset {ds_cfg['id']} is missing expected column(s) {missing}; "
+            f"has {train_dataset.column_names}."
         )
-        train_dataset = train_dataset.select_columns(
-            [BASELINE_PROBLEM_FIELD, BASELINE_SOLUTION_FIELD]
-        )
-        print(f"[opsd_dllm_train] Renamed Zigeng columns -> {train_dataset.column_names}")
+    train_dataset = train_dataset.rename_columns(
+        {src_problem: BASELINE_PROBLEM_FIELD, src_solution: BASELINE_SOLUTION_FIELD}
+    )
+    train_dataset = train_dataset.select_columns(
+        [BASELINE_PROBLEM_FIELD, BASELINE_SOLUTION_FIELD]
+    )
+    print(f"[opsd_dllm_train] Columns -> {train_dataset.column_names}")
 
     # Build the collator with field names matching the dataset columns. This
     # also drives `_set_signature_columns_if_needed`, so `_remove_unused_columns`

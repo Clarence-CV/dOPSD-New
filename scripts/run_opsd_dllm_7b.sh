@@ -28,8 +28,13 @@
 #                                       Tune with FIXED_MASK_RATIO ("0.75" or
 #                                       a "lo:hi" range like "0.25:0.75").
 #
+#   DATASET=zigeng   (default) — Zigeng/dParallel_Dream_Distill_Data.
+#   DATASET=mixchain           — horseee/MixChain-Z-PRM12K (question -> problem,
+#                                answer -> solution).
+#
 #   Usage examples:
 #       ./scripts/run_opsd_dllm_7b.sh
+#       DATASET=mixchain ./scripts/run_opsd_dllm_7b.sh
 #       OFF_POLICY=1 ./scripts/run_opsd_dllm_7b.sh
 #       STUDENT_BACKEND=llada ./scripts/run_opsd_dllm_7b.sh
 #       STUDENT_BACKEND=llada OFF_POLICY=1 ./scripts/run_opsd_dllm_7b.sh
@@ -97,21 +102,34 @@ case "$MASK_SCHEDULE" in
         ;;
 esac
 
+# --- Dataset toggle: zigeng (default) vs mixchain -----------------------------
+# zigeng   = Zigeng/dParallel_Dream_Distill_Data (question -> problem, llm_response -> solution).
+# mixchain = horseee/MixChain-Z-PRM12K          (question -> problem, answer       -> solution).
+DATASET="${DATASET:-zigeng}"
+case "$DATASET" in
+    zigeng)   DATA_TAG="zigeng" ;;
+    mixchain) DATA_TAG="mixchain" ;;
+    *)
+        echo "[run_opsd_dllm_7b] ERROR: DATASET must be 'zigeng' or 'mixchain' (got '$DATASET')" >&2
+        exit 1
+        ;;
+esac
+
 # --- Mode toggle: on-policy rollout (default) vs off-policy GT distillation ---
-# Separate run_config per mode so output_dir / W&B runs never collide.
+# Separate run_config per mode (and dataset) so output_dir / W&B runs never collide.
 OFF_POLICY="${OFF_POLICY:-0}"
 if [[ "$OFF_POLICY" == "1" ]]; then
     OFF_POLICY_FLAG="--off_policy"
-    RUN_CONFIG="${BACKEND_TAG}_${MASK_TAG}_offpolicy_gt_v1"
+    RUN_CONFIG="${BACKEND_TAG}_${MASK_TAG}_${DATA_TAG}_offpolicy_gt_v1"
     # Off-policy completion = GT answer; 1024 + 768 = 1792 keeps the forward
     # under Dream-v0's 2048 limit and matches the on-policy answer budget.
     MAX_ANSWER_LENGTH=1024
 else
     OFF_POLICY_FLAG=""
-    RUN_CONFIG="${BACKEND_TAG}_${MASK_TAG}_gen768_forwardbeta0_v2"
+    RUN_CONFIG="${BACKEND_TAG}_${MASK_TAG}_${DATA_TAG}_gen768_forwardbeta0_v2"
     MAX_ANSWER_LENGTH=1024
 fi
-echo "[run_opsd_dllm_7b] STUDENT_BACKEND=$STUDENT_BACKEND  MODEL_NAME=$MODEL_NAME  MASK_SCHEDULE=$MASK_SCHEDULE  OFF_POLICY=$OFF_POLICY  run_config=$RUN_CONFIG"
+echo "[run_opsd_dllm_7b] STUDENT_BACKEND=$STUDENT_BACKEND  MODEL_NAME=$MODEL_NAME  DATASET=$DATASET  MASK_SCHEDULE=$MASK_SCHEDULE  OFF_POLICY=$OFF_POLICY  run_config=$RUN_CONFIG"
 
 accelerate launch \
     --config_file accelerate.yaml \
@@ -121,6 +139,7 @@ accelerate launch \
     opsd_dllm_train.py \
     --model_name_or_path "$MODEL_NAME" \
     --student_backend "$STUDENT_BACKEND" \
+    --dataset "$DATASET" \
     --learning_rate 2e-5 \
     --max_grad_norm 1.0 \
     --per_device_train_batch_size 4 \

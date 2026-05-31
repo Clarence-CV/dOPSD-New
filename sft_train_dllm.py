@@ -38,8 +38,45 @@ from trl import (
 os.environ.setdefault("TRACKIO_SPACE_ID", "trl-trackio")
 
 
+# === SFT training data ========================================================
+# Each row must yield a `problem` (prompt) and a `solution` (supervised target).
+# DATASET_REGISTRY maps a --dataset choice to its hub id and the source columns
+# that play those two roles; the loader renames them to `problem`/`solution` and
+# drops the rest, so adding a dataset is just one entry here.
+#   * zigeng   — Zigeng's dParallel reformat of OpenThoughts. `llm_response` is
+#                the teacher's full CoT (final-answer-only fields are dropped).
+#   * mixchain — horseee/MixChain-Z-PRM12K. `answer` is the reference \boxed{}
+#                solution; the alternative solution_0..4 / token / correctness
+#                columns are dropped.
+DATASET_REGISTRY = {
+    "zigeng": {
+        "id": "Zigeng/dParallel_Dream_Distill_Data",
+        "problem_field": "question",
+        "solution_field": "llm_response",
+    },
+    "mixchain": {
+        "id": "horseee/MixChain-Z-PRM12K",
+        "problem_field": "question",
+        "solution_field": "answer",
+    },
+}
+DEFAULT_DATASET = "zigeng"
+# Canonical column names the collator consumes after the rename in main().
+PROBLEM_FIELD = "problem"
+SOLUTION_FIELD = "solution"
+
+
 @dataclass
 class DLLMScriptArguments(ScriptArguments):
+    dataset: str = field(
+        default=DEFAULT_DATASET,
+        metadata={
+            "help": "Training dataset key from DATASET_REGISTRY. "
+            f"Choices: {sorted(DATASET_REGISTRY)}. 'zigeng' = dParallel OpenThoughts "
+            "reformat (default); 'mixchain' = horseee/MixChain-Z-PRM12K "
+            "(question -> problem, answer -> solution)."
+        },
+    )
     run_config: str = field(
         default=None,
         metadata={
@@ -519,17 +556,29 @@ if __name__ == "__main__":
     ################
     # Dataset
     ################
-    dataset = load_dataset("Zigeng/dParallel_Dream_Distill_Data")
+    if script_args.dataset not in DATASET_REGISTRY:
+        raise ValueError(
+            f"--dataset must be one of {sorted(DATASET_REGISTRY)} (got {script_args.dataset!r})."
+        )
+    ds_cfg = DATASET_REGISTRY[script_args.dataset]
+    src_problem, src_solution = ds_cfg["problem_field"], ds_cfg["solution_field"]
+    print(f"[sft_train_dllm] Loading dataset {script_args.dataset!r}: {ds_cfg['id']}")
+    print(f"    {src_problem!r} -> {PROBLEM_FIELD!r}  /  {src_solution!r} -> {SOLUTION_FIELD!r}")
+    dataset = load_dataset(ds_cfg["id"])
     train_dataset = dataset["train"]
-    # Zigeng's columns: question, gt_answer, llm_answer, llm_response.
-    # We use the teacher's full response as supervision:
-    #   question     -> problem (prompt)
-    #   llm_response -> solution (target)
-    # gt_answer / llm_answer (final-answer-only fields) are dropped.
+    # Rename the dataset's problem/solution columns to the canonical
+    # `problem`/`solution` the collator consumes, then drop every other column
+    # (final-answer-only fields, alternative solutions, token counts, ...).
+    missing = [c for c in (src_problem, src_solution) if c not in train_dataset.column_names]
+    if missing:
+        raise ValueError(
+            f"Dataset {ds_cfg['id']} is missing expected column(s) {missing}; "
+            f"has {train_dataset.column_names}."
+        )
     train_dataset = train_dataset.rename_columns(
-        {"question": "problem", "llm_response": "solution"}
+        {src_problem: PROBLEM_FIELD, src_solution: SOLUTION_FIELD}
     )
-    train_dataset = train_dataset.select_columns(["problem", "solution"])
+    train_dataset = train_dataset.select_columns([PROBLEM_FIELD, SOLUTION_FIELD])
     split_dataset = train_dataset.train_test_split(test_size=0.01, seed=42)
     train_dataset = split_dataset["train"]
     eval_dataset = split_dataset["test"]

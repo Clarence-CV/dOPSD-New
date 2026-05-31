@@ -17,8 +17,15 @@
 #                                       FIXED_MASK_RATIO ("0.75" or "lo:hi"
 #                                       like "0.25:0.75").
 #
+#
+# DATASET TOGGLE (env var):
+#   DATASET=zigeng   (default) — Zigeng/dParallel_Dream_Distill_Data (~30k).
+#   DATASET=mixchain           — horseee/MixChain-Z-PRM12K (~12k): trains on
+#                                question -> problem, answer -> solution.
+#
 #   Usage examples:
 #       ./scripts/run_sft_dllm.sh
+#       DATASET=mixchain ./scripts/run_sft_dllm.sh
 #       MASK_SCHEDULE=fixed FIXED_MASK_RATIO=0.5 ./scripts/run_sft_dllm.sh
 #       MASK_SCHEDULE=fixed FIXED_MASK_RATIO=0.25:0.75 ./scripts/run_sft_dllm.sh
 #
@@ -63,9 +70,20 @@ case "$MASK_SCHEDULE" in
         ;;
 esac
 
-RUN_CONFIG="sft_dllm_dream7b_${MASK_TAG}_2epochs_30k"
-OUTPUT_DIR="./outputs/sft_dllm/dream7b-${MASK_TAG}-2epochs-30k"
-echo "[run_sft_dllm] MASK_SCHEDULE=$MASK_SCHEDULE  FIXED_MASK_RATIO=$FIXED_MASK_RATIO  run_config=$RUN_CONFIG"
+# --- Dataset toggle: zigeng (default) vs mixchain -----------------------------
+DATASET="${DATASET:-zigeng}"
+case "$DATASET" in
+    zigeng)   DATA_TAG="zigeng30k" ;;
+    mixchain) DATA_TAG="mixchain12k" ;;
+    *)
+        echo "[run_sft_dllm] ERROR: DATASET must be 'zigeng' or 'mixchain' (got '$DATASET')" >&2
+        exit 1
+        ;;
+esac
+
+RUN_CONFIG="sft_dllm_dream7b_${MASK_TAG}_2epochs_${DATA_TAG}"
+OUTPUT_DIR="./outputs/sft_dllm/dream7b-${MASK_TAG}-2epochs-${DATA_TAG}"
+echo "[run_sft_dllm] DATASET=$DATASET  MASK_SCHEDULE=$MASK_SCHEDULE  FIXED_MASK_RATIO=$FIXED_MASK_RATIO  run_config=$RUN_CONFIG"
 
 accelerate launch \
     --config_file accelerate.yaml \
@@ -74,6 +92,7 @@ accelerate launch \
     --main_process_port 19347 \
     sft_train_dllm.py \
     --model_name_or_path Dream-org/Dream-v0-Instruct-7B \
+    --dataset "$DATASET" \
     --learning_rate 2e-5 \
     --max_grad_norm 1.0 \
     --per_device_train_batch_size 4 \
