@@ -29,7 +29,7 @@ from trl import (
 )
 from trl.experimental.gold import GOLDConfig
 
-from data_collator_dllm import SelfDistillationDLLMDataCollator
+from data_collator_dllm_trajectory import SelfDistillationDLLMTrajectoryDataCollator
 from opsd_dllm_trajectory_trainer import OPSDDLLMTrajectoryTrainer
 
 
@@ -102,6 +102,21 @@ class CustomScriptArguments(ScriptArguments):
             "help": "Which eligible decoding step to use: 'least' (smallest masked "
             "fraction still above threshold; default), 'most' (noisiest), or "
             "'random' (uniform among eligible)."
+        },
+    )
+    decode_intro_prompt: str = field(
+        default=None,
+        metadata={
+            "help": "Framing text inserted in the teacher prompt BEFORE the decoding "
+            "step (analogous to data_collator.py's reason_first_prompt). None = use "
+            "SelfDistillationDLLMTrajectoryDataCollator's default."
+        },
+    )
+    transition_prompt: str = field(
+        default=None,
+        metadata={
+            "help": "Transition text appended to the teacher input AFTER the decoding "
+            "step. None = use the collator's default."
         },
     )
     max_prompt_length: int = field(
@@ -313,12 +328,14 @@ if __name__ == "__main__":
     )
     print(f"[opsd_dllm_trajectory_train] Columns -> {train_dataset.column_names}")
 
-    data_collator = SelfDistillationDLLMDataCollator(
+    data_collator = SelfDistillationDLLMTrajectoryDataCollator(
         tokenizer=tokenizer,
         max_prompt_length=script_args.max_prompt_length,
         max_answer_length=script_args.max_answer_length,
         problem_field=BASELINE_PROBLEM_FIELD,
         solution_field=BASELINE_SOLUTION_FIELD,
+        decode_intro_prompt=script_args.decode_intro_prompt,
+        transition_prompt=script_args.transition_prompt,
     )
 
     # === Trainer ==============================================================

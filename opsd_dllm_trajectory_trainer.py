@@ -391,11 +391,30 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         #    rollout — its privileged information is the trajectory's endpoint,
         #    so its distribution at the masked positions is conditioned on the
         #    tokens the student will eventually decode.
+        #
+        #    When the trajectory collator
+        #    (SelfDistillationDLLMTrajectoryDataCollator) is used, the teacher
+        #    prompt also carries a framing intro BEFORE the decoding step, and a
+        #    `teacher_transition_input_ids` suffix is appended AFTER it (mirroring
+        #    data_collator.py's reason_first). The intro is already part of
+        #    `teacher_prompt_ids`, so the teacher completion span still starts at
+        #    `t_prompt_len`; the transition sits after the span and only adds
+        #    bidirectional context.
         teacher_completion = completion_ids
         student_full_ids = torch.cat([student_prompt_ids, noisy_completion], dim=1)
         student_full_mask = torch.cat([student_prompt_mask, completion_mask], dim=1)
-        teacher_full_ids = torch.cat([teacher_prompt_ids, teacher_completion], dim=1)
-        teacher_full_mask = torch.cat([teacher_prompt_mask, completion_mask], dim=1)
+
+        teacher_ids_parts = [teacher_prompt_ids, teacher_completion]
+        teacher_mask_parts = [teacher_prompt_mask, completion_mask]
+        transition_ids = inputs.get("teacher_transition_input_ids")
+        if transition_ids is not None and transition_ids.shape[1] > 0:
+            transition_mask = inputs.get("teacher_transition_attention_mask")
+            if transition_mask is None:
+                transition_mask = torch.ones_like(transition_ids)
+            teacher_ids_parts.append(transition_ids)
+            teacher_mask_parts.append(transition_mask)
+        teacher_full_ids = torch.cat(teacher_ids_parts, dim=1)
+        teacher_full_mask = torch.cat(teacher_mask_parts, dim=1)
 
         # 4. Student forward (with grad). Slice out the completion span only.
         student_logits = self._forward(model, student_full_ids, student_full_mask)
