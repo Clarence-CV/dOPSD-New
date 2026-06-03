@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# Trajectory-OPSD self-distillation for a diffusion LM (Dream-7B or LLaDA-8B).
+#
+# Variant of run_opsd_dllm_7b.sh that drives opsd_dllm_trajectory_train.py:
+#   * The student's noisy view is a REAL intermediate decoding step (the
+#     least-masked step whose masked fraction still exceeds the threshold).
+#   * The teacher's privileged information is the CONCRETE final rollout.
+#   * On-policy only — there is no OFF_POLICY toggle and no synthetic
+#     MASK_SCHEDULE here. Instead:
+#       TRAJ_MASK_THRESHOLD=0.5 (default) — ">50% masked" step-eligibility cutoff.
+#       TRAJ_STEP_SELECT=least  (default) — 'least' (closest to threshold),
+#                                           'most' (noisiest), or 'random'.
+#
+#   STUDENT_BACKEND=dream (default) | llada
+#   DATASET=mixchain (default) | zigeng
+#
+#   Usage:
+#       ./scripts/run_opsd_dllm_trajectory_7b.sh
+#       TRAJ_STEP_SELECT=most ./scripts/run_opsd_dllm_trajectory_7b.sh
+#       STUDENT_BACKEND=llada ./scripts/run_opsd_dllm_trajectory_7b.sh
+#
+# HARD INVARIANTS (same as run_opsd_dllm_7b.sh):
+#   * --beta 0 → forward KL (reverse KL collapses on-policy training).
+#   * --gen_steps MUST equal --gen_max_new_tokens. A finer trajectory (more
+#     steps) also gives more decoding states near the threshold to pick from.
+#   * --max_prompt_length + --gen_max_new_tokens must stay under Dream-v0's
+#     2048 position limit.
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."   # cd into OPSD/
+
+export TRL_EXPERIMENTAL_SILENCE=1
+export TOKENIZERS_PARALLELISM=false
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1,2,3,4}
+
+# --- Backend toggle: Dream (default) vs LLaDA ---------------------------------
+STUDENT_BACKEND="${STUDENT_BACKEND:-dream}"
+if [[ "$STUDENT_BACKEND" == "llada" ]]; then
+    DEFAULT_MODEL_NAME="GSAI-ML/LLaDA-8B-Instruct"
+    BACKEND_TAG="llada8b"
+elif [[ "$STUDENT_BACKEND" == "dream" ]]; then
+    DEFAULT_MODEL_NAME="Dream-org/Dream-v0-Instruct-7B"
+    BACKEND_TAG="dream7b"
+else
+    echo "[run_opsd_dllm_trajectory_7b] ERROR: STUDENT_BACKEND must be 'dream' or 'llada' (got '$STUDENT_BACKEND')" >&2
+    exit 1
+fi
+MODEL_NAME="${MODEL_NAME:-$DEFAULT_MODEL_NAME}"
+
+# --- Trajectory knobs ---------------------------------------------------------
+TRAJ_MASK_THRESHOLD="${TRAJ_MASK_THRESHOLD:-0.5}"
+TRAJ_STEP_SELECT="${TRAJ_STEP_SELECT:-least}"
+TRAJ_TAG="traj${TRAJ_MASK_THRESHOLD//./}-${TRAJ_STEP_SELECT}"
+
+# --- Dataset toggle: mixchain (default) vs zigeng -----------------------------
+DATASET="${DATASET:-mixchain}"
+case "$DATASET" in
+    zigeng)   DATA_TAG="zigeng" ;;
+    mixchain) DATA_TAG="mixchain" ;;
+    *)
+        echo "[run_opsd_dllm_trajectory_7b] ERROR: DATASET must be 'zigeng' or 'mixchain' (got '$DATASET')" >&2
+        exit 1
+        ;;
+esac
+
+RUN_CONFIG="${BACKEND_TAG}_${TRAJ_TAG}_${DATA_TAG}_forwardbeta0_v1"
+echo "[run_opsd_dllm_trajectory_7b] STUDENT_BACKEND=$STUDENT_BACKEND  MODEL_NAME=$MODEL_NAME  DATASET=$DATASET  TRAJ_MASK_THRESHOLD=$TRAJ_MASK_THRESHOLD  TRAJ_STEP_SELECT=$TRAJ_STEP_SELECT  run_config=$RUN_CONFIG"
+
+accelerate launch \
+    --config_file accelerate.yaml \
+    --num_processes 4 \
+    --gpu_ids 1,2,3,4 \
+    --gradient_accumulation_steps 1 \
+    --main_process_port 13379 \
+    opsd_dllm_trajectory_train.py \
+    --model_name_or_path "$MODEL_NAME" \
+    --student_backend "$STUDENT_BACKEND" \
+    --dataset "$DATASET" \
+    --learning_rate 2e-5 \
+    --max_grad_norm 1.0 \
+    --per_device_train_batch_size 4 \
+    --gradient_checkpointing \
+    --output_dir ./outputs/opsd_dllm_trajectory/ \
+    --run_config "$RUN_CONFIG" \
+    --num_train_epochs 3 \
+    --save_steps 10 \
+    --logging_steps 2 \
+    --attn_implementation sdpa \
+    --torch_dtype bfloat16 \
+    --max_prompt_length 512 \
+    --max_answer_length 256 \
+    --gen_max_new_tokens 256 \
+    --gen_steps 256 \
+    --gen_temperature 1.0 \
+    --gen_top_p 0.95 \
+    --gen_alg entropy \
+    --gen_alg_temp 0.5 \
+    --beta 0 \
+    --temperature 1.0 \
+    --sampling_eps 1e-3 \
+    --traj_mask_threshold "$TRAJ_MASK_THRESHOLD" \
+    --traj_step_select "$TRAJ_STEP_SELECT" \
+    --use_peft \
+    --lora_r 32 \
+    --lora_alpha 32 \
+    --lora_dropout 0.0 \
+    --lora_target_modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj \
+    --fixed_teacher \
+    --jsd_token_clip 0.0 \
+    --wandb_project OPSD
