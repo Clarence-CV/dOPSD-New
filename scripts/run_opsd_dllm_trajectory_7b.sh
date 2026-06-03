@@ -10,6 +10,11 @@
 #       TRAJ_MASK_THRESHOLD=0.5 (default) — ">50% masked" step-eligibility cutoff.
 #       TRAJ_STEP_SELECT=least  (default) — 'least' (closest to threshold),
 #                                           'most' (noisiest), or 'random'.
+#       TRAJ_TEACHER_GAP=-1     (default) — teacher view. -1 = concrete final
+#                                           rollout (endpoint; teacher sees the
+#                                           answer at every scored position). n>=0
+#                                           = trajectory state n steps after the
+#                                           student's step (honest peek-ahead).
 #
 #   STUDENT_BACKEND=dream (default) | llada
 #   DATASET=mixchain (default) | zigeng
@@ -51,7 +56,11 @@ MODEL_NAME="${MODEL_NAME:-$DEFAULT_MODEL_NAME}"
 # --- Trajectory knobs ---------------------------------------------------------
 TRAJ_MASK_THRESHOLD="${TRAJ_MASK_THRESHOLD:-0.5}"
 TRAJ_STEP_SELECT="${TRAJ_STEP_SELECT:-least}"
-TRAJ_TAG="traj${TRAJ_MASK_THRESHOLD//./}-${TRAJ_STEP_SELECT}"
+# Teacher view: -1 = concrete final rollout (endpoint); n>=0 = trajectory state
+# n steps after the student's step (history[k+n], clamped to the final state).
+TRAJ_TEACHER_GAP="${TRAJ_TEACHER_GAP:--1}"
+if [[ "$TRAJ_TEACHER_GAP" -lt 0 ]]; then GAP_TAG="endpt"; else GAP_TAG="gap${TRAJ_TEACHER_GAP}"; fi
+TRAJ_TAG="traj${TRAJ_MASK_THRESHOLD//./}-${TRAJ_STEP_SELECT}-${GAP_TAG}"
 
 # --- Dataset toggle: mixchain (default) vs zigeng -----------------------------
 DATASET="${DATASET:-mixchain}"
@@ -101,6 +110,7 @@ accelerate launch \
     --sampling_eps 1e-3 \
     --traj_mask_threshold "$TRAJ_MASK_THRESHOLD" \
     --traj_step_select "$TRAJ_STEP_SELECT" \
+    --traj_teacher_gap "$TRAJ_TEACHER_GAP" \
     --use_peft \
     --lora_r 32 \
     --lora_alpha 32 \

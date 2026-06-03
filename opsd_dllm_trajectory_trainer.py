@@ -11,14 +11,22 @@ Contrast with the base on-policy OPSD:
                      teacher sees the same noisy completion.
   * trajectory     : student rolls out *with its denoising history*. The noisy
                      completion is a *real* intermediate denoising step — per
-                     example, the least-masked step whose masked fraction over
-                     the loss-eligible region still exceeds `traj_mask_threshold`
-                     (default 0.5, i.e. ">50% masked"). The teacher's privileged
-                     information is the *concrete final rollout* (the endpoint of
-                     the trajectory): it conditions on the tokens the student will
-                     eventually decode, while the student only sees the
-                     partially-decoded step. JSD is computed at the positions
-                     that are <mask> in that step.
+                     example, the least-masked step `k` whose masked fraction
+                     over the loss-eligible region still exceeds
+                     `traj_mask_threshold` (default 0.5, i.e. ">50% masked").
+                     The teacher's privileged view is controlled by
+                     `traj_teacher_gap`:
+                       * None (default) — the *concrete final rollout* (endpoint
+                         of the trajectory). The teacher sees the answer token at
+                         every scored position, so its target is near-degenerate
+                         (a "copy" of the student's own rollout).
+                       * n (int ≥ 0)    — the trajectory state `n` steps AFTER the
+                         student's step, i.e. `history[k + n]` (clamped to the
+                         final state). The teacher sees more *surrounding* context
+                         than the student but the positions still masked at step
+                         `k + n` remain genuinely predictive — an honest
+                         "peek-ahead" privilege rather than seeing the answer.
+                     JSD is computed at the positions that are <mask> at step `k`.
 
 Because Dream / LLaDA freeze tokens once they are unmasked, the intermediate
 trajectory state equals `final_completion` with the still-undecoded positions
@@ -33,12 +41,12 @@ machinery: `noisy_completion = where(mask_pattern, <mask>, final_completion)`.
                                                                       │
                        ┌──────────────────────────────────────────────┤
                        │ student sees history[k] (noisy)              │ teacher sees
-                       ▼                                              ▼ final (concrete)
-   [s_prompt | noisy_completion]                  [t_prompt | final_completion]
+                       ▼                                              ▼ history[k+n] (or final)
+   [s_prompt | noisy_completion]                  [t_prompt | teacher_completion]
                        │                                              │
                   forward (grad)                               forward (no_grad)
                        │                                              │
-                       └────────── JSD on MASKED positions ──────────┘
+                       └────────── JSD on step-k MASKED positions ───┘
 
 This trainer is on-policy only (`off_policy` must be False). Both backends are
 supported: Dream via `diffusion_generate(output_history=True)`, LLaDA via a
@@ -68,6 +76,7 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         *args,
         traj_mask_threshold: float = 0.5,
         traj_step_select: str = "least",
+        traj_teacher_gap: int | None = None,
         **kwargs,
     ):
         # The base trainer only recognizes mask_schedule in {"diffusion","fixed"};
@@ -85,15 +94,28 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
                 "OPSDDLLMTrajectoryTrainer is on-policy (it derives the mask from the "
                 "student's own decoding trajectory) and is incompatible with off_policy=True."
             )
+        if traj_teacher_gap is not None:
+            traj_teacher_gap = int(traj_teacher_gap)
+            if traj_teacher_gap < 0:
+                raise ValueError(
+                    f"traj_teacher_gap must be None or a non-negative int, got {traj_teacher_gap}."
+                )
 
         self.traj_mask_threshold = float(traj_mask_threshold)
         self.traj_step_select = traj_step_select
+        self.traj_teacher_gap = traj_teacher_gap
 
+        if self.traj_teacher_gap is None:
+            teacher_view = "the concrete final rollout (trajectory endpoint)"
+        else:
+            teacher_view = (
+                f"the trajectory state {self.traj_teacher_gap} step(s) after the student's step "
+                "(history[k+gap], clamped to the final state)"
+            )
         print(
             "\n[OPSD-DLLM] TRAJECTORY MODE — student noise is a real decoding step "
             f"(select={self.traj_step_select!r}, masked-fraction threshold "
-            f">{self.traj_mask_threshold:.2f}); teacher sees the concrete final rollout "
-            "as privileged information.\n"
+            f">{self.traj_mask_threshold:.2f}); teacher sees {teacher_view} as privileged information.\n"
         )
 
     # ------------------------------------------------------------------
@@ -273,6 +295,9 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
             mask:           [B, L] bool — True at the chosen step's masked positions
                             (restricted to JSD-valid).
             p_mask_sample:  [B] float  — chosen step's masked fraction (diagnostics).
+            chosen:         [B] long   — per-example index into `history` of the
+                            chosen step (None if no history was captured). Used by
+                            the teacher n-step-ahead view.
         """
         device = completion_ids.device
         B, L = completion_ids.shape
@@ -285,7 +310,7 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
             # region as masked (still satisfies the ≥1-mask invariant below).
             mask = valid.clone()
             p_mask_sample = mask.float().sum(dim=1) / valid_counts
-            return self._ensure_min_one_mask(mask, valid), p_mask_sample
+            return self._ensure_min_one_mask(mask, valid), p_mask_sample, None
 
         # [S, B, L] — masked-and-valid indicator for every snapshot.
         is_mask_per_step = torch.stack(
@@ -323,7 +348,38 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         mask = torch.gather(is_mask_per_step, 0, chosen_exp).squeeze(0)  # [B, L]
         p_mask_sample = torch.gather(frac, 0, chosen.view(1, B)).squeeze(0)  # [B]
 
-        return self._ensure_min_one_mask(mask, valid), p_mask_sample
+        return self._ensure_min_one_mask(mask, valid), p_mask_sample, chosen
+
+    def _teacher_completion_n_ahead(self, completion_ids, history, chosen, n):
+        """Build the teacher's completion as the trajectory state `n` steps after
+        each example's chosen (student) step.
+
+        For example `b`, the teacher sees `history[min(chosen[b] + n, S - 1)]` —
+        i.e. `n` denoising steps further along the student's own trajectory,
+        clamped to the final captured state. Positions already decoded by that
+        step are concrete (the teacher sees them); positions still masked stay
+        <mask> (the teacher predicts them, conditioned only on the extra context
+        it has gained — an honest peek-ahead privilege rather than seeing the
+        answer at the scored position).
+
+        Falls back to the concrete final rollout when no trajectory/`chosen` is
+        available.
+
+        Returns:
+            teacher_completion: [B, L] long
+            teacher_step:       [B] long — the (clamped) step index the teacher saw
+        """
+        B, L = completion_ids.shape
+        device = completion_ids.device
+        if not history or chosen is None:
+            return completion_ids, torch.full((B,), -1, dtype=torch.long, device=device)
+
+        states = torch.stack(history, dim=0)  # [S, B, L]
+        S = states.shape[0]
+        teacher_step = (chosen + int(n)).clamp(max=S - 1)  # [B]
+        idx = teacher_step.view(1, B, 1).expand(1, B, L)
+        teacher_completion = torch.gather(states, 0, idx).squeeze(0).contiguous()  # [B, L]
+        return teacher_completion, teacher_step
 
     @staticmethod
     def _ensure_min_one_mask(mask, valid):
@@ -377,7 +433,7 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         #    positions in `completion_ids` reproduces that step exactly over the
         #    JSD-valid region.
         jsd_valid_mask = self._build_jsd_valid_mask(completion_ids, completion_mask)
-        mask_pattern, p_mask_sample = self._trajectory_mask(
+        mask_pattern, p_mask_sample, chosen = self._trajectory_mask(
             completion_ids, jsd_valid_mask, history
         )
         noisy_completion = torch.where(
@@ -387,10 +443,15 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         )
 
         # 3. Concat [prompt | completion]. The student sees the NOISY (real
-        #    decoding-step) completion; the teacher sees the CONCRETE final
-        #    rollout — its privileged information is the trajectory's endpoint,
-        #    so its distribution at the masked positions is conditioned on the
-        #    tokens the student will eventually decode.
+        #    decoding-step `k`) completion. The teacher's privileged view depends
+        #    on `traj_teacher_gap`:
+        #      * None — the CONCRETE final rollout (trajectory endpoint): the
+        #        teacher conditions on the tokens the student will eventually
+        #        decode (it sees the answer at every scored position).
+        #      * n    — the trajectory state `n` steps ahead (`history[k+n]`): the
+        #        teacher gains extra surrounding context but the positions still
+        #        masked at step `k+n` stay genuinely predictive.
+        #    JSD is always taken at the step-`k` masked positions (`mask_pattern`).
         #
         #    When the trajectory collator
         #    (SelfDistillationDLLMTrajectoryDataCollator) is used, the teacher
@@ -400,7 +461,15 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         #    `teacher_prompt_ids`, so the teacher completion span still starts at
         #    `t_prompt_len`; the transition sits after the span and only adds
         #    bidirectional context.
-        teacher_completion = completion_ids
+        if self.traj_teacher_gap is None:
+            teacher_completion = completion_ids
+            teacher_step = torch.full(
+                (completion_ids.shape[0],), -1, dtype=torch.long, device=completion_ids.device
+            )
+        else:
+            teacher_completion, teacher_step = self._teacher_completion_n_ahead(
+                completion_ids, history, chosen, self.traj_teacher_gap
+            )
         student_full_ids = torch.cat([student_prompt_ids, noisy_completion], dim=1)
         student_full_mask = torch.cat([student_prompt_mask, completion_mask], dim=1)
 
@@ -469,6 +538,22 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
                 float(mask_pattern.sum().item()) / max(1.0, float(jsd_valid_mask.sum().item()))
             )
             self._metrics[mode]["traj_num_steps"].append(float(len(history)))
+            # How much the teacher's view differs from the student's step. Of the
+            # scored (student-masked) positions, the fraction the teacher STILL
+            # sees as <mask> (genuinely predictive / "honest") vs. concrete (the
+            # teacher sees the answer there → near-degenerate copy target).
+            if mask_pattern.any():
+                teacher_still_masked = (
+                    teacher_completion[mask_pattern] == self.mask_token_id
+                ).float().mean().item()
+            else:
+                teacher_still_masked = 0.0
+            self._metrics[mode]["teacher_scored_frac_still_masked"].append(float(teacher_still_masked))
+            valid_step = teacher_step >= 0
+            if valid_step.any() and chosen is not None:
+                self._metrics[mode]["teacher_step_gap_mean"].append(
+                    float((teacher_step[valid_step] - chosen[valid_step]).float().mean().item())
+                )
             if per_token_jsd.numel() > 0:
                 self._metrics[mode]["per_token_jsd_mean"].append(float(per_token_jsd.mean().item()))
                 self._metrics[mode]["per_token_jsd_max"].append(float(per_token_jsd.max().item()))
