@@ -59,8 +59,17 @@ TRAJ_STEP_SELECT="${TRAJ_STEP_SELECT:-least}"
 # Teacher view: -1 = concrete final rollout (endpoint); n>=0 = trajectory state
 # n steps after the student's step (history[k+n], clamped to the final state).
 TRAJ_TEACHER_GAP="${TRAJ_TEACHER_GAP:--1}"
-if [[ "$TRAJ_TEACHER_GAP" -lt 0 ]]; then GAP_TAG="endpt"; else GAP_TAG="gap${TRAJ_TEACHER_GAP}"; fi
-TRAJ_TAG="traj${TRAJ_MASK_THRESHOLD//./}-${TRAJ_STEP_SELECT}-${GAP_TAG}"
+# Teacher target: 'snapshot' (single forward; uses TRAJ_TEACHER_GAP) or
+# 'all_future' (average over steps k+1->final; one forward per step — EXPENSIVE).
+TRAJ_TEACHER_VIEW="${TRAJ_TEACHER_VIEW:-snapshot}"
+if [[ "$TRAJ_TEACHER_VIEW" == "all_future" ]]; then
+    VIEW_TAG="allfut"
+elif [[ "$TRAJ_TEACHER_GAP" -lt 0 ]]; then
+    VIEW_TAG="endpt"
+else
+    VIEW_TAG="gap${TRAJ_TEACHER_GAP}"
+fi
+TRAJ_TAG="traj${TRAJ_MASK_THRESHOLD//./}-${TRAJ_STEP_SELECT}-${VIEW_TAG}"
 
 # --- Dataset toggle: mixchain (default) vs zigeng -----------------------------
 DATASET="${DATASET:-mixchain}"
@@ -93,7 +102,7 @@ accelerate launch \
     --output_dir ./outputs/opsd_dllm_trajectory/ \
     --run_config "$RUN_CONFIG" \
     --num_train_epochs 3 \
-    --save_steps 10 \
+    --save_steps 100 \
     --logging_steps 2 \
     --attn_implementation sdpa \
     --torch_dtype bfloat16 \
@@ -110,6 +119,7 @@ accelerate launch \
     --sampling_eps 1e-3 \
     --traj_mask_threshold "$TRAJ_MASK_THRESHOLD" \
     --traj_step_select "$TRAJ_STEP_SELECT" \
+    --traj_teacher_view "$TRAJ_TEACHER_VIEW" \
     --traj_teacher_gap "$TRAJ_TEACHER_GAP" \
     --use_peft \
     --lora_r 32 \

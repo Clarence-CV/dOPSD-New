@@ -77,6 +77,7 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         traj_mask_threshold: float = 0.5,
         traj_step_select: str = "least",
         traj_teacher_gap: int | None = None,
+        traj_teacher_view: str = "snapshot",
         **kwargs,
     ):
         # The base trainer only recognizes mask_schedule in {"diffusion","fixed"};
@@ -100,12 +101,23 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
                 raise ValueError(
                     f"traj_teacher_gap must be None or a non-negative int, got {traj_teacher_gap}."
                 )
+        if traj_teacher_view not in ("snapshot", "all_future"):
+            raise ValueError(
+                f"traj_teacher_view must be 'snapshot' or 'all_future', got {traj_teacher_view!r}."
+            )
 
         self.traj_mask_threshold = float(traj_mask_threshold)
         self.traj_step_select = traj_step_select
         self.traj_teacher_gap = traj_teacher_gap
+        self.traj_teacher_view = traj_teacher_view
 
-        if self.traj_teacher_gap is None:
+        if self.traj_teacher_view == "all_future":
+            teacher_view = (
+                "the FULL remaining trajectory (steps k+1 → final): per scored position, "
+                "the teacher's predictive distribution is averaged over the future steps where "
+                "that position is still masked (one teacher forward per remaining step — EXPENSIVE)"
+            )
+        elif self.traj_teacher_gap is None:
             teacher_view = "the concrete final rollout (trajectory endpoint)"
         else:
             teacher_view = (
@@ -382,6 +394,124 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         return teacher_completion, teacher_step
 
     @staticmethod
+    def _build_teacher_full(
+        teacher_prompt_ids,
+        teacher_prompt_mask,
+        completion,
+        completion_mask,
+        transition_ids=None,
+        transition_mask=None,
+    ):
+        """Assemble [teacher_prompt | completion | optional transition] (ids, mask)."""
+        ids_parts = [teacher_prompt_ids, completion]
+        mask_parts = [teacher_prompt_mask, completion_mask]
+        if transition_ids is not None and transition_ids.shape[1] > 0:
+            if transition_mask is None:
+                transition_mask = torch.ones_like(transition_ids)
+            ids_parts.append(transition_ids)
+            mask_parts.append(transition_mask)
+        return torch.cat(ids_parts, dim=1), torch.cat(mask_parts, dim=1)
+
+    def _teacher_masked_all_future(
+        self,
+        model,
+        teacher_prompt_ids,
+        teacher_prompt_mask,
+        completion_mask,
+        completion_ids,
+        history,
+        chosen,
+        mask_pattern,
+        t_prompt_len,
+        L_c,
+        transition_ids=None,
+        transition_mask=None,
+    ):
+        """Aggregate the teacher target over the full remaining trajectory.
+
+        For each scored position (masked at the student's step `k`), average the
+        teacher's predictive distribution over the FUTURE steps `t in (k, final]`
+        where that position is STILL masked — so the steps where the teacher has
+        already decoded the token (and would just copy it) do not contaminate the
+        target. Positions never masked in that window (decoded immediately after
+        `k`) fall back to the teacher distribution on the final concrete rollout.
+
+        Costs one teacher forward per distinct remaining step — EXPENSIVE.
+
+        Returns:
+            teacher_masked: [N, V] teacher LOG-probs, aligned to the row-major
+                (b, l) order of `mask_pattern` (matches
+                `student_completion_logits[mask_pattern]`).
+        """
+        device = completion_ids.device
+        scored = mask_pattern.nonzero(as_tuple=False)  # [N, 2] (b, l), row-major
+        N = scored.shape[0]
+        b_n, l_n = scored[:, 0], scored[:, 1]
+
+        teacher_ctx = (
+            self.accelerator.unwrap_model(model).disable_adapter()
+            if (self.fixed_teacher and is_peft_model(model))
+            else nullcontext()
+        )
+
+        def _probs_at_scored(completion):
+            full_ids, full_mask = self._build_teacher_full(
+                teacher_prompt_ids, teacher_prompt_mask, completion,
+                completion_mask, transition_ids, transition_mask,
+            )
+            logits = self._forward(model, full_ids, full_mask)
+            comp = logits[:, t_prompt_len : t_prompt_len + L_c, :]
+            sel = comp[b_n, l_n, :].float()  # [N, V]
+            return F.softmax(sel, dim=-1)
+
+        sum_probs = None
+        count = torch.zeros(N, device=device)
+
+        was_training = model.training
+        if was_training:
+            model.eval()
+        try:
+            with torch.no_grad(), teacher_ctx:
+                if history and chosen is not None:
+                    states = torch.stack(history, dim=0)  # [S, B, L]
+                    S = states.shape[0]
+                    masked_states = states == self.mask_token_id  # [S, B, L]
+                    chosen_n = chosen[b_n]  # [N]
+                    t_start = max(int(chosen.min().item()) + 1, 1)
+                    for t in range(t_start, S):
+                        # scored positions masked at step t and in the (k, final] window
+                        contribute = masked_states[t, b_n, l_n] & (t > chosen_n)  # [N]
+                        if not bool(contribute.any()):
+                            continue
+                        probs = _probs_at_scored(states[t])  # [N, V]
+                        if sum_probs is None:
+                            sum_probs = torch.zeros(N, probs.shape[-1], device=device)
+                        sum_probs[contribute] += probs[contribute]
+                        count[contribute] += 1.0
+                        del probs
+
+                # Endpoint fallback for positions with no masked future step.
+                need_fb = count == 0
+                if sum_probs is None or bool(need_fb.any()):
+                    probs = _probs_at_scored(completion_ids)  # [N, V]
+                    if sum_probs is None:
+                        sum_probs = torch.zeros(N, probs.shape[-1], device=device)
+                    sum_probs[need_fb] = probs[need_fb]
+                    count[need_fb] = 1.0
+                    del probs
+        finally:
+            if was_training:
+                model.train()
+
+        # Diagnostic: avg number of future steps averaged per scored position
+        # (1.0 ⇒ everything fell back to the endpoint).
+        mode = "train" if was_training else "eval"
+        self._metrics[mode]["teacher_future_steps_avg"].append(float(count.mean().item()))
+
+        avg = sum_probs / count.clamp(min=1.0).unsqueeze(-1)  # [N, V]
+        return avg.clamp_min(1e-12).log().detach()
+
+    @staticmethod
     def _ensure_min_one_mask(mask, valid):
         """Guarantee ≥1 masked position per row that has any valid token."""
         B = valid.shape[0]
@@ -442,77 +572,77 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
             completion_ids,
         )
 
-        # 3. Concat [prompt | completion]. The student sees the NOISY (real
-        #    decoding-step `k`) completion. The teacher's privileged view depends
-        #    on `traj_teacher_gap`:
-        #      * None — the CONCRETE final rollout (trajectory endpoint): the
-        #        teacher conditions on the tokens the student will eventually
-        #        decode (it sees the answer at every scored position).
-        #      * n    — the trajectory state `n` steps ahead (`history[k+n]`): the
-        #        teacher gains extra surrounding context but the positions still
-        #        masked at step `k+n` stay genuinely predictive.
-        #    JSD is always taken at the step-`k` masked positions (`mask_pattern`).
+        # 3. Build student input. The student always sees the NOISY (real
+        #    decoding-step `k`) completion. The teacher's privileged view is set
+        #    by `traj_teacher_view` / `traj_teacher_gap` (see step 5). JSD is
+        #    always taken at the step-`k` masked positions (`mask_pattern`).
         #
         #    When the trajectory collator
         #    (SelfDistillationDLLMTrajectoryDataCollator) is used, the teacher
         #    prompt also carries a framing intro BEFORE the decoding step, and a
-        #    `teacher_transition_input_ids` suffix is appended AFTER it (mirroring
-        #    data_collator.py's reason_first). The intro is already part of
-        #    `teacher_prompt_ids`, so the teacher completion span still starts at
-        #    `t_prompt_len`; the transition sits after the span and only adds
-        #    bidirectional context.
-        if self.traj_teacher_gap is None:
-            teacher_completion = completion_ids
-            teacher_step = torch.full(
-                (completion_ids.shape[0],), -1, dtype=torch.long, device=completion_ids.device
-            )
-        else:
-            teacher_completion, teacher_step = self._teacher_completion_n_ahead(
-                completion_ids, history, chosen, self.traj_teacher_gap
-            )
+        #    `teacher_transition_input_ids` suffix is appended AFTER it. The intro
+        #    is already part of `teacher_prompt_ids`, so the teacher completion
+        #    span still starts at `t_prompt_len`; the transition (if any) sits
+        #    after the span and only adds bidirectional context.
+        transition_ids = inputs.get("teacher_transition_input_ids")
+        transition_mask = inputs.get("teacher_transition_attention_mask")
+
         student_full_ids = torch.cat([student_prompt_ids, noisy_completion], dim=1)
         student_full_mask = torch.cat([student_prompt_mask, completion_mask], dim=1)
-
-        teacher_ids_parts = [teacher_prompt_ids, teacher_completion]
-        teacher_mask_parts = [teacher_prompt_mask, completion_mask]
-        transition_ids = inputs.get("teacher_transition_input_ids")
-        if transition_ids is not None and transition_ids.shape[1] > 0:
-            transition_mask = inputs.get("teacher_transition_attention_mask")
-            if transition_mask is None:
-                transition_mask = torch.ones_like(transition_ids)
-            teacher_ids_parts.append(transition_ids)
-            teacher_mask_parts.append(transition_mask)
-        teacher_full_ids = torch.cat(teacher_ids_parts, dim=1)
-        teacher_full_mask = torch.cat(teacher_mask_parts, dim=1)
 
         # 4. Student forward (with grad). Slice out the completion span only.
         student_logits = self._forward(model, student_full_ids, student_full_mask)
         student_completion_logits = student_logits[:, s_prompt_len : s_prompt_len + L_c, :]
         del student_logits
-
-        # 5. Teacher forward (no grad). For fixed_teacher, run the base model w/o LoRA.
-        if self.fixed_teacher and is_peft_model(model):
-            teacher_ctx = self.accelerator.unwrap_model(model).disable_adapter()
-        else:
-            teacher_ctx = nullcontext()
-
-        was_training = model.training
-        if was_training:
-            model.eval()
-        try:
-            with torch.no_grad(), teacher_ctx:
-                teacher_logits = self._forward(model, teacher_full_ids, teacher_full_mask)
-                teacher_completion_logits = (
-                    teacher_logits[:, t_prompt_len : t_prompt_len + L_c, :].float().detach()
-                )
-        finally:
-            if was_training:
-                model.train()
-        del teacher_logits
-
-        # 6. Token-level JSD over MASKED completion positions only.
         student_masked = student_completion_logits[mask_pattern]  # [N, V]
-        teacher_masked = teacher_completion_logits[mask_pattern]  # [N, V]
+
+        # 5. Teacher target at the scored (step-`k` masked) positions.
+        #      * "all_future"      — average the teacher's predictive distribution
+        #        over steps k+1→final where each position is still masked (many
+        #        teacher forwards; returns log-probs directly).
+        #      * "snapshot" + gap None — the CONCRETE final rollout (endpoint).
+        #      * "snapshot" + gap n    — the state `n` steps ahead (history[k+n]).
+        B0 = completion_ids.shape[0]
+        teacher_completion = None
+        teacher_step = torch.full((B0,), -1, dtype=torch.long, device=completion_ids.device)
+        if self.traj_teacher_view == "all_future":
+            teacher_masked = self._teacher_masked_all_future(
+                model, teacher_prompt_ids, teacher_prompt_mask, completion_mask,
+                completion_ids, history, chosen, mask_pattern,
+                t_prompt_len, L_c, transition_ids, transition_mask,
+            )  # [N, V] log-probs
+        else:
+            if self.traj_teacher_gap is None:
+                teacher_completion = completion_ids
+            else:
+                teacher_completion, teacher_step = self._teacher_completion_n_ahead(
+                    completion_ids, history, chosen, self.traj_teacher_gap
+                )
+            teacher_full_ids, teacher_full_mask = self._build_teacher_full(
+                teacher_prompt_ids, teacher_prompt_mask, teacher_completion,
+                completion_mask, transition_ids, transition_mask,
+            )
+            if self.fixed_teacher and is_peft_model(model):
+                teacher_ctx = self.accelerator.unwrap_model(model).disable_adapter()
+            else:
+                teacher_ctx = nullcontext()
+
+            was_training = model.training
+            if was_training:
+                model.eval()
+            try:
+                with torch.no_grad(), teacher_ctx:
+                    teacher_logits = self._forward(model, teacher_full_ids, teacher_full_mask)
+                    teacher_completion_logits = (
+                        teacher_logits[:, t_prompt_len : t_prompt_len + L_c, :].float().detach()
+                    )
+            finally:
+                if was_training:
+                    model.train()
+            del teacher_logits
+            teacher_masked = teacher_completion_logits[mask_pattern]  # [N, V]
+
+        # 6. Token-level JSD over the scored positions.
 
         per_token_jsd = self.generalized_jsd_loss(
             student_masked.float(),
@@ -538,22 +668,20 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
                 float(mask_pattern.sum().item()) / max(1.0, float(jsd_valid_mask.sum().item()))
             )
             self._metrics[mode]["traj_num_steps"].append(float(len(history)))
-            # How much the teacher's view differs from the student's step. Of the
-            # scored (student-masked) positions, the fraction the teacher STILL
-            # sees as <mask> (genuinely predictive / "honest") vs. concrete (the
-            # teacher sees the answer there → near-degenerate copy target).
-            if mask_pattern.any():
+            # Snapshot diagnostics only (all_future logs `teacher_future_steps_avg`
+            # from inside `_teacher_masked_all_future`). Of the scored positions,
+            # the fraction the teacher STILL sees as <mask> (genuinely predictive)
+            # vs. concrete (sees the answer → near-degenerate copy target).
+            if teacher_completion is not None and bool(mask_pattern.any()):
                 teacher_still_masked = (
                     teacher_completion[mask_pattern] == self.mask_token_id
                 ).float().mean().item()
-            else:
-                teacher_still_masked = 0.0
-            self._metrics[mode]["teacher_scored_frac_still_masked"].append(float(teacher_still_masked))
-            valid_step = teacher_step >= 0
-            if valid_step.any() and chosen is not None:
-                self._metrics[mode]["teacher_step_gap_mean"].append(
-                    float((teacher_step[valid_step] - chosen[valid_step]).float().mean().item())
-                )
+                self._metrics[mode]["teacher_scored_frac_still_masked"].append(float(teacher_still_masked))
+                valid_step = teacher_step >= 0
+                if bool(valid_step.any()) and chosen is not None:
+                    self._metrics[mode]["teacher_step_gap_mean"].append(
+                        float((teacher_step[valid_step] - chosen[valid_step]).float().mean().item())
+                    )
             if per_token_jsd.numel() > 0:
                 self._metrics[mode]["per_token_jsd_mean"].append(float(per_token_jsd.mean().item()))
                 self._metrics[mode]["per_token_jsd_max"].append(float(per_token_jsd.max().item()))

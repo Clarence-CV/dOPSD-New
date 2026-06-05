@@ -104,14 +104,24 @@ class CustomScriptArguments(ScriptArguments):
             "'random' (uniform among eligible)."
         },
     )
+    traj_teacher_view: str = field(
+        default="snapshot",
+        metadata={
+            "help": "Teacher target construction. 'snapshot' (default) = a single "
+            "teacher forward on one state (see --traj_teacher_gap). 'all_future' = "
+            "average the teacher's predictive distribution over ALL remaining steps "
+            "k+1->final where each scored position is still masked (one teacher "
+            "forward per remaining step — EXPENSIVE, ~10-50x slower)."
+        },
+    )
     traj_teacher_gap: int = field(
         default=-1,
         metadata={
-            "help": "Teacher's privileged view. -1 (default) = the concrete final "
-            "rollout (trajectory endpoint; teacher sees the answer at every scored "
-            "position). n >= 0 = the trajectory state n steps after the student's "
-            "step (history[k+n], clamped to the final state) — the teacher gains "
-            "extra context but positions still masked at k+n stay predictive."
+            "help": "Only used with --traj_teacher_view=snapshot. -1 (default) = the "
+            "concrete final rollout (trajectory endpoint; teacher sees the answer at "
+            "every scored position). n >= 0 = the trajectory state n steps after the "
+            "student's step (history[k+n], clamped to the final state) — the teacher "
+            "gains extra context but positions still masked at k+n stay predictive."
         },
     )
     decode_intro_prompt: str = field(
@@ -259,6 +269,7 @@ if __name__ == "__main__":
                 "method": "trajectory",
                 "traj_mask_threshold": script_args.traj_mask_threshold,
                 "traj_step_select": script_args.traj_step_select,
+                "traj_teacher_view": script_args.traj_teacher_view,
                 "traj_teacher_gap": (
                     None if script_args.traj_teacher_gap < 0 else script_args.traj_teacher_gap
                 ),
@@ -379,6 +390,7 @@ if __name__ == "__main__":
         gen_alg_temp=script_args.gen_alg_temp,
         traj_mask_threshold=script_args.traj_mask_threshold,
         traj_step_select=script_args.traj_step_select,
+        traj_teacher_view=script_args.traj_teacher_view,
         traj_teacher_gap=(None if script_args.traj_teacher_gap < 0 else script_args.traj_teacher_gap),
     )
 
