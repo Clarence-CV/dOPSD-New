@@ -125,11 +125,13 @@ class CustomScriptArguments(ScriptArguments):
         },
     )
     decode_intro_prompt: str = field(
-        default=None,
+        default="",
         metadata={
             "help": "Framing text inserted in the teacher prompt BEFORE the decoding "
-            "step (analogous to data_collator.py's reason_first_prompt). None = use "
-            "SelfDistillationDLLMTrajectoryDataCollator's default."
+            "step. Default '' = OFF (recommended) — the teacher prompt equals the "
+            "student prompt, so the teacher input stays in the model's native decode "
+            "format and the privilege comes only from the completion tokens. Pass "
+            "explicit text to enable framing (out-of-distribution; for ablations)."
         },
     )
     transition_prompt: str = field(

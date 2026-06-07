@@ -577,13 +577,14 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         #    by `traj_teacher_view` / `traj_teacher_gap` (see step 5). JSD is
         #    always taken at the step-`k` masked positions (`mask_pattern`).
         #
-        #    When the trajectory collator
-        #    (SelfDistillationDLLMTrajectoryDataCollator) is used, the teacher
-        #    prompt also carries a framing intro BEFORE the decoding step, and a
-        #    `teacher_transition_input_ids` suffix is appended AFTER it. The intro
-        #    is already part of `teacher_prompt_ids`, so the teacher completion
-        #    span still starts at `t_prompt_len`; the transition (if any) sits
-        #    after the span and only adds bidirectional context.
+        #    By default the trajectory collator gives the teacher the SAME prompt
+        #    as the student (problem only) — the teacher input stays in the model's
+        #    native decode format and the privilege comes purely from the
+        #    completion tokens. Optional ablation framing (decode_intro_prompt /
+        #    transition_prompt) is folded into `teacher_prompt_ids` / appended as a
+        #    `teacher_transition_input_ids` suffix; the intro is already part of
+        #    `teacher_prompt_ids`, so the teacher completion span still starts at
+        #    `t_prompt_len`, and the transition (if any) sits after the span.
         transition_ids = inputs.get("teacher_transition_input_ids")
         transition_mask = inputs.get("teacher_transition_attention_mask")
 

@@ -6,31 +6,45 @@ from data_collator_dllm import SelfDistillationDLLMDataCollator
 class SelfDistillationDLLMTrajectoryDataCollator(SelfDistillationDLLMDataCollator):
     """Collator for trajectory-OPSD (see opsd_dllm_trajectory_trainer.py).
 
-    Differs from the base `SelfDistillationDLLMDataCollator` in how the *teacher*
-    input is framed. In trajectory mode the teacher's privileged information is
-    the student's own decoding trajectory (the concrete final rollout), NOT the
+    In trajectory mode the teacher's privileged information is the student's own
+    decoding trajectory (its decoding-step / final-rollout tokens), NOT the
     dataset's ground-truth solution — so `solution` is dropped from the teacher
-    prompt. Instead, mirroring `data_collator.py`'s `reason_first` structure, the
-    teacher input is wrapped around the (runtime) decoding step with:
+    prompt.
+
+    DEFAULT (recommended): NO framing. The teacher prompt is exactly the student
+    prompt (problem only + assistant header), and the trainer appends the runtime
+    decoding step as the assistant response:
+
+        [ teacher_prompt(problem) | <decoding step> ]
+
+    This keeps the teacher input in the model's NATIVE decode format
+    (`[problem][partial completion]`) — the same format it sees at inference — so
+    the teacher understands the decoding step in-distribution and the privilege
+    comes purely from the completion tokens, with no out-of-distribution prompt
+    text and no teacher/student conditioning mismatch.
+
+    OPTIONAL (ablation only): pass non-empty `decode_intro_prompt` and/or
+    `transition_prompt` to wrap the step (mirroring `data_collator.py`'s
+    `reason_first`):
 
         [ teacher_prompt(problem + decode_intro_prompt) | <decoding step> | transition_prompt ]
-          └──────────── before the step ────────────┘   └ runtime ┘   └── after the step ──┘
 
       * `decode_intro_prompt`  — folded into the teacher's chat-templated prompt
-        (the text BEFORE the decoding step). It frames the completion that the
-        teacher will see as its assistant response as a known-correct reasoning.
-      * `transition_prompt`    — emitted as a separate token tensor
-        (`teacher_transition_input_ids`) that the trainer appends AFTER the
-        decoding step, exactly like `reason_first`'s `teacher_transition_tokens`.
+        (text BEFORE the step).
+      * `transition_prompt`    — emitted as `teacher_transition_input_ids`, which
+        the trainer appends AFTER the step.
 
-    The student side is unchanged: the student still sees only the problem
-    (`_build_student_prompt`), so its completion span stays directly comparable
-    to the teacher's at the masked positions.
-
-    Both prompt texts are overridable via the constructor so the framing can be
-    ablated without touching code.
+    Both add prompt text the model never saw during training/generation, so they
+    are out-of-distribution and disabled by default. The student side is always
+    unchanged (problem only), so the completion spans stay directly comparable.
     """
 
+    # Optional framing templates (OFF by default). The recommended/default setup
+    # is NO framing: the teacher's input is the same in-distribution format the
+    # model actually decodes in — `[problem][partial completion]` — so the
+    # privilege comes purely from the completion (decoding-step) tokens, not from
+    # out-of-distribution prompt text. Pass a non-empty string (or None to use
+    # these templates) only for ablations.
     DEFAULT_DECODE_INTRO_PROMPT = (
         "A complete, step-by-step solution to this problem is provided below as the "
         "response. Every step of it is correct and it reaches the right final answer. "
@@ -48,8 +62,8 @@ class SelfDistillationDLLMTrajectoryDataCollator(SelfDistillationDLLMDataCollato
         max_answer_length=1024,
         problem_field: str = "problem",
         solution_field: str = "solution",
-        decode_intro_prompt: str | None = None,
-        transition_prompt: str | None = None,
+        decode_intro_prompt: str | None = "",
+        transition_prompt: str | None = "",
     ):
         super().__init__(
             tokenizer=tokenizer,
@@ -58,11 +72,10 @@ class SelfDistillationDLLMTrajectoryDataCollator(SelfDistillationDLLMDataCollato
             problem_field=problem_field,
             solution_field=solution_field,
         )
+        # "" (default) = OFF; None = use the DEFAULT_* template; any string = that text.
         self.decode_intro_prompt = (
             self.DEFAULT_DECODE_INTRO_PROMPT if decode_intro_prompt is None else decode_intro_prompt
         )
-        # Note: base __init__ already set self.transition_prompt; override it with
-        # the trajectory-appropriate wording (or the caller's).
         self.transition_prompt = (
             self.DEFAULT_TRANSITION_PROMPT if transition_prompt is None else transition_prompt
         )
@@ -75,19 +88,27 @@ class SelfDistillationDLLMTrajectoryDataCollator(SelfDistillationDLLMDataCollato
             add_special_tokens=False,
         )["input_ids"]
 
-        print(
-            "[DLLMTrajectoryCollator] teacher prompt frames the decoding step "
-            f"(intro={len(self.decode_intro_prompt)} chars, "
-            f"transition={len(self._transition_ids)} tokens). Solution is NOT shown to the teacher."
-        )
+        if not self.decode_intro_prompt and len(self._transition_ids) == 0:
+            print(
+                "[DLLMTrajectoryCollator] NO framing — teacher prompt == student prompt "
+                "(problem only). Privilege comes solely from the completion (decoding-step) "
+                "tokens; the teacher input stays in the model's native decode format."
+            )
+        else:
+            print(
+                "[DLLMTrajectoryCollator] teacher prompt frames the decoding step "
+                f"(intro={len(self.decode_intro_prompt)} chars, "
+                f"transition={len(self._transition_ids)} tokens) — ABLATION mode "
+                "(adds out-of-distribution prompt text). Solution is NOT shown to the teacher."
+            )
 
     def _build_teacher_prompt(self, problem: str, solution: str) -> str:
         # Privilege comes from the decoding trajectory, not the GT solution, so
-        # `solution` is intentionally unused. The decode-intro framing goes in
-        # the user turn; `add_generation_prompt=True` ends the prompt at the
-        # assistant header, after which the trainer appends the decoding step as
-        # the (privileged, concrete) assistant response.
-        user_message = f"{problem}\n\n{self.decode_intro_prompt}".rstrip()
+        # `solution` is intentionally unused. With the default (no intro), the
+        # teacher prompt is exactly the student prompt; `add_generation_prompt=True`
+        # ends it at the assistant header, after which the trainer appends the
+        # decoding step as the (privileged) assistant response.
+        user_message = f"{problem}\n\n{self.decode_intro_prompt}".rstrip() if self.decode_intro_prompt else problem
         return self.tokenizer.apply_chat_template(
             [{"role": "user", "content": user_message}],
             tokenize=False,
