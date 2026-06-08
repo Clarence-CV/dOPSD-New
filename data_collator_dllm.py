@@ -66,12 +66,47 @@ class SelfDistillationDLLMDataCollator:
             add_generation_prompt=True,
         )
 
+    def _compose_teacher_user_turn(self, problem: str, solution: str) -> str:
+        # User turn = problem + the ground-truth reference solution + a
+        # transition prompt that tells the model to re-derive the answer in its
+        # own words. add_generation_prompt=True appends the assistant header so
+        # the teacher generates from there.
+        user_content = (
+            f"{problem}\n\n"
+            f"Reference solution:\n{solution}"
+            f"{self.transition_prompt}"
+            f"{self.answer_instruction}"
+        )
+        return self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": user_content}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
     def _build_teacher_prompt(self, problem: str, solution: str) -> str:
-        # Zigeng's distillation set has no privileged "reference solution"
-        # structure — `solution` IS the teacher's GT answer. Keep the teacher
-        # prompt identical to the student prompt so on-policy JSD compares two
-        # predictive distributions on the same condition.
-        return self._build_student_prompt(problem)
+        # PRIVILEGED-INFORMATION TEACHER: the teacher's prompt embeds the
+        # ground-truth `solution` as privileged context the student never sees.
+        # Conditioned on the gold solution, the teacher's distribution over the
+        # (masked) answer positions is sharpened; OPSD's JSD then distills that
+        # distribution into the student, which is conditioned on the problem
+        # alone. The reference solution IS the teacher's privileged information.
+        #
+        # The solution is token-budgeted so the assembled prompt fits inside
+        # max_prompt_length. Otherwise the tokenizer's right-truncation in
+        # _tokenize() would drop the trailing assistant generation header and
+        # break the teacher forward's prompt/completion alignment.
+        skeleton = self._compose_teacher_user_turn(problem, solution="")
+        skeleton_len = len(self.tokenizer(skeleton, add_special_tokens=False)["input_ids"])
+        # Leave a small margin to absorb decode/re-encode token drift below.
+        budget = self.max_prompt_length - skeleton_len - 8
+        if budget <= 0:
+            # No room for the solution: fall back to a non-privileged prompt
+            # rather than emitting a header-less (truncated) teacher prompt.
+            return self._build_student_prompt(problem)
+        sol_ids = self.tokenizer(solution, add_special_tokens=False)["input_ids"]
+        if len(sol_ids) > budget:
+            solution = self.tokenizer.decode(sol_ids[:budget])
+        return self._compose_teacher_user_turn(problem, solution)
 
     def _left_pad(self, seqs, max_len, pad_id):
         ids, mask = [], []
