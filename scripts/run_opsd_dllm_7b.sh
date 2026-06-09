@@ -148,7 +148,7 @@ accelerate launch \
     --output_dir ./outputs/opsd_dllm/ \
     --run_config "$RUN_CONFIG" \
     --num_train_epochs 3 \
-    --save_steps 10 \
+    --save_steps 100 \
     --logging_steps 2 \
     --attn_implementation sdpa \
     --torch_dtype bfloat16 \
