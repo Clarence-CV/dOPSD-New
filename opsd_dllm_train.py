@@ -88,6 +88,15 @@ class CustomScriptArguments(ScriptArguments):
             "concrete GT. When set, --gen_* generation flags are unused."
         },
     )
+    use_privileged_info: bool = field(
+        default=False,
+        metadata={
+            "help": "Privileged-information teacher: embed the ground-truth solution in the "
+            "teacher's prompt (student still sees the problem only). False (default) keeps the "
+            "teacher prompt identical to the student's (no-PI baseline). This is the single knob "
+            "the PI-vs-no-PI controlled experiment toggles."
+        },
+    )
     student_backend: str = field(
         default="dream",
         metadata={
@@ -263,6 +272,7 @@ if __name__ == "__main__":
                 "lora_alpha": model_args.lora_alpha if model_args.use_peft else None,
                 "fixed_teacher": script_args.fixed_teacher,
                 "off_policy": script_args.off_policy,
+                "use_privileged_info": script_args.use_privileged_info,
                 "student_backend": script_args.student_backend,
                 "mask_schedule": script_args.mask_schedule,
                 "fixed_mask_ratio": script_args.fixed_mask_ratio,
@@ -377,6 +387,7 @@ if __name__ == "__main__":
         max_answer_length=script_args.max_answer_length,
         problem_field=BASELINE_PROBLEM_FIELD,
         solution_field=BASELINE_SOLUTION_FIELD,
+        use_privileged_info=script_args.use_privileged_info,
     )
 
     # === Trainer ==============================================================
