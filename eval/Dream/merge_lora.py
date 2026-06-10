@@ -25,12 +25,12 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(name, trust_remote_code=True)
 
-    peft_model = PeftModel.from_pretrained(base_model, "/home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm/dream7b_fix05_mixchain_forwardbeta0_w_PI/checkpoint-500")
+    peft_model = PeftModel.from_pretrained(base_model, "/home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm/dream7b_fix05_mixchain_forwardbeta0_w_PI/checkpoint-1000")
 
     merged_model = peft_model.merge_and_unload()
     
-    merged_model.save_pretrained("/home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm/dream7b_fix05_mixchain_forwardbeta0_w_PI_500_merge")
-    tokenizer.save_pretrained("/home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm/dream7b_fix05_mixchain_forwardbeta0_w_PI_500_merge")
+    merged_model.save_pretrained("/home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm/dream7b_fix05_mixchain_forwardbeta0_w_PI_1000_merge")
+    tokenizer.save_pretrained("/home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm/dream7b_fix05_mixchain_forwardbeta0_w_PI_1000_merge")
 
 
 if __name__ == "__main__":
