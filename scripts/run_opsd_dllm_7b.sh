@@ -135,7 +135,7 @@ fi
 # USE_PI=1           — PI: teacher prompt embeds the ground-truth solution.
 # Folded into the run_config tag so the PI / no-PI arms get distinct
 # output_dir / W&B runs for a clean controlled comparison.
-USE_PI="${USE_PI:-0}"
+USE_PI="${USE_PI:-1}"
 if [[ "$USE_PI" == "1" ]]; then
     PI_FLAG="--use_privileged_info"
     PI_TAG="PI"
