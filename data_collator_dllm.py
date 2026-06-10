@@ -50,8 +50,16 @@ class SelfDistillationDLLMDataCollator:
             "Think step by step, explore different approaches, and don't be afraid to backtrack "
             "or reconsider if something doesn't work out:\n"
         )
+        # GSM8K answers are plain integers. lm-eval's gsm8k extractors look for
+        # the exact "#### <n>" line (strict-match) or the final number in the
+        # text (flexible-extract). A \boxed{} / LaTeX instruction is AIME-style
+        # and makes the student emit "$\boxed{...}$", which the GSM8K
+        # flexible-extract regex mis-parses (it grabs "$" instead of the value).
+        # Ask for the GSM8K final-answer format instead so the distilled student
+        # produces directly extractable answers.
         self.answer_instruction = (
-            "Please reason step by step, and put your final answer within \\boxed{}."
+            "Please reason step by step, and give your final answer on a new line "
+            "in the exact format: #### <answer>, where <answer> is a single number."
         )
 
         if self.tokenizer.pad_token is None:
