@@ -29,12 +29,19 @@ class SelfDistillationDLLMDataCollator:
         max_answer_length=1024,
         problem_field: str = "problem",
         solution_field: str = "solution",
+        use_privileged_info: bool = False,
     ):
         self.tokenizer = tokenizer
         self.max_prompt_length = max_prompt_length
         self.max_answer_length = max_answer_length
         self.problem_field = problem_field
         self.solution_field = solution_field
+        # When False (default) the teacher prompt is IDENTICAL to the student
+        # prompt (problem only) — the no-privileged-information baseline. When
+        # True the teacher additionally sees the ground-truth solution as
+        # privileged context (see _build_teacher_prompt). This is the single
+        # knob the PI-vs-no-PI controlled experiment toggles.
+        self.use_privileged_info = use_privileged_info
 
         self.transition_prompt = (
             "\n\nAfter reading the reference solution above, make sure you truly understand "
@@ -84,6 +91,13 @@ class SelfDistillationDLLMDataCollator:
         )
 
     def _build_teacher_prompt(self, problem: str, solution: str) -> str:
+        # No-PI baseline: teacher prompt == student prompt (problem only), so
+        # on-policy JSD compares two predictive distributions on the SAME
+        # condition. This is the configuration that reached the 82% GSM8K
+        # baseline.
+        if not self.use_privileged_info:
+            return self._build_student_prompt(problem)
+
         # PRIVILEGED-INFORMATION TEACHER: the teacher's prompt embeds the
         # ground-truth `solution` as privileged context the student never sees.
         # Conditioned on the gold solution, the teacher's distribution over the

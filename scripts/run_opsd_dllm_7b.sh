@@ -120,16 +120,31 @@ esac
 OFF_POLICY="${OFF_POLICY:-0}"
 if [[ "$OFF_POLICY" == "1" ]]; then
     OFF_POLICY_FLAG="--off_policy"
-    RUN_CONFIG="${BACKEND_TAG}_${MASK_TAG}_${DATA_TAG}_offpolicy_gt_v1"
+    POLICY_TAG="offpolicy"
     # Off-policy completion = GT answer; 1024 + 768 = 1792 keeps the forward
     # under Dream-v0's 2048 limit and matches the on-policy answer budget.
     MAX_ANSWER_LENGTH=1024
 else
     OFF_POLICY_FLAG=""
-    RUN_CONFIG="${BACKEND_TAG}_${MASK_TAG}_${DATA_TAG}_forwardbeta0_w_PI"
+    POLICY_TAG="onpolicy"
     MAX_ANSWER_LENGTH=1024
 fi
-echo "[run_opsd_dllm_7b] STUDENT_BACKEND=$STUDENT_BACKEND  MODEL_NAME=$MODEL_NAME  DATASET=$DATASET  MASK_SCHEDULE=$MASK_SCHEDULE  OFF_POLICY=$OFF_POLICY  run_config=$RUN_CONFIG"
+
+# --- Privileged-information toggle: teacher sees the GT solution or not -------
+# USE_PI=0 (default) — no-PI baseline: teacher prompt == student prompt.
+# USE_PI=1           — PI: teacher prompt embeds the ground-truth solution.
+# Folded into the run_config tag so the PI / no-PI arms get distinct
+# output_dir / W&B runs for a clean controlled comparison.
+USE_PI="${USE_PI:-0}"
+if [[ "$USE_PI" == "1" ]]; then
+    PI_FLAG="--use_privileged_info"
+    PI_TAG="PI"
+else
+    PI_FLAG=""
+    PI_TAG="noPI"
+fi
+RUN_CONFIG="${BACKEND_TAG}_${MASK_TAG}_${DATA_TAG}_${POLICY_TAG}_${PI_TAG}_beta0_v1"
+echo "[run_opsd_dllm_7b] STUDENT_BACKEND=$STUDENT_BACKEND  MODEL_NAME=$MODEL_NAME  DATASET=$DATASET  MASK_SCHEDULE=$MASK_SCHEDULE  OFF_POLICY=$OFF_POLICY  USE_PI=$USE_PI  run_config=$RUN_CONFIG"
 
 accelerate launch \
     --config_file accelerate.yaml \
@@ -175,4 +190,5 @@ accelerate launch \
     --fixed_teacher \
     --jsd_token_clip 0.0 \
     $OFF_POLICY_FLAG \
+    $PI_FLAG \
     --wandb_project OPSD
