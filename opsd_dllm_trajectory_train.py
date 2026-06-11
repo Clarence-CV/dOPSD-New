@@ -124,6 +124,24 @@ class CustomScriptArguments(ScriptArguments):
             "gains extra context but positions still masked at k+n stay predictive."
         },
     )
+    verify_gold_pi: bool = field(
+        default=True,
+        metadata={
+            "help": "Verify the student's final rollout against the gold solution: "
+            "CORRECT rollouts keep the on-policy trajectory PI; WRONG rollouts get the "
+            "FULL gold solution as the teacher's privileged context (the teacher re-scores "
+            "the student's own noisy rollout at the masked positions). Set False to disable "
+            "(pure trajectory PI for every example)."
+        },
+    )
+    gold_pi_max_solution_tokens: int = field(
+        default=-1,
+        metadata={
+            "help": "Only used with --verify_gold_pi. Truncate the gold solution to at most "
+            "this many tokens when it is prepended as the teacher's privileged context. "
+            "-1 (default) = no extra cap (the collator already caps it at --max_answer_length)."
+        },
+    )
     decode_intro_prompt: str = field(
         default="",
         metadata={
@@ -275,6 +293,10 @@ if __name__ == "__main__":
                 "traj_teacher_gap": (
                     None if script_args.traj_teacher_gap < 0 else script_args.traj_teacher_gap
                 ),
+                "verify_gold_pi": script_args.verify_gold_pi,
+                "gold_pi_max_solution_tokens": (
+                    None if script_args.gold_pi_max_solution_tokens < 0 else script_args.gold_pi_max_solution_tokens
+                ),
                 "top_k_loss": script_args.top_k_loss if script_args.top_k_loss > 0 else None,
                 "jsd_token_clip": script_args.jsd_token_clip if script_args.jsd_token_clip > 0 else None,
                 "gen_max_new_tokens": script_args.gen_max_new_tokens,
@@ -394,6 +416,10 @@ if __name__ == "__main__":
         traj_step_select=script_args.traj_step_select,
         traj_teacher_view=script_args.traj_teacher_view,
         traj_teacher_gap=(None if script_args.traj_teacher_gap < 0 else script_args.traj_teacher_gap),
+        verify_gold_pi=script_args.verify_gold_pi,
+        gold_pi_max_solution_tokens=(
+            None if script_args.gold_pi_max_solution_tokens < 0 else script_args.gold_pi_max_solution_tokens
+        ),
     )
 
     trainer.train()

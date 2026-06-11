@@ -53,6 +53,7 @@ supported: Dream via `diffusion_generate(output_history=True)`, LLaDA via a
 history-recording variant of the progressive-unmasking sampler.
 """
 
+import re
 from contextlib import nullcontext
 
 import torch
@@ -62,6 +63,18 @@ from accelerate.utils import is_peft_model
 from trl.models.utils import unwrap_model_for_generation
 
 from opsd_dllm_trainer import OPSDDLLMTrainer
+
+# Math-equivalence verifier (handles fractions, radicals, algebraic forms — ~40%
+# of MixChain-Z-PRM12K / MATH answers are non-integer, so plain string/number
+# matching is wrong). Optional: if math_verify is not installed we fall back to a
+# normalized string compare and warn once at trainer init.
+try:
+    from math_verify import parse as _mv_parse, verify as _mv_verify
+
+    _HAS_MATH_VERIFY = True
+except Exception:  # pragma: no cover - depends on the training env
+    _mv_parse = _mv_verify = None
+    _HAS_MATH_VERIFY = False
 
 
 class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
@@ -78,6 +91,8 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         traj_step_select: str = "least",
         traj_teacher_gap: int | None = None,
         traj_teacher_view: str = "snapshot",
+        verify_gold_pi: bool = True,
+        gold_pi_max_solution_tokens: int | None = None,
         **kwargs,
     ):
         # The base trainer only recognizes mask_schedule in {"diffusion","fixed"};
@@ -110,6 +125,12 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         self.traj_step_select = traj_step_select
         self.traj_teacher_gap = traj_teacher_gap
         self.traj_teacher_view = traj_teacher_view
+        self.verify_gold_pi = bool(verify_gold_pi)
+        self.gold_pi_max_solution_tokens = (
+            int(gold_pi_max_solution_tokens)
+            if gold_pi_max_solution_tokens is not None
+            else None
+        )
 
         if self.traj_teacher_view == "all_future":
             teacher_view = (
@@ -127,8 +148,26 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         print(
             "\n[OPSD-DLLM] TRAJECTORY MODE — student noise is a real decoding step "
             f"(select={self.traj_step_select!r}, masked-fraction threshold "
-            f">{self.traj_mask_threshold:.2f}); teacher sees {teacher_view} as privileged information.\n"
+            f">{self.traj_mask_threshold:.2f}); teacher sees {teacher_view} as privileged information."
         )
+        if self.verify_gold_pi:
+            verifier = (
+                "math_verify (symbolic/numeric equivalence)"
+                if _HAS_MATH_VERIFY
+                else "STRING-MATCH ONLY — math_verify NOT installed; ~40% of MATH answers "
+                "are non-integer and will be mis-verified. `pip install math_verify` is "
+                "strongly recommended"
+            )
+            print(
+                "[OPSD-DLLM] VERIFY-GATED GOLD PI — the student's final rollout is "
+                "verified against the gold solution's \\boxed{} answer. CORRECT rollouts keep "
+                "the on-policy trajectory PI above; WRONG rollouts instead get the FULL gold "
+                "solution as the teacher's privileged context (the teacher re-scores the "
+                "student's own noisy rollout at the masked positions, conditioned on the gold "
+                f"solution). Verifier: {verifier}.\n"
+            )
+        else:
+            print("[OPSD-DLLM] verify_gold_pi=False — gold-solution fallback disabled.\n")
 
     # ------------------------------------------------------------------
     # Rollout with decoding history.
@@ -511,6 +550,211 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         avg = sum_probs / count.clamp(min=1.0).unsqueeze(-1)  # [N, V]
         return avg.clamp_min(1e-12).log().detach()
 
+    # ------------------------------------------------------------------
+    # Verify-gated gold-solution privileged information.
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _extract_boxed_answer(text):
+        """Return the content of the LAST ``\\boxed{...}`` in `text` (nested-brace
+        aware, e.g. ``\\boxed{\\frac{1}{2}}``), or None if there is none.
+
+        This is the canonical MATH / MixChain-Z-PRM12K answer format: the gold
+        ``solution`` always ends in ``\\boxed{<target>}`` and a MATH-tuned student
+        emits the same. We scan from the LAST box so a worked solution that shows
+        intermediate boxes still resolves to the final answer.
+        """
+        if not text:
+            return None
+        idx = text.rfind(r"\boxed{")
+        if idx == -1:
+            return None
+        start = idx + len(r"\boxed{")
+        depth, i = 1, start
+        while i < len(text) and depth > 0:
+            c = text[i]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+            i += 1
+        return text[start : i - 1].strip() if depth == 0 else None
+
+    @staticmethod
+    def _preprocess_for_parse(answer):
+        """Normalize an answer string so math_verify parses it.
+
+        * ``\\dfrac`` / ``\\tfrac`` → ``\\frac`` (display-style fractions math_verify
+          does not always parse; ~3% of MixChain golds use them).
+        * ratio notation ``a:b`` → ``\\frac{a}{b}`` (mirrors grpo_train.py).
+        """
+        if answer is None:
+            return None
+        answer = answer.replace(r"\dfrac", r"\frac").replace(r"\tfrac", r"\frac")
+        m = re.fullmatch(r"\s*(-?\d+(?:\.\d+)?)\s*:\s*(-?\d+(?:\.\d+)?)\s*", answer)
+        if m:
+            return rf"\frac{{{m.group(1)}}}{{{m.group(2)}}}"
+        return answer
+
+    def _answers_match(self, gold, pred):
+        """True iff `pred` is mathematically equivalent to `gold`.
+
+        Uses math_verify (``parse`` + ``verify``) for symbolic/numeric
+        equivalence — essential here because a large fraction of MATH answers are
+        fractions / radicals / expressions where string equality fails (``1/2``
+        vs ``\\frac{1}{2}`` vs ``0.5``). Both sides are normalized first. Falls
+        back to a whitespace-stripped, case-insensitive string match (covers MCQ
+        letters, the ~20% of answers math_verify cannot parse, and the
+        no-math_verify environment).
+        """
+        if gold is None or pred is None:
+            return False
+        gold_n = self._preprocess_for_parse(gold)
+        pred_n = self._preprocess_for_parse(pred)
+        if _HAS_MATH_VERIFY:
+            try:
+                g = _mv_parse(gold_n)
+                p = _mv_parse(pred_n)
+                if g and p:
+                    return bool(_mv_verify(g, p))
+            except Exception:
+                pass
+        gn = re.sub(r"\s+", "", gold_n).lower()
+        pn = re.sub(r"\s+", "", pred_n).lower()
+        return bool(gn) and gn == pn
+
+    def _extract_pred_answer(self, completion_text):
+        """Extract the student's final answer from a free-form completion.
+
+        Prefer an explicit ``\\boxed{...}``; otherwise hand the raw completion to
+        math_verify's ``parse`` (which pulls the last math expression / number out
+        of free text) by returning the text itself. As a last resort (no
+        math_verify), keep the substring after a trailing answer marker so the
+        string fallback in `_answers_match` has something tight to compare.
+        """
+        boxed = self._extract_boxed_answer(completion_text)
+        if boxed is not None:
+            return boxed
+        if _HAS_MATH_VERIFY:
+            return completion_text  # parse() extracts the trailing expression
+        # No math_verify: salvage the tail after the last answer cue.
+        m = re.findall(r"(?:####|answer(?:\s+is)?\s*[:=]?)\s*(.+)", completion_text, re.IGNORECASE)
+        return (m[-1].strip() if m else completion_text).splitlines()[0] if completion_text else None
+
+    def _verify_rollouts(self, completion_ids, answer_ids, answer_mask):
+        """Per-example correctness of the student rollout vs. the gold solution.
+
+        Gold answer = the ``\\boxed{...}`` of the reference solution (verified to
+        equal the dataset's `target` field for MixChain-Z-PRM12K). Student answer
+        = `_extract_pred_answer`. Match via `_answers_match` (math-equivalence).
+        Examples whose GOLD answer cannot be extracted are treated as correct, so
+        they keep the on-policy trajectory PI rather than being handed an
+        unverifiable gold target.
+
+        Returns:
+            correct: [B] bool on `completion_ids.device`.
+        """
+        tok = self.processing_class
+        B = completion_ids.shape[0]
+        comp_texts = tok.batch_decode(completion_ids, skip_special_tokens=True)
+        correct = torch.ones(B, dtype=torch.bool, device=completion_ids.device)
+        for b in range(B):
+            gold_text = tok.decode(
+                answer_ids[b][answer_mask[b].bool()], skip_special_tokens=True
+            )
+            gold = self._extract_boxed_answer(gold_text)
+            if gold is None:
+                continue  # unparseable gold -> keep the on-policy trajectory PI
+            pred = self._extract_pred_answer(comp_texts[b])
+            correct[b] = self._answers_match(gold, pred)
+        return correct
+
+    def _concat_prompt_solution(self, prompt_ids, prompt_mask, sol_ids, sol_mask, max_sol=None):
+        """Left-padded ``[teacher_prompt | gold_solution]`` per row (real tokens only).
+
+        Drops each row's prompt (left-pad) and solution (right-pad) padding,
+        concatenates so the gold solution sits directly AFTER the prompt — and
+        therefore directly BEFORE the completion the caller appends — then
+        left-pads the batch. Pads land only on the outer left edge, never
+        between the prompt, the solution, or the completion (Dream's
+        bidirectional attention treats interior pads as real positions, so this
+        matters).
+        """
+        pad_id = self.processing_class.pad_token_id
+        device = prompt_ids.device
+        B = prompt_ids.shape[0]
+        rows = []
+        for b in range(B):
+            p = prompt_ids[b][prompt_mask[b].bool()]
+            s = sol_ids[b][sol_mask[b].bool()]
+            if max_sol is not None and s.numel() > max_sol:
+                s = s[:max_sol]
+            rows.append(torch.cat([p, s]))
+        max_len = max(int(r.numel()) for r in rows)
+        ids = torch.full((B, max_len), pad_id, dtype=prompt_ids.dtype, device=device)
+        mask = torch.zeros((B, max_len), dtype=prompt_mask.dtype, device=device)
+        for b, r in enumerate(rows):
+            n = int(r.numel())
+            ids[b, max_len - n :] = r
+            mask[b, max_len - n :] = 1
+        return ids, mask
+
+    def _teacher_masked_gold_solution(
+        self,
+        model,
+        teacher_prompt_ids,
+        teacher_prompt_mask,
+        answer_ids,
+        answer_mask,
+        noisy_completion,
+        completion_mask,
+        mask_pattern,
+        L_c,
+        transition_ids=None,
+        transition_mask=None,
+    ):
+        """Teacher target for WRONG rollouts: the FULL gold solution as PI.
+
+        The gold solution is prepended to the teacher prompt as privileged
+        context; the teacher then *re-scores the student's own NOISY rollout*,
+        predicting the step-`k` masked positions conditioned on
+        ``[problem | gold solution | partial rollout]``. Crucially the scored
+        positions stay <mask> for the teacher too (only the surrounding context
+        gains the gold solution) — the teacher is never handed the answer token
+        at a scored position, so the privilege is the gold solution itself and
+        the teacher must transfer it onto the student's trajectory. This keeps
+        the scored sequence identical to the student's (same `mask_pattern`,
+        same positions), so the JSD is well-aligned.
+
+        Returns:
+            [N, V] teacher LOGITS gathered at `mask_pattern` (row-major (b, l)),
+            aligned to `student_completion_logits[mask_pattern]`.
+        """
+        gold_prompt_ids, gold_prompt_mask = self._concat_prompt_solution(
+            teacher_prompt_ids, teacher_prompt_mask, answer_ids, answer_mask,
+            max_sol=self.gold_pi_max_solution_tokens,
+        )
+        g_prompt_len = gold_prompt_ids.shape[1]
+        full_ids, full_mask = self._build_teacher_full(
+            gold_prompt_ids, gold_prompt_mask, noisy_completion, completion_mask,
+            transition_ids, transition_mask,
+        )
+        teacher_ctx = (
+            self.accelerator.unwrap_model(model).disable_adapter()
+            if (self.fixed_teacher and is_peft_model(model))
+            else nullcontext()
+        )
+        was_training = model.training
+        if was_training:
+            model.eval()
+        try:
+            with torch.no_grad(), teacher_ctx:
+                logits = self._forward(model, full_ids, full_mask)
+                comp = logits[:, g_prompt_len : g_prompt_len + L_c, :].float().detach()
+        finally:
+            if was_training:
+                model.train()
+        return comp[mask_pattern]  # [N, V]
+
     @staticmethod
     def _ensure_min_one_mask(mask, valid):
         """Guarantee ≥1 masked position per row that has any valid token."""
@@ -597,51 +841,87 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         del student_logits
         student_masked = student_completion_logits[mask_pattern]  # [N, V]
 
-        # 5. Teacher target at the scored (step-`k` masked) positions.
+        # 4b. Verify the student's final rollout against the gold solution. This
+        #     gates the teacher's privileged information per example (step 5):
+        #       * correct rollout -> on-policy trajectory PI (future decoding
+        #         steps / endpoint), exactly as before.
+        #       * wrong rollout   -> the FULL gold solution becomes the teacher's
+        #         privileged context and it re-scores the student's own noisy
+        #         rollout, so we stop distilling a confidently-wrong answer and
+        #         instead pull the student toward the gold-informed distribution.
+        B0 = completion_ids.shape[0]
+        answer_ids = inputs.get("answer_input_ids")
+        answer_mask = inputs.get("answer_attention_mask")
+        if self.verify_gold_pi and answer_ids is not None:
+            correct = self._verify_rollouts(completion_ids, answer_ids, answer_mask)
+        else:
+            correct = torch.ones(B0, dtype=torch.bool, device=completion_ids.device)
+        # Per-scored-position example index, in the row-major order of every
+        # `[mask_pattern]` gather below — so a [N] boolean indexes [N, V] targets.
+        row_b = mask_pattern.nonzero(as_tuple=False)[:, 0]  # [N]
+        row_correct = correct[row_b]                         # [N]
+
+        # 5. Teacher target at the scored (step-`k` masked) positions. Rows are
+        #    filled from the correct branch (on-policy trajectory PI) and the
+        #    wrong branch (gold-solution PI) independently; each branch is skipped
+        #    entirely when no row needs it.
         #      * "all_future"      — average the teacher's predictive distribution
         #        over steps k+1→final where each position is still masked (many
         #        teacher forwards; returns log-probs directly).
         #      * "snapshot" + gap None — the CONCRETE final rollout (endpoint).
         #      * "snapshot" + gap n    — the state `n` steps ahead (history[k+n]).
-        B0 = completion_ids.shape[0]
+        teacher_masked = torch.zeros_like(student_masked, dtype=torch.float32)  # [N, V]
         teacher_completion = None
         teacher_step = torch.full((B0,), -1, dtype=torch.long, device=completion_ids.device)
-        if self.traj_teacher_view == "all_future":
-            teacher_masked = self._teacher_masked_all_future(
-                model, teacher_prompt_ids, teacher_prompt_mask, completion_mask,
-                completion_ids, history, chosen, mask_pattern,
-                t_prompt_len, L_c, transition_ids, transition_mask,
-            )  # [N, V] log-probs
-        else:
-            if self.traj_teacher_gap is None:
-                teacher_completion = completion_ids
-            else:
-                teacher_completion, teacher_step = self._teacher_completion_n_ahead(
-                    completion_ids, history, chosen, self.traj_teacher_gap
-                )
-            teacher_full_ids, teacher_full_mask = self._build_teacher_full(
-                teacher_prompt_ids, teacher_prompt_mask, teacher_completion,
-                completion_mask, transition_ids, transition_mask,
-            )
-            if self.fixed_teacher and is_peft_model(model):
-                teacher_ctx = self.accelerator.unwrap_model(model).disable_adapter()
-            else:
-                teacher_ctx = nullcontext()
 
-            was_training = model.training
-            if was_training:
-                model.eval()
-            try:
-                with torch.no_grad(), teacher_ctx:
-                    teacher_logits = self._forward(model, teacher_full_ids, teacher_full_mask)
-                    teacher_completion_logits = (
-                        teacher_logits[:, t_prompt_len : t_prompt_len + L_c, :].float().detach()
+        # --- CORRECT rollouts: on-policy trajectory PI (unchanged). ---
+        if bool(row_correct.any()):
+            if self.traj_teacher_view == "all_future":
+                std_masked = self._teacher_masked_all_future(
+                    model, teacher_prompt_ids, teacher_prompt_mask, completion_mask,
+                    completion_ids, history, chosen, mask_pattern,
+                    t_prompt_len, L_c, transition_ids, transition_mask,
+                )  # [N, V] log-probs
+            else:
+                if self.traj_teacher_gap is None:
+                    teacher_completion = completion_ids
+                else:
+                    teacher_completion, teacher_step = self._teacher_completion_n_ahead(
+                        completion_ids, history, chosen, self.traj_teacher_gap
                     )
-            finally:
+                teacher_full_ids, teacher_full_mask = self._build_teacher_full(
+                    teacher_prompt_ids, teacher_prompt_mask, teacher_completion,
+                    completion_mask, transition_ids, transition_mask,
+                )
+                if self.fixed_teacher and is_peft_model(model):
+                    teacher_ctx = self.accelerator.unwrap_model(model).disable_adapter()
+                else:
+                    teacher_ctx = nullcontext()
+
+                was_training = model.training
                 if was_training:
-                    model.train()
-            del teacher_logits
-            teacher_masked = teacher_completion_logits[mask_pattern]  # [N, V]
+                    model.eval()
+                try:
+                    with torch.no_grad(), teacher_ctx:
+                        teacher_logits = self._forward(model, teacher_full_ids, teacher_full_mask)
+                        teacher_completion_logits = (
+                            teacher_logits[:, t_prompt_len : t_prompt_len + L_c, :].float().detach()
+                        )
+                finally:
+                    if was_training:
+                        model.train()
+                del teacher_logits
+                std_masked = teacher_completion_logits[mask_pattern]  # [N, V]
+            teacher_masked[row_correct] = std_masked[row_correct]
+
+        # --- WRONG rollouts: full gold solution as the teacher's PI. ---
+        if bool((~row_correct).any()):
+            gold_masked = self._teacher_masked_gold_solution(
+                model, teacher_prompt_ids, teacher_prompt_mask,
+                answer_ids, answer_mask, noisy_completion, completion_mask,
+                mask_pattern, L_c, transition_ids, transition_mask,
+            )  # [N, V] logits
+            teacher_masked[~row_correct] = gold_masked[~row_correct]
 
         # 6. Token-level JSD over the scored positions.
 
@@ -669,6 +949,11 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
                 float(mask_pattern.sum().item()) / max(1.0, float(jsd_valid_mask.sum().item()))
             )
             self._metrics[mode]["traj_num_steps"].append(float(len(history)))
+            # Verify-gated gold-PI diagnostics: the rollout accuracy (the
+            # curriculum signal — should rise over training) and how many scored
+            # positions were routed to the gold-solution teacher this step.
+            self._metrics[mode]["frac_rollout_correct"].append(float(correct.float().mean().item()))
+            self._metrics[mode]["num_gold_pi_scored"].append(float((~row_correct).sum().item()))
             # Snapshot diagnostics only (all_future logs `teacher_future_steps_avg`
             # from inside `_teacher_masked_all_future`). Of the scored positions,
             # the fraction the teacher STILL sees as <mask> (genuinely predictive)
