@@ -143,7 +143,12 @@ else
     PI_FLAG=""
     PI_TAG="noPI"
 fi
-RUN_CONFIG="${BACKEND_TAG}_${MASK_TAG}_${DATA_TAG}_${POLICY_TAG}_${PI_TAG}_beta0_v1"
+# v2: minimal PI teacher prompt (problem + reference solution only). v1 wrapped
+# the solution in an "explore/backtrack" transition + "#### " format instruction
+# that inflated the distilled student's length and cost ~3pt on GSM8K; that text
+# was removed in data_collator_dllm.py so PI now differs from the student prompt
+# by the reference solution alone.
+RUN_CONFIG="${BACKEND_TAG}_${MASK_TAG}_${DATA_TAG}_${POLICY_TAG}_${PI_TAG}_beta0_v2"
 echo "[run_opsd_dllm_7b] STUDENT_BACKEND=$STUDENT_BACKEND  MODEL_NAME=$MODEL_NAME  DATASET=$DATASET  MASK_SCHEDULE=$MASK_SCHEDULE  OFF_POLICY=$OFF_POLICY  USE_PI=$USE_PI  run_config=$RUN_CONFIG"
 
 accelerate launch \

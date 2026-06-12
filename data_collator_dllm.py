@@ -8,8 +8,10 @@ class SelfDistillationDLLMDataCollator:
       - student prompt: chat template containing only the problem with the
         "reason step by step, \\boxed{}" instruction.
       - teacher prompt: chat template containing the problem AND the reference
-        solution, followed by a transition prompt that asks the teacher to
-        rederive the answer in its own words.
+        solution appended as privileged context. It is IDENTICAL to the student
+        prompt except for the injected reference solution — no extra "explore /
+        backtrack" persona or answer-format instruction (those inflate the
+        distilled student's output length; see _compose_teacher_user_turn).
       - answer ids:     tokenized reference solution; the trainer randomly
         masks tokens inside this span so both student and teacher predict the
         same masked positions.
@@ -43,24 +45,23 @@ class SelfDistillationDLLMDataCollator:
         # knob the PI-vs-no-PI controlled experiment toggles.
         self.use_privileged_info = use_privileged_info
 
-        self.transition_prompt = (
-            "\n\nAfter reading the reference solution above, make sure you truly understand "
-            "the reasoning behind each step — do not copy or paraphrase it. Now, using your "
-            "own words and independent reasoning, derive the same final answer to the problem above. "
-            "Think step by step, explore different approaches, and don't be afraid to backtrack "
-            "or reconsider if something doesn't work out:\n"
-        )
-        # GSM8K answers are plain integers. lm-eval's gsm8k extractors look for
-        # the exact "#### <n>" line (strict-match) or the final number in the
-        # text (flexible-extract). A \boxed{} / LaTeX instruction is AIME-style
-        # and makes the student emit "$\boxed{...}$", which the GSM8K
-        # flexible-extract regex mis-parses (it grabs "$" instead of the value).
-        # Ask for the GSM8K final-answer format instead so the distilled student
-        # produces directly extractable answers.
-        self.answer_instruction = (
-            "Please reason step by step, and give your final answer on a new line "
-            "in the exact format: #### <answer>, where <answer> is a single number."
-        )
+        # Header that introduces the gold solution as reference material in the
+        # teacher's user turn. Deliberately minimal: it labels the privileged
+        # context and nothing more.
+        #
+        # NOTE (why this is bare): an earlier GT-PI run wrapped the solution in a
+        # long "explore different approaches / don't be afraid to backtrack"
+        # transition prompt plus a "#### <answer>" format instruction. Both were
+        # present in the teacher prompt only (never the student's), so on-policy
+        # forward-KL distillation copied that verbose, exploratory STYLE into the
+        # student. The result: median completion length ~2x the no-PI baseline
+        # (130 vs 62 words) and 32% of answers >150 words, where GSM8K accuracy
+        # collapses (~0.64 vs ~0.85 short) — net -3pt vs baseline despite the
+        # student's SHORT-answer accuracy actually matching/beating baseline.
+        # Keeping the teacher prompt identical to the student's except for the
+        # injected reference solution isolates the privileged information from
+        # any style/format confound.
+        self.reference_solution_header = "\n\nReference solution:\n"
 
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -82,16 +83,14 @@ class SelfDistillationDLLMDataCollator:
         )
 
     def _compose_teacher_user_turn(self, problem: str, solution: str) -> str:
-        # User turn = problem + the ground-truth reference solution + a
-        # transition prompt that tells the model to re-derive the answer in its
-        # own words. add_generation_prompt=True appends the assistant header so
-        # the teacher generates from there.
-        user_content = (
-            f"{problem}\n\n"
-            f"Reference solution:\n{solution}"
-            f"{self.transition_prompt}"
-            f"{self.answer_instruction}"
-        )
+        # User turn = the student's exact problem text + the ground-truth
+        # reference solution appended as privileged context. No transition /
+        # persona / answer-format instruction (see __init__): the teacher prompt
+        # must differ from the student prompt by the reference solution ALONE so
+        # the only thing distilled is the privileged information, not a style.
+        # add_generation_prompt=True appends the assistant header so the teacher
+        # scores from there, matching the student prompt's structure.
+        user_content = f"{problem}{self.reference_solution_header}{solution}"
         return self.tokenizer.apply_chat_template(
             [{"role": "user", "content": user_content}],
             tokenize=False,
