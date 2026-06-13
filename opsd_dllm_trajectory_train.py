@@ -42,16 +42,19 @@ DATASET_REGISTRY = {
         "id": "Zigeng/dParallel_Dream_Distill_Data",
         "problem_field": "question",
         "solution_field": "llm_response",
+        "target_field": None,  # no clean ground-truth answer column
     },
     "mixchain": {
         "id": "horseee/MixChain-Z-PRM12K",
         "problem_field": "question",
         "solution_field": "answer",
+        "target_field": "target",  # clean final answer, e.g. "18"
     },
 }
 DEFAULT_DATASET = "mixchain"
 BASELINE_PROBLEM_FIELD = "problem"
 BASELINE_SOLUTION_FIELD = "solution"
+BASELINE_TARGET_FIELD = "target"
 
 
 @dataclass
@@ -124,22 +127,13 @@ class CustomScriptArguments(ScriptArguments):
             "gains extra context but positions still masked at k+n stay predictive."
         },
     )
-    verify_gold_pi: bool = field(
+    filter_wrong_rollouts: bool = field(
         default=True,
         metadata={
             "help": "Verify the student's final rollout against the gold solution: "
-            "CORRECT rollouts keep the on-policy trajectory PI; WRONG rollouts get the "
-            "FULL gold solution as the teacher's privileged context (the teacher re-scores "
-            "the student's own noisy rollout at the masked positions). Set False to disable "
-            "(pure trajectory PI for every example)."
-        },
-    )
-    gold_pi_max_solution_tokens: int = field(
-        default=-1,
-        metadata={
-            "help": "Only used with --verify_gold_pi. Truncate the gold solution to at most "
-            "this many tokens when it is prepended as the teacher's privileged context. "
-            "-1 (default) = no extra cap (the collator already caps it at --max_answer_length)."
+            "CORRECT rollouts contribute the on-policy trajectory PI; WRONG rollouts get "
+            "NO teacher signal (their scored positions are dropped from the JSD). Set False "
+            "to disable verification (every rollout contributes, pure trajectory PI)."
         },
     )
     decode_intro_prompt: str = field(
@@ -293,10 +287,7 @@ if __name__ == "__main__":
                 "traj_teacher_gap": (
                     None if script_args.traj_teacher_gap < 0 else script_args.traj_teacher_gap
                 ),
-                "verify_gold_pi": script_args.verify_gold_pi,
-                "gold_pi_max_solution_tokens": (
-                    None if script_args.gold_pi_max_solution_tokens < 0 else script_args.gold_pi_max_solution_tokens
-                ),
+                "filter_wrong_rollouts": script_args.filter_wrong_rollouts,
                 "top_k_loss": script_args.top_k_loss if script_args.top_k_loss > 0 else None,
                 "jsd_token_clip": script_args.jsd_token_clip if script_args.jsd_token_clip > 0 else None,
                 "gen_max_new_tokens": script_args.gen_max_new_tokens,
@@ -361,6 +352,7 @@ if __name__ == "__main__":
         )
     ds_cfg = DATASET_REGISTRY[script_args.dataset]
     src_problem, src_solution = ds_cfg["problem_field"], ds_cfg["solution_field"]
+    src_target = ds_cfg.get("target_field")
     print(f"\n[opsd_dllm_trajectory_train] Loading dataset {script_args.dataset!r}: {ds_cfg['id']}")
     dataset = load_dataset(ds_cfg["id"])
     train_dataset = dataset["train"]
@@ -371,13 +363,23 @@ if __name__ == "__main__":
             f"Dataset {ds_cfg['id']} is missing expected column(s) {missing}; "
             f"has {train_dataset.column_names}."
         )
-    train_dataset = train_dataset.rename_columns(
-        {src_problem: BASELINE_PROBLEM_FIELD, src_solution: BASELINE_SOLUTION_FIELD}
-    )
-    train_dataset = train_dataset.select_columns(
-        [BASELINE_PROBLEM_FIELD, BASELINE_SOLUTION_FIELD]
-    )
+    rename_map = {src_problem: BASELINE_PROBLEM_FIELD, src_solution: BASELINE_SOLUTION_FIELD}
+    keep_cols = [BASELINE_PROBLEM_FIELD, BASELINE_SOLUTION_FIELD]
+    # Keep the clean ground-truth answer column (used by the trainer to verify
+    # rollouts directly, no extraction from the long solution).
+    has_target = bool(src_target) and src_target in train_dataset.column_names
+    if has_target:
+        if src_target != BASELINE_TARGET_FIELD:
+            rename_map[src_target] = BASELINE_TARGET_FIELD
+        keep_cols.append(BASELINE_TARGET_FIELD)
+    train_dataset = train_dataset.rename_columns(rename_map)
+    train_dataset = train_dataset.select_columns(keep_cols)
     print(f"[opsd_dllm_trajectory_train] Columns -> {train_dataset.column_names}")
+    if not has_target:
+        print(
+            f"[opsd_dllm_trajectory_train] NOTE: dataset {script_args.dataset!r} has no "
+            "target column; rollout verification falls back to the solution's \\boxed{} answer."
+        )
 
     data_collator = SelfDistillationDLLMTrajectoryDataCollator(
         tokenizer=tokenizer,
@@ -385,6 +387,7 @@ if __name__ == "__main__":
         max_answer_length=script_args.max_answer_length,
         problem_field=BASELINE_PROBLEM_FIELD,
         solution_field=BASELINE_SOLUTION_FIELD,
+        target_field=BASELINE_TARGET_FIELD if has_target else None,
         decode_intro_prompt=script_args.decode_intro_prompt,
         transition_prompt=script_args.transition_prompt,
     )
@@ -416,10 +419,7 @@ if __name__ == "__main__":
         traj_step_select=script_args.traj_step_select,
         traj_teacher_view=script_args.traj_teacher_view,
         traj_teacher_gap=(None if script_args.traj_teacher_gap < 0 else script_args.traj_teacher_gap),
-        verify_gold_pi=script_args.verify_gold_pi,
-        gold_pi_max_solution_tokens=(
-            None if script_args.gold_pi_max_solution_tokens < 0 else script_args.gold_pi_max_solution_tokens
-        ),
+        filter_wrong_rollouts=script_args.filter_wrong_rollouts,
     )
 
     trainer.train()

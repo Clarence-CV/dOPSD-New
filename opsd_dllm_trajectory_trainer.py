@@ -91,8 +91,7 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         traj_step_select: str = "least",
         traj_teacher_gap: int | None = None,
         traj_teacher_view: str = "snapshot",
-        verify_gold_pi: bool = True,
-        gold_pi_max_solution_tokens: int | None = None,
+        filter_wrong_rollouts: bool = True,
         **kwargs,
     ):
         # The base trainer only recognizes mask_schedule in {"diffusion","fixed"};
@@ -125,12 +124,7 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         self.traj_step_select = traj_step_select
         self.traj_teacher_gap = traj_teacher_gap
         self.traj_teacher_view = traj_teacher_view
-        self.verify_gold_pi = bool(verify_gold_pi)
-        self.gold_pi_max_solution_tokens = (
-            int(gold_pi_max_solution_tokens)
-            if gold_pi_max_solution_tokens is not None
-            else None
-        )
+        self.filter_wrong_rollouts = bool(filter_wrong_rollouts)
 
         if self.traj_teacher_view == "all_future":
             teacher_view = (
@@ -150,7 +144,7 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
             f"(select={self.traj_step_select!r}, masked-fraction threshold "
             f">{self.traj_mask_threshold:.2f}); teacher sees {teacher_view} as privileged information."
         )
-        if self.verify_gold_pi:
+        if self.filter_wrong_rollouts:
             verifier = (
                 "math_verify (symbolic/numeric equivalence)"
                 if _HAS_MATH_VERIFY
@@ -159,15 +153,21 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
                 "strongly recommended"
             )
             print(
-                "[OPSD-DLLM] VERIFY-GATED GOLD PI — the student's final rollout is "
-                "verified against the gold solution's \\boxed{} answer. CORRECT rollouts keep "
-                "the on-policy trajectory PI above; WRONG rollouts instead get the FULL gold "
-                "solution as the teacher's privileged context (the teacher re-scores the "
-                "student's own noisy rollout at the masked positions, conditioned on the gold "
-                f"solution). Verifier: {verifier}.\n"
+                "[OPSD-DLLM] VERIFY-GATED FILTER — the student's final rollout is verified "
+                "against the gold solution's \\boxed{} answer. CORRECT rollouts contribute the "
+                "on-policy trajectory PI above; WRONG rollouts get NO teacher signal (their "
+                f"scored positions are dropped from the JSD). Verifier: {verifier}.\n"
             )
         else:
-            print("[OPSD-DLLM] verify_gold_pi=False — gold-solution fallback disabled.\n")
+            print("[OPSD-DLLM] filter_wrong_rollouts=False — every rollout contributes (no verification).\n")
+
+    def _set_signature_columns_if_needed(self):
+        # Keep the ground-truth `target` column the collator reads for rollout
+        # verification (the base method only keeps problem_field/solution_field).
+        super()._set_signature_columns_if_needed()
+        tf = getattr(self.data_collator, "target_field", None)
+        if tf and self._signature_columns is not None and tf not in self._signature_columns:
+            self._signature_columns.append(tf)
 
     # ------------------------------------------------------------------
     # Rollout with decoding history.
@@ -640,15 +640,18 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         m = re.findall(r"(?:####|answer(?:\s+is)?\s*[:=]?)\s*(.+)", completion_text, re.IGNORECASE)
         return (m[-1].strip() if m else completion_text).splitlines()[0] if completion_text else None
 
-    def _verify_rollouts(self, completion_ids, answer_ids, answer_mask):
-        """Per-example correctness of the student rollout vs. the gold solution.
+    def _verify_rollouts(
+        self, completion_ids, target_ids, target_mask, answer_ids=None, answer_mask=None
+    ):
+        """Per-example correctness of the student rollout vs. the GROUND-TRUTH answer.
 
-        Gold answer = the ``\\boxed{...}`` of the reference solution (verified to
-        equal the dataset's `target` field for MixChain-Z-PRM12K). Student answer
-        = `_extract_pred_answer`. Match via `_answers_match` (math-equivalence).
-        Examples whose GOLD answer cannot be extracted are treated as correct, so
-        they keep the on-policy trajectory PI rather than being handed an
-        unverifiable gold target.
+        Gold answer is taken DIRECTLY from the dataset's ``target`` column (the
+        clean final answer, e.g. ``"18"`` or ``"\\frac{1}{2}"``) — no extraction
+        from the long solution. The student answer is `_extract_pred_answer` and
+        the two are compared with `_answers_match` (math-equivalence). If a row
+        has no ``target`` (other datasets), fall back to the ``\\boxed{}`` of the
+        reference solution. Rows with no usable gold are treated as correct, so
+        they stay on-policy rather than being dropped on an unverifiable answer.
 
         Returns:
             correct: [B] bool on `completion_ids.device`.
@@ -658,102 +661,21 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         comp_texts = tok.batch_decode(completion_ids, skip_special_tokens=True)
         correct = torch.ones(B, dtype=torch.bool, device=completion_ids.device)
         for b in range(B):
-            gold_text = tok.decode(
-                answer_ids[b][answer_mask[b].bool()], skip_special_tokens=True
-            )
-            gold = self._extract_boxed_answer(gold_text)
+            gold = None
+            if target_ids is not None:
+                gold = tok.decode(
+                    target_ids[b][target_mask[b].bool()], skip_special_tokens=True
+                ).strip() or None
+            if gold is None and answer_ids is not None:  # fallback: box from solution
+                sol = tok.decode(
+                    answer_ids[b][answer_mask[b].bool()], skip_special_tokens=True
+                )
+                gold = self._extract_boxed_answer(sol)
             if gold is None:
-                continue  # unparseable gold -> keep the on-policy trajectory PI
+                continue  # no usable gold -> keep on-policy (don't drop)
             pred = self._extract_pred_answer(comp_texts[b])
             correct[b] = self._answers_match(gold, pred)
         return correct
-
-    def _concat_prompt_solution(self, prompt_ids, prompt_mask, sol_ids, sol_mask, max_sol=None):
-        """Left-padded ``[teacher_prompt | gold_solution]`` per row (real tokens only).
-
-        Drops each row's prompt (left-pad) and solution (right-pad) padding,
-        concatenates so the gold solution sits directly AFTER the prompt — and
-        therefore directly BEFORE the completion the caller appends — then
-        left-pads the batch. Pads land only on the outer left edge, never
-        between the prompt, the solution, or the completion (Dream's
-        bidirectional attention treats interior pads as real positions, so this
-        matters).
-        """
-        pad_id = self.processing_class.pad_token_id
-        device = prompt_ids.device
-        B = prompt_ids.shape[0]
-        rows = []
-        for b in range(B):
-            p = prompt_ids[b][prompt_mask[b].bool()]
-            s = sol_ids[b][sol_mask[b].bool()]
-            if max_sol is not None and s.numel() > max_sol:
-                s = s[:max_sol]
-            rows.append(torch.cat([p, s]))
-        max_len = max(int(r.numel()) for r in rows)
-        ids = torch.full((B, max_len), pad_id, dtype=prompt_ids.dtype, device=device)
-        mask = torch.zeros((B, max_len), dtype=prompt_mask.dtype, device=device)
-        for b, r in enumerate(rows):
-            n = int(r.numel())
-            ids[b, max_len - n :] = r
-            mask[b, max_len - n :] = 1
-        return ids, mask
-
-    def _teacher_masked_gold_solution(
-        self,
-        model,
-        teacher_prompt_ids,
-        teacher_prompt_mask,
-        answer_ids,
-        answer_mask,
-        noisy_completion,
-        completion_mask,
-        mask_pattern,
-        L_c,
-        transition_ids=None,
-        transition_mask=None,
-    ):
-        """Teacher target for WRONG rollouts: the FULL gold solution as PI.
-
-        The gold solution is prepended to the teacher prompt as privileged
-        context; the teacher then *re-scores the student's own NOISY rollout*,
-        predicting the step-`k` masked positions conditioned on
-        ``[problem | gold solution | partial rollout]``. Crucially the scored
-        positions stay <mask> for the teacher too (only the surrounding context
-        gains the gold solution) — the teacher is never handed the answer token
-        at a scored position, so the privilege is the gold solution itself and
-        the teacher must transfer it onto the student's trajectory. This keeps
-        the scored sequence identical to the student's (same `mask_pattern`,
-        same positions), so the JSD is well-aligned.
-
-        Returns:
-            [N, V] teacher LOGITS gathered at `mask_pattern` (row-major (b, l)),
-            aligned to `student_completion_logits[mask_pattern]`.
-        """
-        gold_prompt_ids, gold_prompt_mask = self._concat_prompt_solution(
-            teacher_prompt_ids, teacher_prompt_mask, answer_ids, answer_mask,
-            max_sol=self.gold_pi_max_solution_tokens,
-        )
-        g_prompt_len = gold_prompt_ids.shape[1]
-        full_ids, full_mask = self._build_teacher_full(
-            gold_prompt_ids, gold_prompt_mask, noisy_completion, completion_mask,
-            transition_ids, transition_mask,
-        )
-        teacher_ctx = (
-            self.accelerator.unwrap_model(model).disable_adapter()
-            if (self.fixed_teacher and is_peft_model(model))
-            else nullcontext()
-        )
-        was_training = model.training
-        if was_training:
-            model.eval()
-        try:
-            with torch.no_grad(), teacher_ctx:
-                logits = self._forward(model, full_ids, full_mask)
-                comp = logits[:, g_prompt_len : g_prompt_len + L_c, :].float().detach()
-        finally:
-            if was_training:
-                model.train()
-        return comp[mask_pattern]  # [N, V]
 
     @staticmethod
     def _ensure_min_one_mask(mask, valid):
@@ -839,49 +761,47 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         student_logits = self._forward(model, student_full_ids, student_full_mask)
         student_completion_logits = student_logits[:, s_prompt_len : s_prompt_len + L_c, :]
         del student_logits
-        student_masked = student_completion_logits[mask_pattern]  # [N, V]
-
-        # 4b. Verify the student's final rollout against the gold solution. This
-        #     gates the teacher's privileged information per example (step 5):
-        #       * correct rollout -> on-policy trajectory PI (future decoding
-        #         steps / endpoint), exactly as before.
-        #       * wrong rollout   -> the FULL gold solution becomes the teacher's
-        #         privileged context and it re-scores the student's own noisy
-        #         rollout, so we stop distilling a confidently-wrong answer and
-        #         instead pull the student toward the gold-informed distribution.
+        # 4b. Verify the student's final rollout against the gold solution and
+        #     gate the LOSS: CORRECT rollouts contribute the on-policy trajectory
+        #     PI (step 5); WRONG rollouts get NO teacher signal — their scored
+        #     positions are dropped from the JSD, so a confidently-wrong rollout
+        #     is never used as a distillation target. (No gold-solution PI.)
         B0 = completion_ids.shape[0]
+        target_ids = inputs.get("target_input_ids")
+        target_mask = inputs.get("target_attention_mask")
         answer_ids = inputs.get("answer_input_ids")
         answer_mask = inputs.get("answer_attention_mask")
-        if self.verify_gold_pi and answer_ids is not None:
-            correct = self._verify_rollouts(completion_ids, answer_ids, answer_mask)
+        if self.filter_wrong_rollouts and (target_ids is not None or answer_ids is not None):
+            correct = self._verify_rollouts(
+                completion_ids, target_ids, target_mask, answer_ids, answer_mask
+            )
         else:
             correct = torch.ones(B0, dtype=torch.bool, device=completion_ids.device)
-        # Per-scored-position example index, in the row-major order of every
-        # `[mask_pattern]` gather below — so a [N] boolean indexes [N, V] targets.
-        row_b = mask_pattern.nonzero(as_tuple=False)[:, 0]  # [N]
-        row_correct = correct[row_b]                         # [N]
 
-        # 5. Teacher target at the scored (step-`k` masked) positions. Rows are
-        #    filled from the correct branch (on-policy trajectory PI) and the
-        #    wrong branch (gold-solution PI) independently; each branch is skipped
-        #    entirely when no row needs it.
+        # Positions that actually contribute to the loss: the step-`k` masked
+        # positions of CORRECT rollouts only. The student still SEES its full
+        # noisy view (`noisy_completion` was built from the full `mask_pattern`);
+        # we only restrict which positions get scored.
+        scored_mask = mask_pattern & correct.view(B0, 1)  # [B, L]
+        student_masked = student_completion_logits[scored_mask]  # [Nc, V]
+
+        # 5. Teacher target at the scored positions (correct rollouts only). The
+        #    privileged information is the decoding step:
         #      * "all_future"      — average the teacher's predictive distribution
         #        over steps k+1→final where each position is still masked (many
         #        teacher forwards; returns log-probs directly).
         #      * "snapshot" + gap None — the CONCRETE final rollout (endpoint).
         #      * "snapshot" + gap n    — the state `n` steps ahead (history[k+n]).
-        teacher_masked = torch.zeros_like(student_masked, dtype=torch.float32)  # [N, V]
         teacher_completion = None
         teacher_step = torch.full((B0,), -1, dtype=torch.long, device=completion_ids.device)
-
-        # --- CORRECT rollouts: on-policy trajectory PI (unchanged). ---
-        if bool(row_correct.any()):
+        teacher_masked = None
+        if bool(scored_mask.any()):
             if self.traj_teacher_view == "all_future":
-                std_masked = self._teacher_masked_all_future(
+                teacher_masked = self._teacher_masked_all_future(
                     model, teacher_prompt_ids, teacher_prompt_mask, completion_mask,
-                    completion_ids, history, chosen, mask_pattern,
+                    completion_ids, history, chosen, scored_mask,
                     t_prompt_len, L_c, transition_ids, transition_mask,
-                )  # [N, V] log-probs
+                )  # [Nc, V] log-probs
             else:
                 if self.traj_teacher_gap is None:
                     teacher_completion = completion_ids
@@ -911,31 +831,26 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
                     if was_training:
                         model.train()
                 del teacher_logits
-                std_masked = teacher_completion_logits[mask_pattern]  # [N, V]
-            teacher_masked[row_correct] = std_masked[row_correct]
+                teacher_masked = teacher_completion_logits[scored_mask]  # [Nc, V]
 
-        # --- WRONG rollouts: full gold solution as the teacher's PI. ---
-        if bool((~row_correct).any()):
-            gold_masked = self._teacher_masked_gold_solution(
-                model, teacher_prompt_ids, teacher_prompt_mask,
-                answer_ids, answer_mask, noisy_completion, completion_mask,
-                mask_pattern, L_c, transition_ids, transition_mask,
-            )  # [N, V] logits
-            teacher_masked[~row_correct] = gold_masked[~row_correct]
-
-        # 6. Token-level JSD over the scored positions.
-
-        per_token_jsd = self.generalized_jsd_loss(
-            student_masked.float(),
-            teacher_masked,
-            beta=self.beta,
-            temperature=self.temperature,
-            top_k=self.top_k_loss,
-            token_clip=self.jsd_token_clip,
-            reduction="none",
-        )  # [N]
-
-        loss = per_token_jsd.mean() if per_token_jsd.numel() > 0 else per_token_jsd.sum()
+        # 6. Token-level JSD over the scored (correct-rollout) positions. If the
+        #    whole batch is wrong nothing is scored; emit a graph-connected zero so
+        #    every parameter still receives a (zero) gradient (keeps DDP happy)
+        #    without distilling any wrong rollout.
+        if teacher_masked is not None and student_masked.numel() > 0:
+            per_token_jsd = self.generalized_jsd_loss(
+                student_masked.float(),
+                teacher_masked,
+                beta=self.beta,
+                temperature=self.temperature,
+                top_k=self.top_k_loss,
+                token_clip=self.jsd_token_clip,
+                reduction="none",
+            )  # [Nc]
+            loss = per_token_jsd.mean()
+        else:
+            per_token_jsd = student_masked.new_zeros(0)
+            loss = student_completion_logits.sum() * 0.0
 
         # 7. Per-step diagnostics.
         with torch.no_grad():
@@ -949,18 +864,22 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
                 float(mask_pattern.sum().item()) / max(1.0, float(jsd_valid_mask.sum().item()))
             )
             self._metrics[mode]["traj_num_steps"].append(float(len(history)))
-            # Verify-gated gold-PI diagnostics: the rollout accuracy (the
-            # curriculum signal — should rise over training) and how many scored
-            # positions were routed to the gold-solution teacher this step.
+            # Verify-gated filter diagnostics: rollout accuracy (the curriculum
+            # signal — should rise over training), how many scored positions
+            # actually contribute, and how many were dropped because their rollout
+            # was wrong.
             self._metrics[mode]["frac_rollout_correct"].append(float(correct.float().mean().item()))
-            self._metrics[mode]["num_gold_pi_scored"].append(float((~row_correct).sum().item()))
+            self._metrics[mode]["num_scored_tokens"].append(float(scored_mask.sum().item()))
+            self._metrics[mode]["num_dropped_wrong_tokens"].append(
+                float((mask_pattern.sum() - scored_mask.sum()).item())
+            )
             # Snapshot diagnostics only (all_future logs `teacher_future_steps_avg`
             # from inside `_teacher_masked_all_future`). Of the scored positions,
             # the fraction the teacher STILL sees as <mask> (genuinely predictive)
             # vs. concrete (sees the answer → near-degenerate copy target).
-            if teacher_completion is not None and bool(mask_pattern.any()):
+            if teacher_completion is not None and bool(scored_mask.any()):
                 teacher_still_masked = (
-                    teacher_completion[mask_pattern] == self.mask_token_id
+                    teacher_completion[scored_mask] == self.mask_token_id
                 ).float().mean().item()
                 self._metrics[mode]["teacher_scored_frac_still_masked"].append(float(teacher_still_masked))
                 valid_step = teacher_step >= 0

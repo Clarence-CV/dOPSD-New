@@ -62,6 +62,7 @@ class SelfDistillationDLLMTrajectoryDataCollator(SelfDistillationDLLMDataCollato
         max_answer_length=1024,
         problem_field: str = "problem",
         solution_field: str = "solution",
+        target_field: str | None = None,
         decode_intro_prompt: str | None = "",
         transition_prompt: str | None = "",
     ):
@@ -72,6 +73,12 @@ class SelfDistillationDLLMTrajectoryDataCollator(SelfDistillationDLLMDataCollato
             problem_field=problem_field,
             solution_field=solution_field,
         )
+        # Dataset column holding the clean ground-truth final answer (e.g.
+        # MixChain's `target` = "18"). When present it is tokenized and emitted as
+        # `target_input_ids`/`target_attention_mask` so the trainer can verify the
+        # student rollout directly against it (no extraction from the long
+        # solution). None = not available (trainer falls back to the solution box).
+        self.target_field = target_field
         # "" (default) = OFF; None = use the DEFAULT_* template; any string = that text.
         self.decode_intro_prompt = (
             self.DEFAULT_DECODE_INTRO_PROMPT if decode_intro_prompt is None else decode_intro_prompt
@@ -125,4 +132,22 @@ class SelfDistillationDLLMTrajectoryDataCollator(SelfDistillationDLLMDataCollato
             trans = torch.tensor([list(self._transition_ids)] * B, dtype=torch.long)
             result["teacher_transition_input_ids"] = trans
             result["teacher_transition_attention_mask"] = torch.ones_like(trans)
+
+        # Emit the ground-truth final answer (`target`) for rollout verification.
+        if self.target_field is not None and self.target_field in features[0]:
+            targets = [str(f[self.target_field]) for f in features]
+            t_ids = self.tokenizer(
+                targets, padding=False, truncation=True, max_length=64,
+                add_special_tokens=False,
+            )["input_ids"]
+            pad_id = self.tokenizer.pad_token_id
+            max_t = max((len(x) for x in t_ids), default=1) or 1
+            ids = torch.full((len(targets), max_t), pad_id, dtype=torch.long)
+            mask = torch.zeros((len(targets), max_t), dtype=torch.long)
+            for i, x in enumerate(t_ids):
+                if x:
+                    ids[i, : len(x)] = torch.tensor(x, dtype=torch.long)
+                    mask[i, : len(x)] = 1
+            result["target_input_ids"] = ids
+            result["target_attention_mask"] = mask
         return result
