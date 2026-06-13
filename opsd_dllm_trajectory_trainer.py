@@ -868,7 +868,15 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
             # signal — should rise over training), how many scored positions
             # actually contribute, and how many were dropped because their rollout
             # was wrong.
-            self._metrics[mode]["frac_rollout_correct"].append(float(correct.float().mean().item()))
+            # Gather rollout correctness across all processes for TRUE GLOBAL
+            # counts (each process otherwise only sees its own per-device batch).
+            n_wrong = (~correct).sum().reshape(1)
+            n_total = torch.tensor([correct.numel()], dtype=n_wrong.dtype, device=correct.device)
+            n_wrong_g = float(self.accelerator.gather(n_wrong).sum().item())
+            n_total_g = float(self.accelerator.gather(n_total).sum().item())
+            self._metrics[mode]["num_wrong_rollouts"].append(n_wrong_g)
+            self._metrics[mode]["num_rollouts"].append(n_total_g)
+            self._metrics[mode]["frac_rollout_correct"].append(1.0 - n_wrong_g / max(1.0, n_total_g))
             self._metrics[mode]["num_scored_tokens"].append(float(scored_mask.sum().item()))
             self._metrics[mode]["num_dropped_wrong_tokens"].append(
                 float((mask_pattern.sum() - scored_mask.sum()).item())
