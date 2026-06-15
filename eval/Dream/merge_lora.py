@@ -25,12 +25,12 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(name, trust_remote_code=True)
 
-    peft_model = PeftModel.from_pretrained(base_model, "/home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm_trajectory/dream7b_traj05-least-allfut_mixchain_forwardbeta0_v2/checkpoint-400")
+    peft_model = PeftModel.from_pretrained(base_model, "/home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm_trajectory/dream7b_traj05-least-allfut_mixchain_forwardbeta0_v2/checkpoint-900")
 
     merged_model = peft_model.merge_and_unload()
     
-    merged_model.save_pretrained("/home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm_trajectory/dream7b_traj05-least-allfut_mixchain_forwardbeta0_filter_wrong_rollout_400")
-    tokenizer.save_pretrained("/home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm_trajectory/dream7b_traj05-least-allfut_mixchain_forwardbeta0_filter_wrong_rollout_400")
+    merged_model.save_pretrained("/home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm_trajectory/dream7b_traj05-least-allfut_mixchain_forwardbeta0_filter_wrong_rollout_900")
+    tokenizer.save_pretrained("/home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm_trajectory/dream7b_traj05-least-allfut_mixchain_forwardbeta0_filter_wrong_rollout_900")
 
 
 if __name__ == "__main__":
