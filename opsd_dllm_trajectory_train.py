@@ -136,6 +136,30 @@ class CustomScriptArguments(ScriptArguments):
             "to disable verification (every rollout contributes, pure trajectory PI)."
         },
     )
+    use_grpo: bool = field(
+        default=True,
+        metadata={
+            "help": "Add the GRPO term so the model learns from WRONG rollouts: L = "
+            "JSD(correct) + grpo_coef * GRPO(group). Samples --grpo_num_rollouts on-policy "
+            "rollouts per prompt, rewards correctness, and pushes wrong rollouts DOWN via "
+            "negative group-relative advantage. False = pure JSD(correct) (no RL)."
+        },
+    )
+    grpo_num_rollouts: int = field(
+        default=8,
+        metadata={"help": "Group size G: on-policy rollouts per prompt for the GRPO advantage."},
+    )
+    grpo_coef: float = field(
+        default=1.0,
+        metadata={
+            "help": "Alpha in L = JSD + alpha*GRPO. JSD is the (coef-1) anchor; tune this by "
+            "gradient-norm ratio and ramp from small. 0 = JSD only."
+        },
+    )
+    grpo_adv_eps: float = field(
+        default=1e-4,
+        metadata={"help": "Epsilon added to the group reward std when normalizing advantages."},
+    )
     decode_intro_prompt: str = field(
         default="",
         metadata={
@@ -288,6 +312,9 @@ if __name__ == "__main__":
                     None if script_args.traj_teacher_gap < 0 else script_args.traj_teacher_gap
                 ),
                 "filter_wrong_rollouts": script_args.filter_wrong_rollouts,
+                "use_grpo": script_args.use_grpo,
+                "grpo_num_rollouts": script_args.grpo_num_rollouts,
+                "grpo_coef": script_args.grpo_coef,
                 "top_k_loss": script_args.top_k_loss if script_args.top_k_loss > 0 else None,
                 "jsd_token_clip": script_args.jsd_token_clip if script_args.jsd_token_clip > 0 else None,
                 "gen_max_new_tokens": script_args.gen_max_new_tokens,
@@ -420,6 +447,10 @@ if __name__ == "__main__":
         traj_teacher_view=script_args.traj_teacher_view,
         traj_teacher_gap=(None if script_args.traj_teacher_gap < 0 else script_args.traj_teacher_gap),
         filter_wrong_rollouts=script_args.filter_wrong_rollouts,
+        use_grpo=script_args.use_grpo,
+        grpo_num_rollouts=script_args.grpo_num_rollouts,
+        grpo_coef=script_args.grpo_coef,
+        grpo_adv_eps=script_args.grpo_adv_eps,
     )
 
     trainer.train()

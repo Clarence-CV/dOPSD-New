@@ -92,6 +92,10 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         traj_teacher_gap: int | None = None,
         traj_teacher_view: str = "snapshot",
         filter_wrong_rollouts: bool = True,
+        use_grpo: bool = True,
+        grpo_num_rollouts: int = 8,
+        grpo_coef: float = 1.0,
+        grpo_adv_eps: float = 1e-4,
         **kwargs,
     ):
         # The base trainer only recognizes mask_schedule in {"diffusion","fixed"};
@@ -125,6 +129,12 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         self.traj_teacher_gap = traj_teacher_gap
         self.traj_teacher_view = traj_teacher_view
         self.filter_wrong_rollouts = bool(filter_wrong_rollouts)
+        self.use_grpo = bool(use_grpo)
+        # Group size: G on-policy rollouts per prompt (needed for GRPO's
+        # group-relative advantage). 1 when GRPO is off.
+        self.grpo_num_rollouts = int(grpo_num_rollouts) if self.use_grpo else 1
+        self.grpo_coef = float(grpo_coef)
+        self.grpo_adv_eps = float(grpo_adv_eps)
 
         if self.traj_teacher_view == "all_future":
             teacher_view = (
@@ -159,7 +169,28 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
                 f"scored positions are dropped from the JSD). Verifier: {verifier}.\n"
             )
         else:
-            print("[OPSD-DLLM] filter_wrong_rollouts=False — every rollout contributes (no verification).\n")
+            print("[OPSD-DLLM] filter_wrong_rollouts=False — every rollout contributes (no verification).")
+
+        if self.use_grpo:
+            print(
+                f"[OPSD-DLLM] GRPO + JSD — {self.grpo_num_rollouts} on-policy rollouts/prompt; "
+                f"L = JSD(correct) + {self.grpo_coef:g} * GRPO(group). The WHOLE group (correct + "
+                "wrong) gets a group-relative advantage: correct rollouts are pushed UP, WRONG "
+                "rollouts pushed DOWN (the model learns they are wrong); correct rollouts ALSO "
+                "get the on-policy trajectory JSD (self-distillation)."
+            )
+            if self.gen_temperature is not None and self.gen_temperature <= 0:
+                print(
+                    "[OPSD-DLLM] WARNING: gen_temperature<=0 → the rollouts in a group will be "
+                    "IDENTICAL → GRPO advantages collapse to 0 (no signal). Set gen_temperature>0 "
+                    "(e.g. 0.7–1.0) for diverse rollouts."
+                )
+            if self.student_backend == "llada" and (self.gen_temperature or 0) <= 0:
+                print(
+                    "[OPSD-DLLM] WARNING: LLaDA sampler is greedy unless gen_temperature>0; with "
+                    "temperature>0 it now samples multinomially (required for group diversity)."
+                )
+        print()
 
     def _set_signature_columns_if_needed(self):
         # Keep the ground-truth `target` column the collator reads for rollout
@@ -278,7 +309,14 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
                 logits = logits.masked_fill(idx_remove, float("-inf"))
 
             probs = F.softmax(logits, dim=-1)
-            confidence, sampled = probs.max(dim=-1)  # both [B, L_c]
+            if self.gen_temperature > 0:
+                # Stochastic sampling so a replicated prompt yields DIVERSE rollouts
+                # (required for GRPO group advantages; argmax would make them identical).
+                Bc, Lc, Vc = probs.shape
+                sampled = torch.multinomial(probs.reshape(-1, Vc), 1).reshape(Bc, Lc)
+                confidence = probs.gather(-1, sampled.unsqueeze(-1)).squeeze(-1)
+            else:
+                confidence, sampled = probs.max(dim=-1)  # greedy [B, L_c]
 
             confidence = torch.where(
                 is_mask, confidence, torch.full_like(confidence, -1.0)
@@ -690,6 +728,54 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         return mask
 
     # ------------------------------------------------------------------
+    # GRPO (group-relative policy gradient) — learn from WRONG rollouts.
+    # ------------------------------------------------------------------
+    def _grpo_advantage(self, correct, B, G):
+        """Group-relative advantage from binary correctness rewards.
+
+        For each prompt's group of G rollouts: ``adv = (r - mean) / (std + eps)``.
+        Correct rollouts get POSITIVE advantage, wrong rollouts NEGATIVE — that
+        negative is how the model "knows" a rollout is wrong. Returns a detached
+        [B*G] tensor (rewards are constants w.r.t. the policy). Groups whose
+        rollouts all share a reward (all-right or all-wrong) get advantage 0 (no
+        signal), which is correct GRPO behaviour.
+        """
+        reward = correct.float().view(B, G)
+        mean = reward.mean(dim=1, keepdim=True)
+        std = reward.std(dim=1, keepdim=True)
+        adv = (reward - mean) / (std + self.grpo_adv_eps)
+        return adv.view(B * G).detach()
+
+    def _grpo_loss(self, student_completion_logits, completion_ids, mask_pattern, advantage):
+        """GRPO policy-gradient loss with an on-policy mean-field log-prob surrogate.
+
+        A masked diffusion model has no autoregressive sequence log-prob, so we
+        estimate the policy log-prob of each rollout by the per-token log-prob of
+        its OWN sampled tokens at the trajectory step-`k` masked positions —
+        ``log p(y_i | noisy step-k context)`` — reusing the same student forward
+        as the JSD term (so it stays on-policy and cheap). Per rollout we take the
+        length-normalized mean of those token log-probs, then minimize
+        ``-(advantage * mean_logprob)``:
+
+          * advantage > 0 (correct rollout) → increase those token log-probs (push UP)
+          * advantage < 0 (wrong   rollout) → decrease them (push DOWN — "this is wrong")
+
+        Rollouts are freshly sampled from the current policy each step, so this is
+        on-policy and uses plain REINFORCE-with-group-baseline (no PPO ratio/clip).
+        """
+        masked_logits = student_completion_logits[mask_pattern]              # [M, V]
+        true_tok = completion_ids[mask_pattern]                             # [M]
+        logp = F.log_softmax(masked_logits.float(), dim=-1)                 # [M, V]
+        tok_logp = logp.gather(-1, true_tok.unsqueeze(-1)).squeeze(-1)      # [M]
+
+        rollout_idx = mask_pattern.nonzero(as_tuple=False)[:, 0]           # [M], row-major
+        BG = completion_ids.shape[0]
+        seq_logp = tok_logp.new_zeros(BG).index_add(0, rollout_idx, tok_logp)
+        counts = tok_logp.new_zeros(BG).index_add(0, rollout_idx, torch.ones_like(tok_logp))
+        mean_logp = seq_logp / counts.clamp(min=1.0)                        # [BG] per-token mean
+        return -(advantage * mean_logp).mean()
+
+    # ------------------------------------------------------------------
     # Loss.
     # ------------------------------------------------------------------
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
@@ -698,24 +784,38 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         teacher_prompt_ids = inputs["teacher_prompt_input_ids"]
         teacher_prompt_mask = inputs["teacher_prompt_attention_mask"]
 
+        # 0. GROUP EXPANSION — G on-policy rollouts per prompt. GRPO needs a group
+        #    to form the relative advantage; the group also supplies the correct
+        #    rollouts that feed the JSD self-distillation. Everything below treats
+        #    the flattened B*G as the batch; only the GRPO advantage groups by G.
+        G = self.grpo_num_rollouts
+        B = student_prompt_ids.shape[0]
+        if G > 1:
+            student_prompt_ids = student_prompt_ids.repeat_interleave(G, dim=0)
+            student_prompt_mask = student_prompt_mask.repeat_interleave(G, dim=0)
+            teacher_prompt_ids = teacher_prompt_ids.repeat_interleave(G, dim=0)
+            teacher_prompt_mask = teacher_prompt_mask.repeat_interleave(G, dim=0)
+
         s_prompt_len = student_prompt_ids.shape[1]
         t_prompt_len = teacher_prompt_ids.shape[1]
 
-        # 1. On-policy rollout WITH decoding history. `completion_ids` is the
-        #    concrete endpoint of the trajectory; `history` are the per-step
-        #    snapshots the mask is drawn from.
+        # 1. On-policy rollout WITH decoding history (B*G rollouts). Diversity
+        #    across the G copies of a prompt comes from stochastic sampling
+        #    (gen_temperature > 0) — without it the group collapses and GRPO has
+        #    no signal.
         completion_ids, completion_mask, history = self._generate_student_completion_with_history(
             model, student_prompt_ids, student_prompt_mask
         )
-        _, L_c = completion_ids.shape
+        BG, L_c = completion_ids.shape
 
-        # 1b. Buffer (prompt, completion) for the periodic JSON dump.
+        # 1b. Buffer (prompt, completion) for the periodic JSON dump — one rollout
+        #     per group to keep the dump small.
         if self.accelerator.is_main_process:
             prompt_texts = self.processing_class.batch_decode(
-                student_prompt_ids, skip_special_tokens=True
+                student_prompt_ids[::G], skip_special_tokens=True
             )
             completion_texts = self.processing_class.batch_decode(
-                completion_ids, skip_special_tokens=False
+                completion_ids[::G], skip_special_tokens=False
             )
             step_now = int(self.state.global_step)
             for p_text, c_text in zip(prompt_texts, completion_texts):
@@ -723,11 +823,7 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
                     {"step": step_now, "prompt": p_text, "completion": c_text}
                 )
 
-        # 2. Build the noisy completion from a real decoding step. The mask is
-        #    the set of still-undecoded positions at the chosen step; because
-        #    decoded tokens are frozen during sampling, re-masking those
-        #    positions in `completion_ids` reproduces that step exactly over the
-        #    JSD-valid region.
+        # 2. Noisy completion from a real decoding step (the trajectory mask).
         jsd_valid_mask = self._build_jsd_valid_mask(completion_ids, completion_mask)
         mask_pattern, p_mask_sample, chosen = self._trajectory_mask(
             completion_ids, jsd_valid_mask, history
@@ -738,63 +834,66 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
             completion_ids,
         )
 
-        # 3. Build student input. The student always sees the NOISY (real
-        #    decoding-step `k`) completion. The teacher's privileged view is set
-        #    by `traj_teacher_view` / `traj_teacher_gap` (see step 5). JSD is
-        #    always taken at the step-`k` masked positions (`mask_pattern`).
-        #
-        #    By default the trajectory collator gives the teacher the SAME prompt
-        #    as the student (problem only) — the teacher input stays in the model's
-        #    native decode format and the privilege comes purely from the
-        #    completion tokens. Optional ablation framing (decode_intro_prompt /
-        #    transition_prompt) is folded into `teacher_prompt_ids` / appended as a
-        #    `teacher_transition_input_ids` suffix; the intro is already part of
-        #    `teacher_prompt_ids`, so the teacher completion span still starts at
-        #    `t_prompt_len`, and the transition (if any) sits after the span.
         transition_ids = inputs.get("teacher_transition_input_ids")
         transition_mask = inputs.get("teacher_transition_attention_mask")
+        if G > 1 and transition_ids is not None:
+            transition_ids = transition_ids.repeat_interleave(G, dim=0)
+            transition_mask = (
+                transition_mask.repeat_interleave(G, dim=0) if transition_mask is not None else None
+            )
 
+        # 3-4. Student forward (with grad) over ALL B*G noisy rollouts. This one
+        #      forward serves BOTH the GRPO log-prob (all rollouts) and the JSD
+        #      (correct rollouts) — keeping everything on-policy and cheap.
         student_full_ids = torch.cat([student_prompt_ids, noisy_completion], dim=1)
         student_full_mask = torch.cat([student_prompt_mask, completion_mask], dim=1)
-
-        # 4. Student forward (with grad). Slice out the completion span only.
         student_logits = self._forward(model, student_full_ids, student_full_mask)
         student_completion_logits = student_logits[:, s_prompt_len : s_prompt_len + L_c, :]
         del student_logits
-        # 4b. Verify the student's final rollout against the gold solution and
-        #     gate the LOSS: CORRECT rollouts contribute the on-policy trajectory
-        #     PI (step 5); WRONG rollouts get NO teacher signal — their scored
-        #     positions are dropped from the JSD, so a confidently-wrong rollout
-        #     is never used as a distillation target. (No gold-solution PI.)
-        B0 = completion_ids.shape[0]
+
+        # 4b. Verify every rollout (reward = correctness) against the gold target.
         target_ids = inputs.get("target_input_ids")
         target_mask = inputs.get("target_attention_mask")
         answer_ids = inputs.get("answer_input_ids")
         answer_mask = inputs.get("answer_attention_mask")
-        if self.filter_wrong_rollouts and (target_ids is not None or answer_ids is not None):
+        if G > 1:
+            target_ids = target_ids.repeat_interleave(G, 0) if target_ids is not None else None
+            target_mask = target_mask.repeat_interleave(G, 0) if target_mask is not None else None
+            answer_ids = answer_ids.repeat_interleave(G, 0) if answer_ids is not None else None
+            answer_mask = answer_mask.repeat_interleave(G, 0) if answer_mask is not None else None
+        # Verify when GRPO (needs correctness as the reward) or the JSD filter needs it.
+        need_verify = (self.use_grpo or self.filter_wrong_rollouts) and (
+            target_ids is not None or answer_ids is not None
+        )
+        if need_verify:
             correct = self._verify_rollouts(
                 completion_ids, target_ids, target_mask, answer_ids, answer_mask
             )
         else:
-            correct = torch.ones(B0, dtype=torch.bool, device=completion_ids.device)
+            correct = torch.ones(BG, dtype=torch.bool, device=completion_ids.device)
 
-        # Positions that actually contribute to the loss: the step-`k` masked
-        # positions of CORRECT rollouts only. The student still SEES its full
-        # noisy view (`noisy_completion` was built from the full `mask_pattern`);
-        # we only restrict which positions get scored.
-        scored_mask = mask_pattern & correct.view(B0, 1)  # [B, L]
+        # 5. GRPO term over the WHOLE group (correct + wrong). Correct rollouts get
+        #    positive advantage (pushed up); wrong rollouts get negative advantage
+        #    (pushed down) — this is how the model learns a rollout is wrong.
+        advantage = None
+        grpo_loss = None
+        if self.use_grpo and G > 1:
+            advantage = self._grpo_advantage(correct, B, G)  # [B*G] detached
+            grpo_loss = self._grpo_loss(
+                student_completion_logits, completion_ids, mask_pattern, advantage
+            )
+
+        # 6. JSD term on CORRECT rollouts only — on-policy self-distillation from
+        #    the decoding-step privileged information (unchanged machinery).
+        # JSD scores CORRECT rollouts only when filtering (the requested behaviour);
+        # otherwise it scores every rollout's masked positions.
+        if self.filter_wrong_rollouts:
+            scored_mask = mask_pattern & correct.view(BG, 1)  # [B*G, L]
+        else:
+            scored_mask = mask_pattern
         student_masked = student_completion_logits[scored_mask]  # [Nc, V]
-
-        # 5. Teacher target at the scored positions (correct rollouts only). The
-        #    privileged information is the decoding step:
-        #      * "all_future"      — average the teacher's predictive distribution
-        #        over steps k+1→final where each position is still masked (many
-        #        teacher forwards; returns log-probs directly).
-        #      * "snapshot" + gap None — the CONCRETE final rollout (endpoint).
-        #      * "snapshot" + gap n    — the state `n` steps ahead (history[k+n]).
         teacher_completion = None
-        teacher_step = torch.full((B0,), -1, dtype=torch.long, device=completion_ids.device)
-        teacher_masked = None
+        teacher_step = torch.full((BG,), -1, dtype=torch.long, device=completion_ids.device)
         if bool(scored_mask.any()):
             if self.traj_teacher_view == "all_future":
                 teacher_masked = self._teacher_masked_all_future(
@@ -832,12 +931,6 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
                         model.train()
                 del teacher_logits
                 teacher_masked = teacher_completion_logits[scored_mask]  # [Nc, V]
-
-        # 6. Token-level JSD over the scored (correct-rollout) positions. If the
-        #    whole batch is wrong nothing is scored; emit a graph-connected zero so
-        #    every parameter still receives a (zero) gradient (keeps DDP happy)
-        #    without distilling any wrong rollout.
-        if teacher_masked is not None and student_masked.numel() > 0:
             per_token_jsd = self.generalized_jsd_loss(
                 student_masked.float(),
                 teacher_masked,
@@ -847,12 +940,20 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
                 token_clip=self.jsd_token_clip,
                 reduction="none",
             )  # [Nc]
-            loss = per_token_jsd.mean()
+            jsd_loss = per_token_jsd.mean()
         else:
+            # No correct rollout this step: graph-connected zero so every parameter
+            # still gets a (zero) gradient (keeps DDP happy) and no wrong rollout is
+            # distilled. The GRPO term (if on) still carries the real gradient.
             per_token_jsd = student_masked.new_zeros(0)
-            loss = student_completion_logits.sum() * 0.0
+            jsd_loss = student_completion_logits.sum() * 0.0
 
-        # 7. Per-step diagnostics.
+        # 7. Combined objective: JSD anchor (coef 1) + alpha * GRPO.
+        loss = jsd_loss
+        if grpo_loss is not None:
+            loss = loss + self.grpo_coef * grpo_loss
+
+        # 8. Per-step diagnostics.
         with torch.no_grad():
             mode = "train" if model.training else "eval"
             comp_lens = completion_mask.sum(dim=1).float()
@@ -864,12 +965,7 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
                 float(mask_pattern.sum().item()) / max(1.0, float(jsd_valid_mask.sum().item()))
             )
             self._metrics[mode]["traj_num_steps"].append(float(len(history)))
-            # Verify-gated filter diagnostics: rollout accuracy (the curriculum
-            # signal — should rise over training), how many scored positions
-            # actually contribute, and how many were dropped because their rollout
-            # was wrong.
-            # Gather rollout correctness across all processes for TRUE GLOBAL
-            # counts (each process otherwise only sees its own per-device batch).
+            # Global rollout-correctness (gathered across processes).
             n_wrong = (~correct).sum().reshape(1)
             n_total = torch.tensor([correct.numel()], dtype=n_wrong.dtype, device=correct.device)
             n_wrong_g = float(self.accelerator.gather(n_wrong).sum().item())
@@ -878,13 +974,19 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
             self._metrics[mode]["num_rollouts"].append(n_total_g)
             self._metrics[mode]["frac_rollout_correct"].append(1.0 - n_wrong_g / max(1.0, n_total_g))
             self._metrics[mode]["num_scored_tokens"].append(float(scored_mask.sum().item()))
-            self._metrics[mode]["num_dropped_wrong_tokens"].append(
-                float((mask_pattern.sum() - scored_mask.sum()).item())
-            )
-            # Snapshot diagnostics only (all_future logs `teacher_future_steps_avg`
-            # from inside `_teacher_masked_all_future`). Of the scored positions,
-            # the fraction the teacher STILL sees as <mask> (genuinely predictive)
-            # vs. concrete (sees the answer → near-degenerate copy target).
+            # Loss components + GRPO/group diagnostics.
+            self._metrics[mode]["jsd_loss"].append(float(jsd_loss.detach().item()))
+            if grpo_loss is not None:
+                self._metrics[mode]["grpo_loss"].append(float(grpo_loss.detach().item()))
+                self._metrics[mode]["advantage_abs_mean"].append(float(advantage.abs().mean().item()))
+                reward = correct.float().view(B, G)
+                self._metrics[mode]["group_solve_rate"].append(float(reward.mean().item()))
+                self._metrics[mode]["frac_groups_all_wrong"].append(
+                    float((reward.sum(dim=1) == 0).float().mean().item())
+                )
+                self._metrics[mode]["frac_groups_all_correct"].append(
+                    float((reward.sum(dim=1) == G).float().mean().item())
+                )
             if teacher_completion is not None and bool(scored_mask.any()):
                 teacher_still_masked = (
                     teacher_completion[scored_mask] == self.mask_token_id
@@ -899,7 +1001,7 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
                 self._metrics[mode]["per_token_jsd_mean"].append(float(per_token_jsd.mean().item()))
                 self._metrics[mode]["per_token_jsd_max"].append(float(per_token_jsd.max().item()))
 
-        # 8. Periodic generation dump (only when gradients synced this step).
+        # 9. Periodic generation dump (only when gradients synced this step).
         if (
             self.state.global_step > 0
             and self.state.global_step % self._generation_save_frequency == 0

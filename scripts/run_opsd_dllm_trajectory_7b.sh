@@ -71,6 +71,15 @@ else
 fi
 TRAJ_TAG="traj${TRAJ_MASK_THRESHOLD//./}-${TRAJ_STEP_SELECT}-${VIEW_TAG}"
 
+# --- GRPO knobs ---------------------------------------------------------------
+# use_grpo: add the GRPO term so the model also learns from WRONG rollouts —
+#   L = JSD(correct) + grpo_coef * GRPO(group). false = pure JSD(correct).
+# grpo_num_rollouts: group size G (on-policy rollouts per prompt).
+# grpo_coef: alpha in L = JSD + alpha*GRPO (0 = JSD only).
+USE_GRPO="${USE_GRPO:-true}"
+GRPO_NUM_ROLLOUTS="${GRPO_NUM_ROLLOUTS:-8}"
+GRPO_COEF="${GRPO_COEF:-1.0}"
+
 # --- Dataset toggle: mixchain (default) vs zigeng -----------------------------
 DATASET="${DATASET:-mixchain}"
 case "$DATASET" in
@@ -121,6 +130,9 @@ accelerate launch \
     --traj_step_select "$TRAJ_STEP_SELECT" \
     --traj_teacher_view "$TRAJ_TEACHER_VIEW" \
     --traj_teacher_gap "$TRAJ_TEACHER_GAP" \
+    --use_grpo "$USE_GRPO" \
+    --grpo_num_rollouts "$GRPO_NUM_ROLLOUTS" \
+    --grpo_coef 0.2 \
     --use_peft \
     --lora_r 32 \
     --lora_alpha 32 \
