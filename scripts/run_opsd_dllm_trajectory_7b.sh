@@ -77,7 +77,7 @@ TRAJ_TAG="traj${TRAJ_MASK_THRESHOLD//./}-${TRAJ_STEP_SELECT}-${VIEW_TAG}"
 # grpo_num_rollouts: group size G (on-policy rollouts per prompt).
 # grpo_coef: alpha in L = JSD + alpha*GRPO (0 = JSD only).
 USE_GRPO="${USE_GRPO:-true}"
-GRPO_NUM_ROLLOUTS="${GRPO_NUM_ROLLOUTS:-4}"
+GRPO_NUM_ROLLOUTS="${GRPO_NUM_ROLLOUTS:-2}"
 GRPO_COEF="${GRPO_COEF:-1.0}"
 
 # --- Dataset toggle: mixchain (default) vs zigeng -----------------------------
