@@ -91,7 +91,7 @@ case "$DATASET" in
         ;;
 esac
 
-RUN_CONFIG="${BACKEND_TAG}_${TRAJ_TAG}_${DATA_TAG}_forwardbeta0_v2"
+RUN_CONFIG="${BACKEND_TAG}_${TRAJ_TAG}_${DATA_TAG}_forwardbeta0_GRPO_v2"
 echo "[run_opsd_dllm_trajectory_7b] STUDENT_BACKEND=$STUDENT_BACKEND  MODEL_NAME=$MODEL_NAME  DATASET=$DATASET  TRAJ_MASK_THRESHOLD=$TRAJ_MASK_THRESHOLD  TRAJ_STEP_SELECT=$TRAJ_STEP_SELECT  run_config=$RUN_CONFIG"
 
 accelerate launch \
