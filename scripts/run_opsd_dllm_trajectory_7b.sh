@@ -46,17 +46,21 @@ if [[ "$STUDENT_BACKEND" == "llada" ]]; then
     BACKEND_TAG="llada8b"
     # LLaDA's tokenizer does NOT expose mask_token_id; its [MASK] id is 126336.
     DEFAULT_MASK_TOKEN_ID=126336
+    # LLaDA's modeling code has no SDPA path — must use eager attention.
+    DEFAULT_ATTN_IMPL=eager
 elif [[ "$STUDENT_BACKEND" == "dream" ]]; then
     DEFAULT_MODEL_NAME="Dream-org/Dream-v0-Instruct-7B"
     BACKEND_TAG="dream7b"
     # Dream's tokenizer exposes mask_token_id; -1 = use tokenizer default.
     DEFAULT_MASK_TOKEN_ID=-1
+    DEFAULT_ATTN_IMPL=sdpa
 else
     echo "[run_opsd_dllm_trajectory_7b] ERROR: STUDENT_BACKEND must be 'dream' or 'llada' (got '$STUDENT_BACKEND')" >&2
     exit 1
 fi
 MODEL_NAME="${MODEL_NAME:-$DEFAULT_MODEL_NAME}"
 MASK_TOKEN_ID="${MASK_TOKEN_ID:-$DEFAULT_MASK_TOKEN_ID}"
+ATTN_IMPL="${ATTN_IMPL:-$DEFAULT_ATTN_IMPL}"
 
 # --- Trajectory knobs ---------------------------------------------------------
 TRAJ_MASK_THRESHOLD="${TRAJ_MASK_THRESHOLD:-0.5}"
@@ -132,7 +136,7 @@ accelerate launch \
     --num_train_epochs 3 \
     --save_steps 100 \
     --logging_steps 2 \
-    --attn_implementation sdpa \
+    --attn_implementation "$ATTN_IMPL" \
     --torch_dtype bfloat16 \
     --max_prompt_length 512 \
     --max_answer_length 256 \
