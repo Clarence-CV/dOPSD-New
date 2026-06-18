@@ -50,6 +50,10 @@ if [[ "$STUDENT_BACKEND" == "llada" ]]; then
     DEFAULT_ATTN_IMPL=eager
     # LLaDAModelLM does not implement gradient checkpointing.
     DEFAULT_GRAD_CKPT=false
+    # No grad-ckpt + eager attention => high activation memory. Keep per-device
+    # batch small and recover the effective batch via accumulation (1*4*4procs=16).
+    DEFAULT_PER_DEVICE_BS=1
+    DEFAULT_GRAD_ACCUM=4
 elif [[ "$STUDENT_BACKEND" == "dream" ]]; then
     DEFAULT_MODEL_NAME="Dream-org/Dream-v0-Instruct-7B"
     BACKEND_TAG="dream7b"
@@ -57,6 +61,8 @@ elif [[ "$STUDENT_BACKEND" == "dream" ]]; then
     DEFAULT_MASK_TOKEN_ID=-1
     DEFAULT_ATTN_IMPL=sdpa
     DEFAULT_GRAD_CKPT=true
+    DEFAULT_PER_DEVICE_BS=4
+    DEFAULT_GRAD_ACCUM=1
 else
     echo "[run_opsd_dllm_trajectory_7b] ERROR: STUDENT_BACKEND must be 'dream' or 'llada' (got '$STUDENT_BACKEND')" >&2
     exit 1
@@ -65,6 +71,8 @@ MODEL_NAME="${MODEL_NAME:-$DEFAULT_MODEL_NAME}"
 MASK_TOKEN_ID="${MASK_TOKEN_ID:-$DEFAULT_MASK_TOKEN_ID}"
 ATTN_IMPL="${ATTN_IMPL:-$DEFAULT_ATTN_IMPL}"
 GRAD_CKPT="${GRAD_CKPT:-$DEFAULT_GRAD_CKPT}"
+PER_DEVICE_BS="${PER_DEVICE_BS:-$DEFAULT_PER_DEVICE_BS}"
+GRAD_ACCUM="${GRAD_ACCUM:-$DEFAULT_GRAD_ACCUM}"
 
 # --- Trajectory knobs ---------------------------------------------------------
 TRAJ_MASK_THRESHOLD="${TRAJ_MASK_THRESHOLD:-0.5}"
@@ -119,12 +127,13 @@ esac
 
 RUN_CONFIG="${BACKEND_TAG}_${TRAJ_TAG}_${DATA_TAG}_forwardbeta0_${MODE_TAG}_v2"
 echo "[run_opsd_dllm_trajectory_7b] STUDENT_BACKEND=$STUDENT_BACKEND  MODEL_NAME=$MODEL_NAME  DATASET=$DATASET  TRAJ_MASK_THRESHOLD=$TRAJ_MASK_THRESHOLD  TRAJ_STEP_SELECT=$TRAJ_STEP_SELECT  run_config=$RUN_CONFIG"
+echo "[run_opsd_dllm_trajectory_7b] attn=$ATTN_IMPL  grad_ckpt=$GRAD_CKPT  per_device_bs=$PER_DEVICE_BS  grad_accum=$GRAD_ACCUM  mask_token_id=$MASK_TOKEN_ID"
 
 accelerate launch \
     --config_file accelerate.yaml \
     --num_processes 4 \
     --gpu_ids 1,2,3,4 \
-    --gradient_accumulation_steps 1 \
+    --gradient_accumulation_steps "$GRAD_ACCUM" \
     --main_process_port 13379 \
     opsd_dllm_trajectory_train.py \
     --model_name_or_path "$MODEL_NAME" \
@@ -133,7 +142,8 @@ accelerate launch \
     --dataset "$DATASET" \
     --learning_rate 2e-5 \
     --max_grad_norm 1.0 \
-    --per_device_train_batch_size 4 \
+    --per_device_train_batch_size "$PER_DEVICE_BS" \
+    --gradient_accumulation_steps "$GRAD_ACCUM" \
     --gradient_checkpointing "$GRAD_CKPT" \
     --output_dir ./outputs/opsd_dllm_trajectory/ \
     --run_config "$RUN_CONFIG" \
