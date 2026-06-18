@@ -76,9 +76,22 @@ TRAJ_TAG="traj${TRAJ_MASK_THRESHOLD//./}-${TRAJ_STEP_SELECT}-${VIEW_TAG}"
 #   L = JSD(correct) + grpo_coef * GRPO(group). false = pure JSD(correct).
 # grpo_num_rollouts: group size G (on-policy rollouts per prompt).
 # grpo_coef: alpha in L = JSD + alpha*GRPO (0 = JSD only).
+#
+# OLD VERSION ("wrong rollout -> loss 0"): set USE_GRPO=false. With GRPO off and
+# FILTER_WRONG_ROLLOUTS=true the loss is pure JSD on CORRECT rollouts only —
+# wrong rollouts contribute exactly zero (verify-gated filter). This is the
+# proven single-rollout path; identical machinery to the pre-GRPO trainer.
 USE_GRPO="${USE_GRPO:-true}"
 GRPO_NUM_ROLLOUTS="${GRPO_NUM_ROLLOUTS:-2}"
 GRPO_COEF="${GRPO_COEF:-1.0}"
+# Verify-gated filter: true = wrong rollouts get NO teacher signal (loss 0 there).
+FILTER_WRONG_ROLLOUTS="${FILTER_WRONG_ROLLOUTS:-true}"
+# Mode tag so old-version (filter-only) runs are not mislabeled as GRPO runs.
+if [[ "$USE_GRPO" == "true" ]]; then
+    MODE_TAG="GRPO"
+else
+    MODE_TAG="filterwrong"
+fi
 
 # --- Dataset toggle: mixchain (default) vs zigeng -----------------------------
 DATASET="${DATASET:-mixchain}"
@@ -91,7 +104,7 @@ case "$DATASET" in
         ;;
 esac
 
-RUN_CONFIG="${BACKEND_TAG}_${TRAJ_TAG}_${DATA_TAG}_forwardbeta0_GRPO_v2"
+RUN_CONFIG="${BACKEND_TAG}_${TRAJ_TAG}_${DATA_TAG}_forwardbeta0_${MODE_TAG}_v2"
 echo "[run_opsd_dllm_trajectory_7b] STUDENT_BACKEND=$STUDENT_BACKEND  MODEL_NAME=$MODEL_NAME  DATASET=$DATASET  TRAJ_MASK_THRESHOLD=$TRAJ_MASK_THRESHOLD  TRAJ_STEP_SELECT=$TRAJ_STEP_SELECT  run_config=$RUN_CONFIG"
 
 accelerate launch \
@@ -133,6 +146,7 @@ accelerate launch \
     --use_grpo "$USE_GRPO" \
     --grpo_num_rollouts "$GRPO_NUM_ROLLOUTS" \
     --grpo_coef 0.2 \
+    --filter_wrong_rollouts "$FILTER_WRONG_ROLLOUTS" \
     --use_peft \
     --lora_r 32 \
     --lora_alpha 32 \
