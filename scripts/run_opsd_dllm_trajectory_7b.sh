@@ -48,12 +48,15 @@ if [[ "$STUDENT_BACKEND" == "llada" ]]; then
     DEFAULT_MASK_TOKEN_ID=126336
     # LLaDA's modeling code has no SDPA path — must use eager attention.
     DEFAULT_ATTN_IMPL=eager
+    # LLaDAModelLM does not implement gradient checkpointing.
+    DEFAULT_GRAD_CKPT=false
 elif [[ "$STUDENT_BACKEND" == "dream" ]]; then
     DEFAULT_MODEL_NAME="Dream-org/Dream-v0-Instruct-7B"
     BACKEND_TAG="dream7b"
     # Dream's tokenizer exposes mask_token_id; -1 = use tokenizer default.
     DEFAULT_MASK_TOKEN_ID=-1
     DEFAULT_ATTN_IMPL=sdpa
+    DEFAULT_GRAD_CKPT=true
 else
     echo "[run_opsd_dllm_trajectory_7b] ERROR: STUDENT_BACKEND must be 'dream' or 'llada' (got '$STUDENT_BACKEND')" >&2
     exit 1
@@ -61,6 +64,7 @@ fi
 MODEL_NAME="${MODEL_NAME:-$DEFAULT_MODEL_NAME}"
 MASK_TOKEN_ID="${MASK_TOKEN_ID:-$DEFAULT_MASK_TOKEN_ID}"
 ATTN_IMPL="${ATTN_IMPL:-$DEFAULT_ATTN_IMPL}"
+GRAD_CKPT="${GRAD_CKPT:-$DEFAULT_GRAD_CKPT}"
 
 # --- Trajectory knobs ---------------------------------------------------------
 TRAJ_MASK_THRESHOLD="${TRAJ_MASK_THRESHOLD:-0.5}"
@@ -130,7 +134,7 @@ accelerate launch \
     --learning_rate 2e-5 \
     --max_grad_norm 1.0 \
     --per_device_train_batch_size 4 \
-    --gradient_checkpointing \
+    --gradient_checkpointing "$GRAD_CKPT" \
     --output_dir ./outputs/opsd_dllm_trajectory/ \
     --run_config "$RUN_CONFIG" \
     --num_train_epochs 3 \
