@@ -44,14 +44,19 @@ STUDENT_BACKEND="${STUDENT_BACKEND:-dream}"
 if [[ "$STUDENT_BACKEND" == "llada" ]]; then
     DEFAULT_MODEL_NAME="GSAI-ML/LLaDA-8B-Instruct"
     BACKEND_TAG="llada8b"
+    # LLaDA's tokenizer does NOT expose mask_token_id; its [MASK] id is 126336.
+    DEFAULT_MASK_TOKEN_ID=126336
 elif [[ "$STUDENT_BACKEND" == "dream" ]]; then
     DEFAULT_MODEL_NAME="Dream-org/Dream-v0-Instruct-7B"
     BACKEND_TAG="dream7b"
+    # Dream's tokenizer exposes mask_token_id; -1 = use tokenizer default.
+    DEFAULT_MASK_TOKEN_ID=-1
 else
     echo "[run_opsd_dllm_trajectory_7b] ERROR: STUDENT_BACKEND must be 'dream' or 'llada' (got '$STUDENT_BACKEND')" >&2
     exit 1
 fi
 MODEL_NAME="${MODEL_NAME:-$DEFAULT_MODEL_NAME}"
+MASK_TOKEN_ID="${MASK_TOKEN_ID:-$DEFAULT_MASK_TOKEN_ID}"
 
 # --- Trajectory knobs ---------------------------------------------------------
 TRAJ_MASK_THRESHOLD="${TRAJ_MASK_THRESHOLD:-0.5}"
@@ -116,6 +121,7 @@ accelerate launch \
     opsd_dllm_trajectory_train.py \
     --model_name_or_path "$MODEL_NAME" \
     --student_backend "$STUDENT_BACKEND" \
+    --mask_token_id "$MASK_TOKEN_ID" \
     --dataset "$DATASET" \
     --learning_rate 2e-5 \
     --max_grad_norm 1.0 \
