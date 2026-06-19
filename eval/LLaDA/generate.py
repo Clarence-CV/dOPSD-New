@@ -86,9 +86,30 @@ def get_transfer_index(logits, temperature, remasking, mask_index, x, num_transf
     return x0, transfer_index
 
 
+# LLaDA special tokens (see llada_utils.py): EOS = <|endoftext|>, EOT = <|eot_id|>.
+EOS_TOKEN_ID = 126081
+EOT_TOKEN_ID = 126348
+
+
+def _suppress_eos_eot(logits, logits_eos_inf=False, confidence_eos_eot_inf=False):
+    '''Prevent the model from decoding EOS/EOT, mirroring llada_utils.generate.
+
+    logits_eos_inf           -> never decode EOS (126081).
+    confidence_eos_eot_inf   -> never decode EOS (126081) NOR EOT (126348).
+    Modifies `logits` in place (sets the corresponding vocab columns to -inf)
+    so neither argmax nor the confidence/entropy selection can pick them.
+    '''
+    if logits_eos_inf or confidence_eos_eot_inf:
+        logits[..., EOS_TOKEN_ID] = float('-inf')
+    if confidence_eos_eot_inf:
+        logits[..., EOT_TOKEN_ID] = float('-inf')
+    return logits
+
+
 @ torch.no_grad()
 def generate(model, prompt, steps=128, gen_length=128, block_length=128, temperature=0.,
-             remasking='low_confidence', mask_id=126336, threshold=None):
+             remasking='low_confidence', mask_id=126336, threshold=None,
+             logits_eos_inf=False, confidence_eos_eot_inf=False):
     '''
     Args:
         model: Mask predictor.
@@ -100,6 +121,8 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128, tempera
         cfg_scale: Unsupervised classifier-free guidance scale.
         remasking: Remasking strategy. 'low_confidence' or 'random'.
         mask_id: The toke id of [MASK] is 126336.
+        logits_eos_inf: If True, suppress EOS (126081) so it is never decoded.
+        confidence_eos_eot_inf: If True, suppress EOS (126081) and EOT (126348).
     '''
     x = torch.full((1, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
@@ -119,6 +142,7 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128, tempera
             nfe += 1
             mask_index = (x == mask_id)
             logits = model(x).logits
+            logits = _suppress_eos_eot(logits, logits_eos_inf, confidence_eos_eot_inf)
             mask_index[:, prompt.shape[1] + (num_block + 1) * block_length:] = 0
 
             if threshold is not None:
@@ -180,7 +204,8 @@ def get_transfer_index_entropy(logits, temperature, remasking, mask_index, x, nu
 
 @ torch.no_grad()
 def generate_with_prefix_cache(model, prompt, steps=128, gen_length=128, block_length=128, temperature=0.,
-             remasking='low_confidence', mask_id=126336, threshold=None):
+             remasking='low_confidence', mask_id=126336, threshold=None,
+             logits_eos_inf=False, confidence_eos_eot_inf=False):
     '''
     Args:
         model: Mask predictor.
@@ -216,7 +241,8 @@ def generate_with_prefix_cache(model, prompt, steps=128, gen_length=128, block_l
 
         mask_index = (x == mask_id)
         mask_index[:, current_block_end:] = 0
-        x0, transfer_index = get_transfer_index_entropy(output.logits, temperature, remasking, mask_index, x, num_transfer_tokens[:, 0] if threshold is None else None, threshold)
+        block_logits = _suppress_eos_eot(output.logits, logits_eos_inf, confidence_eos_eot_inf)
+        x0, transfer_index = get_transfer_index_entropy(block_logits, temperature, remasking, mask_index, x, num_transfer_tokens[:, 0] if threshold is None else None, threshold)
         x[transfer_index] = x0[transfer_index]
 
         new_past_key_values = []
@@ -235,6 +261,7 @@ def generate_with_prefix_cache(model, prompt, steps=128, gen_length=128, block_l
             mask_index[:, block_length:] = 0
 
             logits = model(x[:, current_block_start:], past_key_values=past_key_values, use_cache=True).logits
+            logits = _suppress_eos_eot(logits, logits_eos_inf, confidence_eos_eot_inf)
 
             logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
             x0 = torch.argmax(logits_with_noise, dim=-1) # b, l
@@ -252,7 +279,8 @@ def generate_with_prefix_cache(model, prompt, steps=128, gen_length=128, block_l
 
 @ torch.no_grad()
 def generate_with_dual_cache(model, prompt, steps=128, gen_length=128, block_length=128, temperature=0.,
-            remasking='low_confidence', mask_id=126336, threshold=None):
+            remasking='low_confidence', mask_id=126336, threshold=None,
+            logits_eos_inf=False, confidence_eos_eot_inf=False):
     '''
     Args:
         model: Mask predictor.
@@ -287,7 +315,8 @@ def generate_with_dual_cache(model, prompt, steps=128, gen_length=128, block_len
         past_key_values = output.past_key_values
         mask_index = (x == mask_id)
         mask_index[:, current_block_end:] = 0
-        x0, transfer_index = get_transfer_index_entropy(output.logits, temperature, remasking, mask_index, x, num_transfer_tokens[:, 0] if threshold is None else None, threshold)
+        block_logits = _suppress_eos_eot(output.logits, logits_eos_inf, confidence_eos_eot_inf)
+        x0, transfer_index = get_transfer_index_entropy(block_logits, temperature, remasking, mask_index, x, num_transfer_tokens[:, 0] if threshold is None else None, threshold)
         x[transfer_index] = x0[transfer_index]
         nfe += 1
 
@@ -299,8 +328,9 @@ def generate_with_dual_cache(model, prompt, steps=128, gen_length=128, block_len
             mask_index = (x[:, current_block_start:current_block_end] == mask_id)
             # cache position is the position between current_block_start and current_block_end
             logits = model(x[:, current_block_start:current_block_end], past_key_values=past_key_values, use_cache=True, replace_position=replace_position).logits
+            logits = _suppress_eos_eot(logits, logits_eos_inf, confidence_eos_eot_inf)
 
-            x0, transfer_index = get_transfer_index_entropy(logits, temperature, remasking, mask_index, 
+            x0, transfer_index = get_transfer_index_entropy(logits, temperature, remasking, mask_index,
                                             x[:, current_block_start:current_block_end], num_transfer_tokens[:, i] if threshold is None else None, threshold)
             x[:, current_block_start:current_block_end][transfer_index] = x0[transfer_index]
             if (x[:, current_block_start:current_block_end] == mask_id).sum() == 0:
