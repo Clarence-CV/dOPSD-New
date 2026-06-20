@@ -23,11 +23,14 @@
 export HF_ALLOW_CODE_EVAL=1
 export HF_DATASETS_TRUST_REMOTE_CODE=true
 
+# Absolute dir of this script (used to register the custom minerva_math500 task).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # --- Model under test ---------------------------------------------------------
 # Merged checkpoint of the trained LLaDA run
 # (run_config: llada8b_traj05-least-endpt_mixchain_forwardbeta0_filterwrong_v2).
 # Must be a FULL merged model dir whose name contains "instruct".
-MODEL_PATH="${MODEL_PATH:-/home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm_trajectory/llada8b_traj05-least-endpt_mixchain_forwardbeta0_filterwrong_v2_800_merge}"
+MODEL_PATH="${MODEL_PATH:-/home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm_trajectory/llada8b_traj05-least-endpt_mixchain_forwardbeta0_filterwrong_v2_1300_merge}"
 GPUS="${GPUS:-0}"
 PORT="${PORT:-29600}"
 # Short tag for output dirs (basename of the model path).
@@ -44,6 +47,7 @@ for TASK in $TASKS; do
   TOP_P=0.9
   TEMPERATURE=0.
   ALG=llada_original
+  INCLUDE_PATH=""   # set for custom (non-installed) lm_eval tasks
   case "$TASK" in
     gsm8k_cot)
       LLADA_TASK=gsm8k
@@ -64,7 +68,19 @@ for TASK in $TASKS; do
       CONFIDENCE_EOS_EOT_INF=False
       NUM_FEWSHOT=0
       ;;
-    minerva_math|minerva_math500)
+    minerva_math500)
+      # MATH-500 subset — custom task registered via --include_path.
+      LLADA_TASK=minerva_math500
+      INCLUDE_PATH="${SCRIPT_DIR}/tasks/minerva_math500"
+      MAX_NEW_TOKENS=512
+      DIFF_STEPS=512
+      BLOCK_LENGTH=64
+      LOGITS_EOS_INF=False
+      CONFIDENCE_EOS_EOT_INF=False
+      NUM_FEWSHOT=0
+      ;;
+    minerva_math)
+      # Full MATH (installed lm_eval task).
       LLADA_TASK=minerva_math
       MAX_NEW_TOKENS=512
       DIFF_STEPS=512
@@ -93,6 +109,7 @@ for TASK in $TASKS; do
 
   CUDA_VISIBLE_DEVICES=${GPUS} accelerate launch --main_process_port ${PORT} eval_llada.py \
     --tasks ${LLADA_TASK} --num_fewshot ${NUM_FEWSHOT} \
+    ${INCLUDE_PATH:+--include_path "${INCLUDE_PATH}"} \
     --confirm_run_unsafe_code --model llada_dist \
     --model_args model_path="${MODEL_PATH}",gen_length=${MAX_NEW_TOKENS},steps=${DIFF_STEPS},block_length=${BLOCK_LENGTH},logits_eos_inf=${LOGITS_EOS_INF},confidence_eos_eot_inf=${CONFIDENCE_EOS_EOT_INF},show_speed=True,task="${LLADA_TASK}" \
     --output_path ${OUT_DIR} --log_samples
