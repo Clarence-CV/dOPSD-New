@@ -37,7 +37,13 @@ cd "$(dirname "$0")/.."   # cd into OPSD/
 
 export TRL_EXPERIMENTAL_SILENCE=1
 export TOKENIZERS_PARALLELISM=false
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1,2,3,4}
+# GPU selection. GPU_IDS drives both the visible devices and accelerate's
+# --gpu_ids; NUM_PROCESSES defaults to the number of ids (one process per GPU).
+#   8x A5000:  GPU_IDS=0,1,2,3,4,5,6,7 ./scripts/run_opsd_dllm_trajectory_7b.sh
+GPU_IDS="${GPU_IDS:-1,2,3,4}"
+IFS=',' read -ra _GPU_ARR <<< "$GPU_IDS"
+NUM_PROCESSES="${NUM_PROCESSES:-${#_GPU_ARR[@]}}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-$GPU_IDS}"
 
 # --- Backend toggle: Dream (default) vs LLaDA ---------------------------------
 STUDENT_BACKEND="${STUDENT_BACKEND:-dream}"
@@ -131,8 +137,8 @@ echo "[run_opsd_dllm_trajectory_7b] attn=$ATTN_IMPL  grad_ckpt=$GRAD_CKPT  per_d
 
 accelerate launch \
     --config_file accelerate.yaml \
-    --num_processes 4 \
-    --gpu_ids 1,2,3,4 \
+    --num_processes "$NUM_PROCESSES" \
+    --gpu_ids "$GPU_IDS" \
     --gradient_accumulation_steps "$GRAD_ACCUM" \
     --main_process_port 13379 \
     opsd_dllm_trajectory_train.py \
@@ -147,7 +153,7 @@ accelerate launch \
     --gradient_checkpointing "$GRAD_CKPT" \
     --output_dir ./outputs/opsd_dllm_trajectory/ \
     --run_config "$RUN_CONFIG" \
-    --num_train_epochs 3 \
+    --num_train_epochs 5 \
     --save_steps 100 \
     --logging_steps 2 \
     --attn_implementation "$ATTN_IMPL" \
