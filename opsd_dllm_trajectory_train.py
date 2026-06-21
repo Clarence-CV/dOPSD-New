@@ -42,7 +42,7 @@ DATASET_REGISTRY = {
         "id": "Zigeng/dParallel_Dream_Distill_Data",
         "problem_field": "question",
         "solution_field": "llm_response",
-        "target_field": None,  # no clean ground-truth answer column
+        "target_field": "gt_answer",  # clean ground-truth answer used to verify rollouts
     },
     "mixchain": {
         "id": "horseee/MixChain-Z-PRM12K",

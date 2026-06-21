@@ -120,8 +120,10 @@ else
     MODE_TAG="filterwrong"
 fi
 
-# --- Dataset toggle: mixchain (default) vs zigeng -----------------------------
-DATASET="${DATASET:-mixchain}"
+# --- Dataset toggle: zigeng (default) vs mixchain -----------------------------
+# zigeng: rollouts are verified against the dataset's "gt_answer" column
+#         (DATASET_REGISTRY target_field in opsd_dllm_trajectory_train.py).
+DATASET="${DATASET:-zigeng}"
 case "$DATASET" in
     zigeng)   DATA_TAG="zigeng" ;;
     mixchain) DATA_TAG="mixchain" ;;
