@@ -30,7 +30,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Merged checkpoint of the trained LLaDA run
 # (run_config: llada8b_traj05-least-endpt_mixchain_forwardbeta0_filterwrong_v2).
 # Must be a FULL merged model dir whose name contains "instruct".
-MODEL_PATH="${MODEL_PATH:-/home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm_trajectory/llada8b_traj05-least-endpt_mixchain_forwardbeta0_filterwrong_v2_1300_merge}"
+MODEL_PATH="${MODEL_PATH:-/home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm_trajectory/llada8b_traj05-least-endpt_mixchain_forwardbeta0_filterwrong_v2_2000_merge}"
 GPUS="${GPUS:-0}"
 PORT="${PORT:-29600}"
 # Short tag for output dirs (basename of the model path).
