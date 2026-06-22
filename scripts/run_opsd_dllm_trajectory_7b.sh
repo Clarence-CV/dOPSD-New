@@ -110,7 +110,7 @@ TRAJ_TAG="traj${TRAJ_MASK_THRESHOLD//./}-${TRAJ_STEP_SELECT}-${VIEW_TAG}"
 # proven single-rollout path; identical machinery to the pre-GRPO trainer.
 USE_GRPO="${USE_GRPO:-true}"
 GRPO_NUM_ROLLOUTS="${GRPO_NUM_ROLLOUTS:-2}"
-GRPO_COEF="${GRPO_COEF:-1.0}"
+GRPO_COEF="${GRPO_COEF:-0.2}"
 # Verify-gated filter: true = wrong rollouts get NO teacher signal (loss 0 there).
 FILTER_WRONG_ROLLOUTS="${FILTER_WRONG_ROLLOUTS:-true}"
 # Mode tag so old-version (filter-only) runs are not mislabeled as GRPO runs.
@@ -119,6 +119,9 @@ if [[ "$USE_GRPO" == "true" ]]; then
 else
     MODE_TAG="filterwrong"
 fi
+
+# Where checkpoints are written: <OUTPUT_DIR>/<RUN_CONFIG>/checkpoint-<step>/
+OUTPUT_DIR="${OUTPUT_DIR:-./outputs/opsd_dllm_trajectory/}"
 
 # --- Dataset toggle: zigeng (default) vs mixchain -----------------------------
 # zigeng: rollouts are verified against the dataset's "gt_answer" column
@@ -153,7 +156,7 @@ accelerate launch \
     --per_device_train_batch_size "$PER_DEVICE_BS" \
     --gradient_accumulation_steps "$GRAD_ACCUM" \
     --gradient_checkpointing "$GRAD_CKPT" \
-    --output_dir ./outputs/opsd_dllm_trajectory/ \
+    --output_dir "$OUTPUT_DIR" \
     --run_config "$RUN_CONFIG" \
     --num_train_epochs 5 \
     --save_steps 100 \
@@ -177,7 +180,7 @@ accelerate launch \
     --traj_teacher_gap "$TRAJ_TEACHER_GAP" \
     --use_grpo "$USE_GRPO" \
     --grpo_num_rollouts "$GRPO_NUM_ROLLOUTS" \
-    --grpo_coef 0.2 \
+    --grpo_coef "$GRPO_COEF" \
     --filter_wrong_rollouts "$FILTER_WRONG_ROLLOUTS" \
     --use_peft \
     --lora_r 32 \
