@@ -74,6 +74,8 @@ class LLaDAEvalHarness(LM):
         show_speed=False,
         dual_cache=False,
         task="null",
+        logits_eos_inf=False,
+        confidence_eos_eot_inf=False,
         **kwargs,
     ):
         '''
@@ -140,6 +142,9 @@ class LLaDAEvalHarness(LM):
         self.show_speed = show_speed
         self.dual_cache = dual_cache
         self.task = task
+        # lm_eval parses "True"/"False" model_args to bool, but guard str just in case.
+        self.logits_eos_inf = logits_eos_inf if isinstance(logits_eos_inf, bool) else str(logits_eos_inf).lower() == "true"
+        self.confidence_eos_eot_inf = confidence_eos_eot_inf if isinstance(confidence_eos_eot_inf, bool) else str(confidence_eos_eot_inf).lower() == "true"
         self.cfg = 0
     @property
     def rank(self):
@@ -331,14 +336,17 @@ class LLaDAEvalHarness(LM):
             input_ids = torch.tensor(input_ids).to(self.device).unsqueeze(0)
             if self.use_cache:
                 if self.dual_cache:
-                    generated_answer, nfe = generate_with_dual_cache(self.model, input_ids, steps=self.steps, gen_length=self.gen_length, block_length=self.block_length, 
-                                        temperature=0, remasking=self.remasking, mask_id=self.mask_id, threshold=self.threshold)
+                    generated_answer, nfe = generate_with_dual_cache(self.model, input_ids, steps=self.steps, gen_length=self.gen_length, block_length=self.block_length,
+                                        temperature=0, remasking=self.remasking, mask_id=self.mask_id, threshold=self.threshold,
+                                        logits_eos_inf=self.logits_eos_inf, confidence_eos_eot_inf=self.confidence_eos_eot_inf)
                 else:
-                    generated_answer, nfe = generate_with_prefix_cache(self.model, input_ids, steps=self.steps, gen_length=self.gen_length, block_length=self.block_length, 
-                                        temperature=0, remasking=self.remasking, mask_id=self.mask_id, threshold=self.threshold)
+                    generated_answer, nfe = generate_with_prefix_cache(self.model, input_ids, steps=self.steps, gen_length=self.gen_length, block_length=self.block_length,
+                                        temperature=0, remasking=self.remasking, mask_id=self.mask_id, threshold=self.threshold,
+                                        logits_eos_inf=self.logits_eos_inf, confidence_eos_eot_inf=self.confidence_eos_eot_inf)
             else:
-                generated_answer, nfe = generate(self.model, input_ids, steps=self.steps, gen_length=self.gen_length, block_length=self.block_length, 
-                                        temperature=0, remasking=self.remasking, mask_id=self.mask_id, threshold=self.threshold)
+                generated_answer, nfe = generate(self.model, input_ids, steps=self.steps, gen_length=self.gen_length, block_length=self.block_length,
+                                        temperature=0, remasking=self.remasking, mask_id=self.mask_id, threshold=self.threshold,
+                                        logits_eos_inf=self.logits_eos_inf, confidence_eos_eot_inf=self.confidence_eos_eot_inf)
 
             if self.is_instruct and 'task_id' in req.doc and str(req.doc['task_id']).lower().startswith('humaneval'):
                 if self.show_speed:

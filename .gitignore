@@ -1,3 +1,5 @@
 __pycache__/
 outputs/
 wandb/
+eval/Dream/eval_instruct/output_reproduce/*
+eval/LLaDA/evals_results/*

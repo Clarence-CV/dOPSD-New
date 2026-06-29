@@ -45,6 +45,7 @@ lm_eval/models/utils.py
 lm_eval/prompts/__init__.py
 lm_eval/tasks/README.md
 lm_eval/tasks/__init__.py
+lm_eval/tasks/__pycache__/__init__.cpython-310.pyc
 lm_eval/tasks/benchmarks/README.md
 lm_eval/tasks/benchmarks/minerva_math.yaml
 lm_eval/tasks/benchmarks/openllm.yaml
@@ -73,6 +74,8 @@ lm_eval/tasks/humaneval/humaneval_instruct_noprefix.yaml
 lm_eval/tasks/humaneval/humaneval_plus.yaml
 lm_eval/tasks/humaneval/sanitize_utils.py
 lm_eval/tasks/humaneval/utils.py
+lm_eval/tasks/humaneval/__pycache__/sanitize_utils.cpython-310.pyc
+lm_eval/tasks/humaneval/__pycache__/utils.cpython-310.pyc
 lm_eval/tasks/mbpp/README.md
 lm_eval/tasks/mbpp/mbpp.yaml
 lm_eval/tasks/mbpp/mbpp_instruct.yaml
@@ -80,6 +83,7 @@ lm_eval/tasks/mbpp/mbpp_plus.yaml
 lm_eval/tasks/mbpp/mbpp_plus_instruct.yaml
 lm_eval/tasks/mbpp/utils.py
 lm_eval/tasks/minerva_math/README.md
+lm_eval/tasks/minerva_math/minerva_math500.yaml
 lm_eval/tasks/minerva_math/minerva_math_algebra.yaml
 lm_eval/tasks/minerva_math/minerva_math_counting_and_prob.yaml
 lm_eval/tasks/minerva_math/minerva_math_geometry.yaml
@@ -88,3 +92,4 @@ lm_eval/tasks/minerva_math/minerva_math_num_theory.yaml
 lm_eval/tasks/minerva_math/minerva_math_prealgebra.yaml
 lm_eval/tasks/minerva_math/minerva_math_precalc.yaml
 lm_eval/tasks/minerva_math/utils.py
+lm_eval/tasks/minerva_math/__pycache__/utils.cpython-310.pyc

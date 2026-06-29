@@ -37,7 +37,13 @@ cd "$(dirname "$0")/.."   # cd into OPSD/
 
 export TRL_EXPERIMENTAL_SILENCE=1
 export TOKENIZERS_PARALLELISM=false
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1,2,3,4}
+# GPU selection. GPU_IDS drives both the visible devices and accelerate's
+# --gpu_ids; NUM_PROCESSES defaults to the number of ids (one process per GPU).
+#   8x A5000:  GPU_IDS=0,1,2,3,4,5,6,7 ./scripts/run_opsd_dllm_trajectory_7b.sh
+GPU_IDS="${GPU_IDS:-0,1,2,3,4,5,6,7}"
+IFS=',' read -ra _GPU_ARR <<< "$GPU_IDS"
+NUM_PROCESSES="${NUM_PROCESSES:-${#_GPU_ARR[@]}}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-$GPU_IDS}"
 
 # --- Backend toggle: Dream (default) vs LLaDA ---------------------------------
 STUDENT_BACKEND="${STUDENT_BACKEND:-dream}"
@@ -48,12 +54,21 @@ if [[ "$STUDENT_BACKEND" == "llada" ]]; then
     DEFAULT_MASK_TOKEN_ID=126336
     # LLaDA's modeling code has no SDPA path — must use eager attention.
     DEFAULT_ATTN_IMPL=eager
+    # LLaDAModelLM does not implement gradient checkpointing.
+    DEFAULT_GRAD_CKPT=false
+    # No grad-ckpt + eager attention => high activation memory. Keep per-device
+    # batch small and recover the effective batch via accumulation (1*4*4procs=16).
+    DEFAULT_PER_DEVICE_BS=1
+    DEFAULT_GRAD_ACCUM=4
 elif [[ "$STUDENT_BACKEND" == "dream" ]]; then
     DEFAULT_MODEL_NAME="Dream-org/Dream-v0-Instruct-7B"
     BACKEND_TAG="dream7b"
     # Dream's tokenizer exposes mask_token_id; -1 = use tokenizer default.
     DEFAULT_MASK_TOKEN_ID=-1
     DEFAULT_ATTN_IMPL=sdpa
+    DEFAULT_GRAD_CKPT=true
+    DEFAULT_PER_DEVICE_BS=4
+    DEFAULT_GRAD_ACCUM=1
 else
     echo "[run_opsd_dllm_trajectory_7b] ERROR: STUDENT_BACKEND must be 'dream' or 'llada' (got '$STUDENT_BACKEND')" >&2
     exit 1
@@ -61,9 +76,12 @@ fi
 MODEL_NAME="${MODEL_NAME:-$DEFAULT_MODEL_NAME}"
 MASK_TOKEN_ID="${MASK_TOKEN_ID:-$DEFAULT_MASK_TOKEN_ID}"
 ATTN_IMPL="${ATTN_IMPL:-$DEFAULT_ATTN_IMPL}"
+GRAD_CKPT="${GRAD_CKPT:-$DEFAULT_GRAD_CKPT}"
+PER_DEVICE_BS="${PER_DEVICE_BS:-$DEFAULT_PER_DEVICE_BS}"
+GRAD_ACCUM="${GRAD_ACCUM:-$DEFAULT_GRAD_ACCUM}"
 
 # --- Trajectory knobs ---------------------------------------------------------
-TRAJ_MASK_THRESHOLD="${TRAJ_MASK_THRESHOLD:-0.5}"
+TRAJ_MASK_THRESHOLD="${TRAJ_MASK_THRESHOLD:-0.75}"
 TRAJ_STEP_SELECT="${TRAJ_STEP_SELECT:-least}"
 # Teacher view: -1 = concrete final rollout (endpoint); n>=0 = trajectory state
 # n steps after the student's step (history[k+n], clamped to the final state).
@@ -90,7 +108,7 @@ TRAJ_TAG="traj${TRAJ_MASK_THRESHOLD//./}-${TRAJ_STEP_SELECT}-${VIEW_TAG}"
 # FILTER_WRONG_ROLLOUTS=true the loss is pure JSD on CORRECT rollouts only —
 # wrong rollouts contribute exactly zero (verify-gated filter). This is the
 # proven single-rollout path; identical machinery to the pre-GRPO trainer.
-USE_GRPO="${USE_GRPO:-true}"
+USE_GRPO="${USE_GRPO:-false}"
 GRPO_NUM_ROLLOUTS="${GRPO_NUM_ROLLOUTS:-2}"
 GRPO_COEF="${GRPO_COEF:-1.0}"
 # Verify-gated filter: true = wrong rollouts get NO teacher signal (loss 0 there).
@@ -113,14 +131,15 @@ case "$DATASET" in
         ;;
 esac
 
-RUN_CONFIG="${BACKEND_TAG}_${TRAJ_TAG}_${DATA_TAG}_forwardbeta0_${MODE_TAG}_v2"
+RUN_CONFIG="${BACKEND_TAG}_${TRAJ_TAG}_${DATA_TAG}_reverseKL_${MODE_TAG}_v2"
 echo "[run_opsd_dllm_trajectory_7b] STUDENT_BACKEND=$STUDENT_BACKEND  MODEL_NAME=$MODEL_NAME  DATASET=$DATASET  TRAJ_MASK_THRESHOLD=$TRAJ_MASK_THRESHOLD  TRAJ_STEP_SELECT=$TRAJ_STEP_SELECT  run_config=$RUN_CONFIG"
+echo "[run_opsd_dllm_trajectory_7b] attn=$ATTN_IMPL  grad_ckpt=$GRAD_CKPT  per_device_bs=$PER_DEVICE_BS  grad_accum=$GRAD_ACCUM  mask_token_id=$MASK_TOKEN_ID"
 
 accelerate launch \
     --config_file accelerate.yaml \
-    --num_processes 4 \
-    --gpu_ids 1,2,3,4 \
-    --gradient_accumulation_steps 1 \
+    --num_processes "$NUM_PROCESSES" \
+    --gpu_ids "$GPU_IDS" \
+    --gradient_accumulation_steps "$GRAD_ACCUM" \
     --main_process_port 13379 \
     opsd_dllm_trajectory_train.py \
     --model_name_or_path "$MODEL_NAME" \
@@ -129,11 +148,12 @@ accelerate launch \
     --dataset "$DATASET" \
     --learning_rate 2e-5 \
     --max_grad_norm 1.0 \
-    --per_device_train_batch_size 4 \
-    --gradient_checkpointing \
+    --per_device_train_batch_size "$PER_DEVICE_BS" \
+    --gradient_accumulation_steps "$GRAD_ACCUM" \
+    --gradient_checkpointing "$GRAD_CKPT" \
     --output_dir ./outputs/opsd_dllm_trajectory/ \
     --run_config "$RUN_CONFIG" \
-    --num_train_epochs 3 \
+    --num_train_epochs 5 \
     --save_steps 100 \
     --logging_steps 2 \
     --attn_implementation "$ATTN_IMPL" \
@@ -146,7 +166,7 @@ accelerate launch \
     --gen_top_p 0.95 \
     --gen_alg entropy \
     --gen_alg_temp 0.5 \
-    --beta 0 \
+    --beta 1 \
     --temperature 1.0 \
     --sampling_eps 1e-3 \
     --traj_mask_threshold "$TRAJ_MASK_THRESHOLD" \
