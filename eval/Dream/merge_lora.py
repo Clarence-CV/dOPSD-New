@@ -25,12 +25,12 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(name, trust_remote_code=True)
 
-    peft_model = PeftModel.from_pretrained(base_model, "/home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm_trajectory/dream7b_traj05-least-allfut_zigeng_forwardbeta0_filterwrong_v2/checkpoint-1600")
+    peft_model = PeftModel.from_pretrained(base_model, "/home/tuan/local_home/ptuandat/on_policy_self_distill_dLLM/outputs/opsd_dllm_trajectory/dream7b_traj05-least-allfut_mixchain_reverseKL_filterwrong_v2/checkpoint-600")
 
     merged_model = peft_model.merge_and_unload()
     
-    merged_model.save_pretrained("/home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm_trajectory/dream7b_traj05-least-allfut_zigeng_forwardbeta0_filterwrong_v2_1600_merge")
-    tokenizer.save_pretrained("/home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm_trajectory/dream7b_traj05-least-allfut_zigeng_forwardbeta0_filterwrong_v2_1600_merge")
+    merged_model.save_pretrained("/home/tuan/local_home/ptuandat/on_policy_self_distill_dLLM/outputs/opsd_dllm_trajectory/eval_checkpoint/Dream/dream7b_traj05-least-allfut_mixchain_reverseKL_filterwrong_v2_500")
+    tokenizer.save_pretrained("/home/tuan/local_home/ptuandat/on_policy_self_distill_dLLM/outputs/opsd_dllm_trajectory/eval_checkpoint/Dream/dream7b_traj05-least-allfut_mixchain_reverseKL_filterwrong_v2_500")
 
 
 if __name__ == "__main__":

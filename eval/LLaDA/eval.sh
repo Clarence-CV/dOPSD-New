@@ -30,15 +30,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Merged checkpoint of the trained LLaDA run
 # (run_config: llada8b_traj05-least-endpt_mixchain_forwardbeta0_filterwrong_v2).
 # Must be a FULL merged model dir whose name contains "instruct".
-MODEL_PATH="${MODEL_PATH:-/home/stud_dat/on_policy_self_distill_dLLM/outputs/opsd_dllm_trajectory/llada8b_traj05-least-endpt_mixchain_forwardbeta0_filterwrong_v2_2000_merge}"
-GPUS="${GPUS:-0}"
+MODEL_PATH="${MODEL_PATH:-/home/tuan/local_home/ptuandat/on_policy_self_distill_dLLM/outputs/opsd_dllm_trajectory/eval_checkpoint/LLaDa/llada8b_traj05-least-allfut_mixchain_forwardbeta0_filterwrong_v2_1500}"
+GPUS="${GPUS:-6}"
 PORT="${PORT:-29600}"
 # Short tag for output dirs (basename of the model path).
 TAG="$(basename "$MODEL_PATH")"
 OUT_ROOT="${OUT_ROOT:-evals_results/$TAG}"
 
 # Tasks to run (use the Dream-style labels; mapped to LLaDA task names below).
-TASKS="${TASKS:-gsm8k_cot minerva_math500 humaneval_instruct mbpp_instruct}"
+TASKS="${TASKS:-gsm8k_cot}"
+#TASKS="${TASKS:-minerva_math500 humaneval_instruct mbpp_instruct}"
 
 echo "[eval/LLaDA] MODEL_PATH=$MODEL_PATH  GPUS=$GPUS  OUT_ROOT=$OUT_ROOT  TASKS='$TASKS'"
 
