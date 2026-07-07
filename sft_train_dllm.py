@@ -1,16 +1,9 @@
 """Entry point: vanilla SFT training for diffusion LLMs (e.g. Dream-7B).
 
-Mirrors `sft_train.py` but replaces the autoregressive cross-entropy with the
-LLaDA-style masked-token objective used by diffusion LMs:
-
-    For each example, sample a mask rate t ~ U[eps, 1]. Mask each answer
-    token independently with probability t (replacing it with <mask>). Run
-    a bidirectional forward pass over [prompt | noisy_answer] and compute
-    cross-entropy on the masked answer positions, weighted by 1/t (the
-    diffusion ELBO importance weight).
-
-Prompt tokens and right-pad tokens in the answer span are never masked and
-never contribute to the loss.
+LLaDA-style masked-token objective: per example sample mask rate t ~ U[eps, 1],
+mask each answer token i.i.d. with prob t, bidirectional forward over
+[prompt | noisy_answer], CE on masked answer positions weighted by 1/t (the
+diffusion ELBO importance weight). Prompt and right-pad tokens are never masked.
 """
 
 import os
@@ -38,22 +31,9 @@ from trl import (
 os.environ.setdefault("TRACKIO_SPACE_ID", "trl-trackio")
 
 
-# === SFT training data ========================================================
-# Each row must yield a `problem` (prompt) and a `solution` (supervised target).
-# DATASET_REGISTRY maps a --dataset choice to its hub id and the source columns
-# that play those two roles; the loader renames them to `problem`/`solution` and
-# drops the rest, so adding a dataset is just one entry here.
-#   * zigeng   — Zigeng's dParallel reformat of OpenThoughts. `llm_response` is
-#                the teacher's full CoT (final-answer-only fields are dropped).
-#   * mixchain — horseee/MixChain-Z-PRM12K. `answer` is the reference \boxed{}
-#                solution; the alternative solution_0..4 / token / correctness
-#                columns are dropped.
+# Maps a --dataset choice to its hub id + source columns for `problem`/`solution`;
+# the loader renames them and drops the rest, so adding a dataset is one entry.
 DATASET_REGISTRY = {
-    "zigeng": {
-        "id": "Zigeng/dParallel_Dream_Distill_Data",
-        "problem_field": "question",
-        "solution_field": "llm_response",
-    },
     "mixchain": {
         "id": "horseee/MixChain-Z-PRM12K",
         "problem_field": "question",
@@ -72,8 +52,7 @@ class DLLMScriptArguments(ScriptArguments):
         default=DEFAULT_DATASET,
         metadata={
             "help": "Training dataset key from DATASET_REGISTRY. "
-            f"Choices: {sorted(DATASET_REGISTRY)}. 'zigeng' = dParallel OpenThoughts "
-            "reformat (default); 'mixchain' = horseee/MixChain-Z-PRM12K "
+            f"Choices: {sorted(DATASET_REGISTRY)}. 'mixchain' = horseee/MixChain-Z-PRM12K "
             "(question -> problem, answer -> solution)."
         },
     )
@@ -149,10 +128,9 @@ class DLLMScriptArguments(ScriptArguments):
 class SFTDLLMDataCollator:
     """Builds `[prompt | answer]` per example with an answer-region label mask.
 
-    Padding strategy follows `SelfDistillationDLLMDataCollator`: prompts are
-    left-padded, answers are right-padded, so pad tokens sit only on the outer
-    edges of the concatenated sequence — never between prompt and answer. This
-    matters because diffusion LMs use bidirectional attention.
+    Prompts left-padded, answers right-padded, so pad tokens sit only on the
+    outer edges (never between prompt and answer) — matters for bidirectional
+    attention.
     """
 
     def __init__(
@@ -210,13 +188,13 @@ class SFTDLLMDataCollator:
 
             input_ids[i, max_p:max_p + len(a)] = torch.tensor(a, dtype=torch.long)
             attention_mask[i, max_p:max_p + len(a)] = 1
-            answer_mask[i, max_p:max_p + len(a)] = 1  # real (non-pad) answer tokens
+            answer_mask[i, max_p:max_p + len(a)] = 1  # non-pad answer tokens
 
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "answer_mask": answer_mask,
-            "labels": input_ids.clone(),  # placeholder; trainer overrides with masked targets
+            "labels": input_ids.clone(),  # placeholder; trainer overrides
         }
 
 
@@ -247,32 +225,20 @@ class SFTDLLMTrainer(Trainer):
         self.diffusion_max_t = float(diffusion_max_t)
 
     def _sample_answer_mask(self, answer_mask: torch.Tensor):
-        """Sample a mask over the answer span according to `self.mask_schedule`.
+        """Sample a mask over the answer span per `self.mask_schedule`.
 
-        Returns:
-            mask:           [B, L] bool — True at positions to replace with <mask>.
-            p_mask_sample:  [B]    float — per-example mask rate (used as 1/t
-                            ELBO importance weight in compute_loss; in fixed
-                            mode this is just the constant fixed_mask_ratio).
-
-        Strategies (mirror OPSDDLLMTrainer):
-            "diffusion" — antithetic per-example rate, i.i.d. Bernoulli over
-                          valid positions. The LLaDA ELBO default.
-            "fixed"     — exact-count: pick k = round(n_valid * mask_ratio)
-                          positions uniformly without replacement per example.
-                          (1/t weight becomes the constant 1/mask_ratio.)
-
-        Both schedules enforce ≥1 masked position per non-empty row so the
-        loss is always well-defined.
+        Returns mask [B, L] bool (positions to replace with <mask>) and
+        p_mask_sample [B] float (per-example mask rate, used as the 1/t ELBO
+        weight in compute_loss; constant fixed_mask_ratio in fixed mode).
+        Both schedules enforce >=1 masked position per non-empty row.
         """
         if self.mask_schedule == "fixed":
             mask, p_mask_sample = self._fixed_mask(answer_mask)
         else:
             mask, p_mask_sample = self._diffusion_mask(answer_mask)
 
-        # Guarantee at least one masked position per example with valid tokens
-        # so the loss is well-defined. Done once here so each strategy doesn't
-        # have to re-implement it.
+        # Guarantee >=1 masked position per non-empty row so the loss is defined
+        # (done once here rather than per strategy).
         valid = answer_mask.bool()
         B = valid.shape[0]
         device = answer_mask.device
@@ -286,11 +252,10 @@ class SFTDLLMTrainer(Trainer):
     def _diffusion_mask(self, answer_mask: torch.Tensor):
         """Antithetic per-example mask rate, i.i.d. Bernoulli per valid position.
 
-        Pair (2k, 2k+1) shares a base draw u_k: example 2k gets t = u_k and
-        example 2k+1 gets t = 1 - u_k. Variance reduction requires both halves
-        of a pair to come from the SAME u_k. The rate is then mapped from
-        [0, 1] to [max(diffusion_min_t, sampling_eps), diffusion_max_t] —
-        preserves the original (1 - eps)·t + eps formula when min_t=0, max_t=1.
+        Pair (2k, 2k+1) shares base draw u_k: t=u_k and t=1-u_k (both halves must
+        share u_k for the variance reduction). Rate then mapped [0,1] ->
+        [max(diffusion_min_t, sampling_eps), diffusion_max_t]; equals the original
+        (1-eps)*t + eps when min_t=0, max_t=1.
         """
         B, L = answer_mask.shape
         device = answer_mask.device
@@ -316,11 +281,9 @@ class SFTDLLMTrainer(Trainer):
     def _fixed_mask(self, answer_mask: torch.Tensor):
         """Exact-count masking: k = round(n_valid * fixed_mask_ratio) per example.
 
-        Mirrors OPSDDLLMTrainer._fixed_mask. fixed_mask_ratio is a single float
-        ("0.75") or a "lo:hi" range ("0.25:0.75"); in the range case one ratio
-        is sampled per call and applied uniformly across the batch. For each
-        example, k positions are drawn uniformly without replacement from the
-        answer span.
+        fixed_mask_ratio is a float ("0.75") or "lo:hi" range ("0.25:0.75"); a
+        range samples one ratio per call applied batch-wide. k positions drawn
+        uniformly without replacement from each answer span.
         """
         B, L = answer_mask.shape
         device = answer_mask.device
@@ -352,8 +315,7 @@ class SFTDLLMTrainer(Trainer):
         return float(s)
 
     def _forward(self, model, input_ids, attention_mask):
-        # Dream's modeling_dream.py passes attention_mask straight to SDPA, so
-        # expand (B, L) → (B, 1, 1, L). See OPSDDLLMTrainer._forward.
+        # Dream passes attention_mask straight to SDPA, so expand (B,L) -> (B,1,1,L).
         if attention_mask is not None and attention_mask.dim() == 2:
             attention_mask = attention_mask[:, None, None, :].bool()
         return model(input_ids=input_ids, attention_mask=attention_mask)
@@ -371,30 +333,24 @@ class SFTDLLMTrainer(Trainer):
         )
 
         outputs = self._forward(model, noisy_input_ids, attention_mask)
-        # Dream causal convention: raw logits[i] is the prediction slot for
-        # token[i+1]. Right-shift so logits[i] aligns with token[i] before the
-        # masked-position loss. Mirrors OPSDDLLMTrainer._shift_logits_dream;
-        # without it the loss is misaligned by one position and the SFT model
-        # ends up inconsistent with Dream's diffusion_generate.
+        # Dream convention: raw logits[i] predicts token[i+1]. Right-shift so
+        # logits[i] aligns with token[i]; without it the loss is off by one and
+        # the model becomes inconsistent with Dream's diffusion_generate.
         logits = outputs.logits  # [B, L, V]
         logits = torch.cat([logits[:, :1], logits[:, :-1]], dim=1)
 
-        # Loss only on the masked answer positions. Canonical LLaDA ELBO term:
-        # per example, (1/t) * SUM of CE over masked tokens, normalized by the
-        # example's answer length (constant w.r.t. the random mask), then mean
-        # over the batch. Normalizing by the *masked-token count* would be wrong
-        # — that count is proportional to t, so it cancels (in fact double-
-        # counts) the explicit 1/t weight and over-weights low-mask examples.
+        # LLaDA ELBO: per example (1/t)*SUM CE over masked tokens, normalized by
+        # answer length (constant w.r.t. the mask), then batch-mean. Normalizing
+        # by masked-token count would be wrong — that count ~ t, cancelling the
+        # explicit 1/t weight and over-weighting low-mask examples.
         flat_logits = logits[mask]                    # [N, V]
         flat_targets = input_ids[mask]                # [N]
         per_token_ce = F.cross_entropy(flat_logits.float(), flat_targets, reduction="none")  # [N]
 
         B = input_ids.size(0)
-        # Pair each masked token with its example's 1/t ELBO importance weight.
-        ex_idx = mask.nonzero(as_tuple=False)[:, 0]   # [N] which row each masked token came from
-        weights = (1.0 / p_mask.float())[ex_idx].to(per_token_ce.dtype)  # [N]
+        ex_idx = mask.nonzero(as_tuple=False)[:, 0]   # [N] source row of each masked token
+        weights = (1.0 / p_mask.float())[ex_idx].to(per_token_ce.dtype)  # [N] 1/t ELBO weight
 
-        # Per-example (1/t)-weighted SUM of CE, normalized by answer length.
         answer_lengths = answer_mask.sum(dim=1).to(per_token_ce.dtype)  # [B]
         per_ex_loss = torch.zeros(B, device=input_ids.device, dtype=per_token_ce.dtype)
         per_ex_loss.index_add_(0, ex_idx, (per_token_ce * weights).to(per_ex_loss.dtype))
@@ -455,13 +411,11 @@ if __name__ == "__main__":
     parser = TrlParser((DLLMScriptArguments, SFTConfig, ModelConfig))
     script_args, training_args, model_args = parser.parse_args_and_config()
 
-    # Dream is a diffusion LM, not an AR causal LM. Use the generic PEFT wrapper
-    # so attribute access (e.g. diffusion_generate) delegates to the base model.
+    # Dream is a diffusion LM; use the generic PEFT wrapper so attribute access
+    # (e.g. diffusion_generate) delegates to the base model.
     model_args.lora_task_type = None
 
-    ################
     # WandB Run Name
-    ################
     model_name = model_args.model_name_or_path.split("/")[-1]
     lr_str = f"{training_args.learning_rate:.0e}".replace("e-0", "e-")
     num_processes = int(os.environ.get("WORLD_SIZE", 1))
@@ -477,9 +431,7 @@ if __name__ == "__main__":
     if script_args.run_config and not training_args.output_dir.endswith(script_args.run_config):
         training_args.output_dir = str(Path(training_args.output_dir) / script_args.run_config)
 
-    ################
     # WandB Initialization
-    ################
     wandb_config = {
         "model_name": model_args.model_name_or_path,
         "learning_rate": training_args.learning_rate,
@@ -504,9 +456,7 @@ if __name__ == "__main__":
     init_wandb_or_disable(script_args, training_args, full_wandb_run_name, wandb_config)
     training_args.remove_unused_columns = False
 
-    ################
     # Tokenizer
-    ################
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.model_name_or_path,
         revision=model_args.model_revision,
@@ -522,9 +472,7 @@ if __name__ == "__main__":
         raise ValueError("Tokenizer has no mask_token_id; pass --mask_token_id explicitly.")
     print(f"[sft_train_dllm] Using mask_token_id = {mask_token_id}")
 
-    ################
     # Model
-    ################
     model_dtype = _resolve_dtype(model_args)
     model_kwargs = dict(
         revision=model_args.model_revision,
@@ -545,7 +493,7 @@ if __name__ == "__main__":
         model = AutoModel.from_pretrained(model_args.model_name_or_path, **model_kwargs)
 
     if training_args.gradient_checkpointing:
-        # use_reentrant=False required for PEFT/LoRA — see opsd_dllm_train.py for context.
+        # use_reentrant=False required for PEFT/LoRA.
         model.gradient_checkpointing_enable(
             gradient_checkpointing_kwargs={"use_reentrant": False}
         )
@@ -553,9 +501,7 @@ if __name__ == "__main__":
     # Avoid HF Trainer trying to re-load the model from a string path.
     training_args.model_init_kwargs = None
 
-    ################
     # Dataset
-    ################
     if script_args.dataset not in DATASET_REGISTRY:
         raise ValueError(
             f"--dataset must be one of {sorted(DATASET_REGISTRY)} (got {script_args.dataset!r})."
@@ -566,9 +512,7 @@ if __name__ == "__main__":
     print(f"    {src_problem!r} -> {PROBLEM_FIELD!r}  /  {src_solution!r} -> {SOLUTION_FIELD!r}")
     dataset = load_dataset(ds_cfg["id"])
     train_dataset = dataset["train"]
-    # Rename the dataset's problem/solution columns to the canonical
-    # `problem`/`solution` the collator consumes, then drop every other column
-    # (final-answer-only fields, alternative solutions, token counts, ...).
+    # Rename problem/solution to canonical names, drop every other column.
     missing = [c for c in (src_problem, src_solution) if c not in train_dataset.column_names]
     if missing:
         raise ValueError(
@@ -583,18 +527,14 @@ if __name__ == "__main__":
     train_dataset = split_dataset["train"]
     eval_dataset = split_dataset["test"]
 
-    ################
     # Collator
-    ################
     data_collator = SFTDLLMDataCollator(
         tokenizer=tokenizer,
         max_prompt_length=script_args.max_prompt_length,
         max_answer_length=script_args.max_answer_length,
     )
 
-    ################
     # Training
-    ################
     peft_config = get_peft_config(model_args)
     if peft_config is not None:
         from peft import get_peft_model

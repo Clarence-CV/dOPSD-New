@@ -6,45 +6,23 @@ from data_collator_dllm import SelfDistillationDLLMDataCollator
 class SelfDistillationDLLMTrajectoryDataCollator(SelfDistillationDLLMDataCollator):
     """Collator for trajectory-OPSD (see opsd_dllm_trajectory_trainer.py).
 
-    In trajectory mode the teacher's privileged information is the student's own
-    decoding trajectory (its decoding-step / final-rollout tokens), NOT the
-    dataset's ground-truth solution — so `solution` is dropped from the teacher
-    prompt.
+    Here the teacher's privilege is the student's own decoding trajectory, not
+    the dataset solution, so `solution` is dropped from the teacher prompt.
 
-    DEFAULT (recommended): NO framing. The teacher prompt is exactly the student
-    prompt (problem only + assistant header), and the trainer appends the runtime
-    decoding step as the assistant response:
+    DEFAULT (recommended): NO framing — teacher prompt == student prompt
+    (problem + assistant header); the trainer appends the decoding step as the
+    assistant response: `[ teacher_prompt(problem) | <decoding step> ]`. This
+    keeps the teacher input in the model's native decode format, so privilege
+    comes purely from the completion tokens with no OOD prompt text.
 
-        [ teacher_prompt(problem) | <decoding step> ]
-
-    This keeps the teacher input in the model's NATIVE decode format
-    (`[problem][partial completion]`) — the same format it sees at inference — so
-    the teacher understands the decoding step in-distribution and the privilege
-    comes purely from the completion tokens, with no out-of-distribution prompt
-    text and no teacher/student conditioning mismatch.
-
-    OPTIONAL (ablation only): pass non-empty `decode_intro_prompt` and/or
-    `transition_prompt` to wrap the step (mirroring `data_collator.py`'s
-    `reason_first`):
-
-        [ teacher_prompt(problem + decode_intro_prompt) | <decoding step> | transition_prompt ]
-
-      * `decode_intro_prompt`  — folded into the teacher's chat-templated prompt
-        (text BEFORE the step).
-      * `transition_prompt`    — emitted as `teacher_transition_input_ids`, which
-        the trainer appends AFTER the step.
-
-    Both add prompt text the model never saw during training/generation, so they
-    are out-of-distribution and disabled by default. The student side is always
-    unchanged (problem only), so the completion spans stay directly comparable.
+    OPTIONAL (ablation): non-empty `decode_intro_prompt` (folded into the prompt,
+    before the step) and/or `transition_prompt` (emitted as
+    `teacher_transition_input_ids`, appended after the step). Both add OOD prompt
+    text, so they are off by default. The student side is always unchanged.
     """
 
-    # Optional framing templates (OFF by default). The recommended/default setup
-    # is NO framing: the teacher's input is the same in-distribution format the
-    # model actually decodes in — `[problem][partial completion]` — so the
-    # privilege comes purely from the completion (decoding-step) tokens, not from
-    # out-of-distribution prompt text. Pass a non-empty string (or None to use
-    # these templates) only for ablations.
+    # Framing templates, OFF by default (see class docstring); non-empty / None
+    # only for ablations.
     DEFAULT_DECODE_INTRO_PROMPT = (
         "A complete, step-by-step solution to this problem is provided below as the "
         "response. Every step of it is correct and it reaches the right final answer. "
@@ -73,11 +51,6 @@ class SelfDistillationDLLMTrajectoryDataCollator(SelfDistillationDLLMDataCollato
             problem_field=problem_field,
             solution_field=solution_field,
         )
-        # Dataset column holding the clean ground-truth final answer (e.g.
-        # MixChain's `target` = "18"). When present it is tokenized and emitted as
-        # `target_input_ids`/`target_attention_mask` so the trainer can verify the
-        # student rollout directly against it (no extraction from the long
-        # solution). None = not available (trainer falls back to the solution box).
         self.target_field = target_field
         # "" (default) = OFF; None = use the DEFAULT_* template; any string = that text.
         self.decode_intro_prompt = (
@@ -87,7 +60,7 @@ class SelfDistillationDLLMTrajectoryDataCollator(SelfDistillationDLLMDataCollato
             self.DEFAULT_TRANSITION_PROMPT if transition_prompt is None else transition_prompt
         )
 
-        # Pre-tokenize the transition once (identical for every example).
+        # Pre-tokenize once (identical for every example).
         self._transition_ids = self.tokenizer(
             self.transition_prompt,
             padding=False,
@@ -110,11 +83,6 @@ class SelfDistillationDLLMTrajectoryDataCollator(SelfDistillationDLLMDataCollato
             )
 
     def _build_teacher_prompt(self, problem: str, solution: str) -> str:
-        # Privilege comes from the decoding trajectory, not the GT solution, so
-        # `solution` is intentionally unused. With the default (no intro), the
-        # teacher prompt is exactly the student prompt; `add_generation_prompt=True`
-        # ends it at the assistant header, after which the trainer appends the
-        # decoding step as the (privileged) assistant response.
         user_message = f"{problem}\n\n{self.decode_intro_prompt}".rstrip() if self.decode_intro_prompt else problem
         return self.tokenizer.apply_chat_template(
             [{"role": "user", "content": user_message}],
@@ -125,15 +93,13 @@ class SelfDistillationDLLMTrajectoryDataCollator(SelfDistillationDLLMDataCollato
     def __call__(self, features):
         result = super().__call__(features)
 
-        # Emit the transition tokens for the trainer to append after the decoding
-        # step. Identical text for every example, so no padding is needed.
         if len(self._transition_ids) > 0:
             B = len(features)
             trans = torch.tensor([list(self._transition_ids)] * B, dtype=torch.long)
             result["teacher_transition_input_ids"] = trans
             result["teacher_transition_attention_mask"] = torch.ones_like(trans)
 
-        # Emit the ground-truth final answer (`target`) for rollout verification.
+        # Ground-truth final answer (`target`) for rollout verification.
         if self.target_field is not None and self.target_field in features[0]:
             targets = [str(f[self.target_field]) for f in features]
             t_ids = self.tokenizer(

@@ -1,5 +1,4 @@
-# Self-Distilled Reasoner: On-Policy Self-Distillation for Large Language Models
-
+# On-Policy Self-Distillation for Diffusion LLMs (dLLM)
 
 <p align="center">
 <a href="https://arxiv.org/pdf/2601.18734v3"><img src="https://img.shields.io/badge/arXiv-2601.18734-b31b1b.svg"></a>
@@ -9,152 +8,158 @@
 ---
 ## Overview
 
-**On-Policy Self-Distillation (OPSD)** trains a single model to act as both student and teacher by conditioning on different contexts — the student sees only the problem, while the teacher additionally sees the ground-truth solution — and performs token-level distribution matching along the student's own on-policy trajectories.
+This repository adapts **On-Policy Self-Distillation (OPSD)** to **masked diffusion
+language models** (dLLMs) such as [Dream-7B](https://huggingface.co/Dream-org/Dream-v0-Instruct-7B)
+and [LLaDA-8B](https://huggingface.co/GSAI-ML/LLaDA-8B-Instruct).
 
+A single model plays both **student** and **teacher**. The student conditions on a
+*noisy / partially-masked* view of its own generation; the teacher conditions on
+*privileged information* (the ground-truth solution, or the concrete final
+rollout). We then perform token-level distribution matching at the masked
+positions, along the student's **own on-policy decoding path** — so the
+supervision is drawn from states the model actually visits at inference rather
+than from externally-injected noise.
 
-## Updates
+Two on-policy variants are provided:
 
-- **Mar 18, 2026**: Released updated code. 
-
-  (1) Fixed chat template and zero2 bugs (see [template issue](https://github.com/huggingface/trl/issues/5241)), we re-ran experiments with updated results (detailed results & ablations updated on arxiv/blog). The fixes yield improved OPSD performance, most notably on Qwen3-1.7B.
-
-  (2) Added a new training stabilization strategy 🚀: per-token point-wise KL clipping. We find style tokens (such as 'wait', 'think') can exhibit 6–15× higher KL divergence than math-related tokens, and dominates the training signal. Clipping stablizes training and improves performance.
-
-
--  **Mar 3, 2026**: Initial code release.
+- **Remask OPSD** (`opsd_dllm_train.py`) — the student rolls out a completion,
+  a subset of its positions is re-masked, and the teacher (optionally seeing the
+  reference solution) supervises the masked tokens.
+- **Trajectory OPSD** (`opsd_dllm_trajectory_train.py`) — the student's noisy view
+  is a **real intermediate decoding step** (a partial state from the diffusion
+  trajectory), and the teacher sees the **concrete final rollout**. This keeps
+  the supervision exactly on the model's confidence-ordered decoding schedule.
 
 ## Installation
 
-
 ```bash
-conda env create -f environment.yml
+conda env create -f environment.yaml
 conda activate opsd
 ```
 
-```bash
-pip install flash-attn==2.8.3 --no-build-isolation
-```
-If you encounter difficulties installing flash-attn, you can check the version matching your CUDA and PyTorch versions from the [flash-attention releases page](https://github.com/Dao-AILab/flash-attention/releases).
+Dream-7B is run with `sdpa` attention (it is **not** safe with
+`flash_attention_2`), so a FlashAttention install is not required.
 
-The code uses `trl`'s experimental GOLD trainer as a base.
+The trainer builds on `trl`'s experimental GOLD/distillation machinery.
 
 ## Repository Structure
 
 ```
-├── opsd_trainer.py          # OPSDTrainer: core self-distillation trainer
-├── data_collator.py         # Data collator for self-distillation
-├── opsd_train.py            # OPSD training entry point
-├── sft_train.py             # SFT baseline training entry point
-├── grpo_train.py            # GRPO baseline training entry point
-├── accelerate.yaml          # Accelerate config (multi-GPU)
+├── opsd_dllm_trainer.py              # Remask OPSD trainer (Dream / LLaDA)
+├── opsd_dllm_train.py                # Remask OPSD entry point
+├── data_collator_dllm.py             # Collator for remask OPSD
+├── opsd_dllm_trajectory_trainer.py   # Trajectory OPSD trainer (on decoding-path)
+├── opsd_dllm_trajectory_train.py     # Trajectory OPSD entry point
+├── data_collator_dllm_trajectory.py  # Collator for trajectory OPSD
+├── sft_train_dllm.py                 # SFT baseline (masked-prediction loss)
+├── llada_utils.py                    # LLaDA sampling / masking helpers
+├── accelerate.yaml                   # Accelerate config (multi-GPU)
 ├── scripts/
-│   ├── run_opsd.sh          # Example launch script for OPSD
-│   ├── run_sft.sh           # Example launch script for SFT
-│   └── run_grpo.sh          # Example launch script for GRPO
+│   ├── run_opsd_dllm_7b.sh           # Launch remask OPSD (Dream-7B / LLaDA-8B)
+│   ├── run_opsd_dllm_trajectory_7b.sh# Launch trajectory OPSD
+│   └── run_sft_dllm.sh               # Launch SFT baseline
 └── eval/
-    ├── evaluate_math.py     # Evaluation script (vLLM)
-    └── run_eval.sh          # Example evaluation script
+    ├── Dream/                        # Dream eval (lm-eval harness + LoRA merge)
+    │   ├── eval_instruct/eval.sh     # gsm8k / math500 / humaneval / mbpp
+    │   └── merge_lora.py             # Merge a LoRA adapter into the base model
+    ├── LLaDA/                        # LLaDA eval
+    └── run_eval_dllm.sh              # Quick GSM8K Avg@1 launcher
 ```
 
 ## Quick Start
 
-Reproduce results on Qwen3-1.7B (🚀 training only takes **~15 minutes** on 4×H100 and peaks within 100 steps):
+### 1. Train
 
 ```bash
-bash scripts/run_opsd_1b.sh
+# Trajectory OPSD on Dream-7B (recommended; supervision stays on the decoding path)
+bash scripts/run_opsd_dllm_trajectory_7b.sh
+
+# Remask OPSD on Dream-7B
+bash scripts/run_opsd_dllm_7b.sh
 ```
-Evaluation: (evaluation takes ~ 30-50 minutes on 4xh100 for each checkpoint) 
+
+Both scripts default to the Dream-7B backend; switch to LLaDA-8B with
+`STUDENT_BACKEND=llada`, and select GPUs with `GPU_IDS=0,1,2,3`. Checkpoints are
+LoRA adapters written to `outputs/opsd_dllm[_trajectory]/<run_config>/checkpoint-<step>/`.
+
+### 2. Merge the LoRA adapter
+
+Evaluation loads a full model, so merge the trained adapter into the base model
+first (edit the checkpoint / output paths at the top of the script):
+
 ```bash
-cd eval
-bash run_eval.sh
+python eval/Dream/merge_lora.py
 ```
 
-### Evaluation Results across Tasks on Qwen3-1.7B
+### 3. Evaluate
 
-<div align="center">
-<table>
-<tr>
-<th align="center">AIME24</th>
-<th align="center">AIME25</th>
-<th align="center">HMMT25</th>
-</tr>
-<tr>
-<td>
+```bash
+# Full instruct benchmarks via the lm-eval harness
+bash eval/Dream/eval_instruct/eval.sh      # gsm8k_cot, minerva_math500, humaneval_instruct, mbpp_instruct
 
-| Step | Avg@12 |
+# or a quick single-task GSM8K Avg@1
+bash eval/run_eval_dllm.sh
+```
+
+> **Train/eval consistency (hard invariant).** The diffusion sampler must use
+> `steps == max_new_tokens` (`--gen_steps == --gen_max_new_tokens` in training,
+> `--diffusion_steps == --max_new_tokens` in eval). Fewer steps than tokens
+> forces multiple commits per step and collapses quality. Keep
+> `max_prompt_length + max_new_tokens` under Dream-v0's 2048-position limit.
+
+## Datasets & Models
+
+| Toggle | Options |
 |---|---|
-| Base | 51.5% |
-| 25 | 51.4% |
-| 50 | 52.8% |
-| 75 | 54.4% |
-| 100 | 57.2% |
+| `STUDENT_BACKEND` | `dream` → `Dream-org/Dream-v0-Instruct-7B` (default) · `llada` → `GSAI-ML/LLaDA-8B-Instruct` |
+| Dataset | `horseee/MixChain-Z-PRM12K` (question → problem, answer → solution) |
 
-</td>
-<td>
+## Training details
 
-| Step | Avg@12 |
+### Remask OPSD — `scripts/run_opsd_dllm_7b.sh`
+
+| Argument / env | Description |
 |---|---|
-| Base | 36.7% |
-| 25 | 42.5% |
-| 50 | 43.9% |
-| 75 | 40.6% |
-| 100 | 41.1% |
+| `--beta` | JSD mixture weight. `0` = forward KL (stable default for on-policy remask), `1` = reverse KL. |
+| `MASK_SCHEDULE` | `diffusion` (per-example antithetic rate, i.i.d. Bernoulli masking) or `fixed` (exact count `k = round(n·ratio)`; set via `FIXED_MASK_RATIO`). |
+| `USE_PI` | `1` = teacher prompt embeds the reference solution (privileged information); `0` = no-PI baseline (teacher prompt == student prompt). |
+| `OFF_POLICY` | `0` = on-policy: student rolls out, then re-mask. `1` = off-policy: distill on the dataset's ground-truth answer (no rollout). |
+| `--gen_*` | On-policy rollout controls: `--gen_max_new_tokens`, `--gen_steps`, `--gen_temperature`, `--gen_top_p`, `--gen_alg` (Dream-only). |
+| `--fixed_teacher` | Freeze the teacher to the initial policy via a LoRA adapter (main setting). |
+| `--jsd_token_clip` | Per-token JSD clip; caps stylistic tokens that otherwise dominate the loss. |
 
-</td>
-<td>
+### Trajectory OPSD — `scripts/run_opsd_dllm_trajectory_7b.sh`
 
-| Step | Avg@12 |
+| Argument / env | Description |
 |---|---|
-| Base | 23.1% |
-| 25 | 24.7% |
-| 50 | 27.8% |
-| 75 | 26.9% |
-| 100 | 29.2% |
+| `TRAJ_MASK_THRESHOLD` | Step-eligibility cutoff — only decoding steps whose masked fraction exceeds this are considered as the student's noisy view. |
+| `TRAJ_STEP_SELECT` | Which eligible step to take: `least` (closest to the threshold), `most` (noisiest), or `random`. |
+| `TRAJ_TEACHER_VIEW` / `TRAJ_TEACHER_GAP` | Teacher target: `snapshot` (single forward; `gap = -1` → concrete final rollout, `n ≥ 0` → peek `n` steps ahead) or `all_future` (average over remaining steps). |
+| `--filter_wrong_rollouts` | Verify-gated: rollouts whose final answer is wrong receive no teacher signal (loss 0 there), so only correct on-policy trajectories are distilled. |
 
-</td>
-</tr>
-</table>
-</div>
+### SFT baseline — `scripts/run_sft_dllm.sh`
 
-> **Evaluation settings:** temperature=1.0, thinking mode enabled, max new tokens=38912, top-p=none, top-k disabled, min-p=0, presence penalty=0, num samples=12
-
-
-## Training
-
-
-### OPSD
-
-See 
-
-[`scripts/run_opsd_1b.sh`](scripts/run_opsd_1b.sh).
-[`scripts/run_opsd_4b.sh`](scripts/run_opsd_4b.sh).
-[`scripts/run_opsd_8b.sh`](scripts/run_opsd_8b.sh).
-
-#### Key OPSD arguments
-
-| Argument | Default | Description |
-|---|---|---|
-| `--fixed_teacher` | `False` | Fix the teacher to the initial policy (step 0). Requires --use_peft. Note ❗ If you disable PEFT, the teacher will keep updating at every training step, which may make training unstable. Our main results use the fixed teacher, which is currently implemented with LoRA adapter weights. |
-| `--use_tinker_loss` | `False` | Use sampled-token policy-gradient objective instead of full-vocabulary JSD. More memory efficient. Currently no clipped implemented for this variant, could be unstable. |
-| `--max_completion_length` | — | Student generation length for distillation. We use 1024 in our main experiments. |
-| `--beta` | — | Interpolation weight for the JSD mixture distribution. Beta=0 means forward KL and 1 means reverse KL. |
-| `--jsd_token_clip` | 0.05 | Clip the JSD loss for each token to a maximum value. This can improve stability by preventing stylistic tokens from dominating the training signal. | 
-| `--reason_first` | `False` | Prepend an explicit rationalization to the teacher context before distillation. |
-| `--run_config` | `None` | Custom name suffix for the output directory and WandB run. |
-
-### SFT Baseline
-
-See [`scripts/run_sft.sh`](scripts/run_sft.sh).
-
-### GRPO Baseline
-
-See [`scripts/run_grpo.sh`](scripts/run_grpo.sh).
-
-### Acknowledgements
-Our implementation builds on [TRL GOLD Trainer](https://huggingface.co/docs/trl/gold_trainer). We sincerely thank [@simran135](https://github.com/simran135) and [@beanie00](https://github.com/beanie00) for identifying the prompt template bugs and the zero-2 issue, respectively!
+Vanilla masked-prediction SFT for the diffusion LM (`sft_train_dllm.py`), sharing
+the same `MASK_SCHEDULE` toggles as remask OPSD for a controlled comparison.
 
 ## Citation
+
 If you find this useful, please consider citing:
+```bibtex
+@misc{dat2026dopsdonpolicyselfdistillationdiffusion,
+      title={dOPSD: On-Policy Self-Distillation for Diffusion Language Models}, 
+      author={Phuong Tuan Dat and Qi Li and Xinchao Wang},
+      year={2026},
+      eprint={2607.04428},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2607.04428}, 
+}
+```
+
+## Acknowledgements
+
+This work builds on On-Policy Self-Distillation (OPSD):
 ```bibtex
 @article{zhao2026self,
   title={Self-Distilled Reasoner: On-Policy Self-Distillation for Large Language Models},

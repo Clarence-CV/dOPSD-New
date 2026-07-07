@@ -1,56 +1,13 @@
 # Copyright 2026 The Foundation AI Team. Licensed under the Apache License, Version 2.0.
 """Trajectory-OPSD trainer for diffusion LLMs.
 
-A variant of `OPSDDLLMTrainer` (see opsd_dllm_trainer.py) whose privileged
-information and noise source both come from the student's *own decoding
-trajectory* instead of a synthetic mask over the finished completion.
-
-Contrast with the base on-policy OPSD:
-  * base on-policy : student rolls out a completion (concrete); a synthetic mask
-                     (diffusion / fixed) is sampled over the valid positions;
-                     teacher sees the same noisy completion.
-  * trajectory     : student rolls out *with its denoising history*. The noisy
-                     completion is a *real* intermediate denoising step — per
-                     example, the least-masked step `k` whose masked fraction
-                     over the loss-eligible region still exceeds
-                     `traj_mask_threshold` (default 0.5, i.e. ">50% masked").
-                     The teacher's privileged view is controlled by
-                     `traj_teacher_gap`:
-                       * None (default) — the *concrete final rollout* (endpoint
-                         of the trajectory). The teacher sees the answer token at
-                         every scored position, so its target is near-degenerate
-                         (a "copy" of the student's own rollout).
-                       * n (int ≥ 0)    — the trajectory state `n` steps AFTER the
-                         student's step, i.e. `history[k + n]` (clamped to the
-                         final state). The teacher sees more *surrounding* context
-                         than the student but the positions still masked at step
-                         `k + n` remain genuinely predictive — an honest
-                         "peek-ahead" privilege rather than seeing the answer.
-                     JSD is computed at the positions that are <mask> at step `k`.
-
-Because Dream / LLaDA freeze tokens once they are unmasked, the intermediate
-trajectory state equals `final_completion` with the still-undecoded positions
-re-masked — so it slots directly into the base trainer's noisy-completion
-machinery: `noisy_completion = where(mask_pattern, <mask>, final_completion)`.
-
-    student_prompt ─► diffusion_generate(output_history=True) ─► history + final
-                                                                      │
-                          pick step k = least-masked with frac > thr  │
-                                                                      ▼
-                                          mask_pattern = (history[k] == <mask>)
-                                                                      │
-                       ┌──────────────────────────────────────────────┤
-                       │ student sees history[k] (noisy)              │ teacher sees
-                       ▼                                              ▼ history[k+n] (or final)
-   [s_prompt | noisy_completion]                  [t_prompt | teacher_completion]
-                       │                                              │
-                  forward (grad)                               forward (no_grad)
-                       │                                              │
-                       └────────── JSD on step-k MASKED positions ───┘
-
-This trainer is on-policy only (`off_policy` must be False). Both backends are
-supported: Dream via `diffusion_generate(output_history=True)`, LLaDA via a
-history-recording variant of the progressive-unmasking sampler.
+A variant of `OPSDDLLMTrainer` whose noise and privileged information both come
+from the student's own decoding trajectory instead of a synthetic mask. The
+student's noisy completion is a real intermediate denoising step `k` (least-masked
+step whose masked fraction still exceeds `traj_mask_threshold`); the teacher sees
+either the final rollout, `history[k+gap]`, or the full remaining trajectory
+(`traj_teacher_gap` / `traj_teacher_view`). JSD is scored at the positions masked
+at step `k`. On-policy only; supports both Dream and LLaDA backends.
 """
 
 import re
@@ -64,10 +21,9 @@ from trl.models.utils import unwrap_model_for_generation
 
 from opsd_dllm_trainer import OPSDDLLMTrainer
 
-# Math-equivalence verifier (handles fractions, radicals, algebraic forms — ~40%
-# of MixChain-Z-PRM12K / MATH answers are non-integer, so plain string/number
-# matching is wrong). Optional: if math_verify is not installed we fall back to a
-# normalized string compare and warn once at trainer init.
+# Math-equivalence verifier (fractions/radicals/algebra — ~40% of MATH answers
+# are non-integer so string matching is wrong). Optional: fall back to normalized
+# string compare if not installed.
 try:
     from math_verify import parse as _mv_parse, verify as _mv_verify
 
@@ -79,7 +35,7 @@ except Exception:  # pragma: no cover - depends on the training env
 
 class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
     """OPSD trainer that masks from a real decoding step and gives the teacher
-    the concrete final rollout as privileged information."""
+    trajectory-derived privileged information."""
 
     _tag_names = ["trl", "opsd-dllm", "opsd-dllm-trajectory"]
     _name = "OPSD-DLLM-Trajectory"
@@ -98,9 +54,8 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         grpo_adv_eps: float = 1e-4,
         **kwargs,
     ):
-        # The base trainer only recognizes mask_schedule in {"diffusion","fixed"};
-        # this trainer never calls `_sample_mask`, so leave mask_schedule at its
-        # base default and drive masking entirely from the trajectory instead.
+        # Masking is driven from the trajectory, not `_sample_mask`; drop any
+        # mask_schedule the base trainer would otherwise validate.
         kwargs.pop("mask_schedule", None)
         super().__init__(*args, **kwargs)
 
@@ -130,8 +85,7 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         self.traj_teacher_view = traj_teacher_view
         self.filter_wrong_rollouts = bool(filter_wrong_rollouts)
         self.use_grpo = bool(use_grpo)
-        # Group size: G on-policy rollouts per prompt (needed for GRPO's
-        # group-relative advantage). 1 when GRPO is off.
+        # Group size: G rollouts/prompt for GRPO's group-relative advantage; 1 when off.
         self.grpo_num_rollouts = int(grpo_num_rollouts) if self.use_grpo else 1
         self.grpo_coef = float(grpo_coef)
         self.grpo_adv_eps = float(grpo_adv_eps)
@@ -193,30 +147,18 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         print()
 
     def _set_signature_columns_if_needed(self):
-        # Keep the ground-truth `target` column the collator reads for rollout
-        # verification (the base method only keeps problem_field/solution_field).
+        # Also keep the `target` column the collator reads for rollout verification.
         super()._set_signature_columns_if_needed()
         tf = getattr(self.data_collator, "target_field", None)
         if tf and self._signature_columns is not None and tf not in self._signature_columns:
             self._signature_columns.append(tf)
 
-    # ------------------------------------------------------------------
-    # Rollout with decoding history.
-    # ------------------------------------------------------------------
     def _generate_student_completion_with_history(self, model, prompt_ids, prompt_mask):
         """On-policy rollout that also returns the per-step denoising history.
 
-        Mirrors `OPSDDLLMTrainer._generate_student_completion` but requests the
-        trajectory:
-          * Dream  : `diffusion_generate(output_history=True)`.
-          * LLaDA  : `_llada_generate_with_history`.
-
-        Returns:
-            completion_ids:  [B, gen_max_new_tokens] final (concrete) rollout.
-            completion_mask: [B, gen_max_new_tokens] 1 = real token, 0 = pad.
-            history:         list of [B, gen_max_new_tokens] completion-span
-                             snapshots (one per denoising step; <mask> at the
-                             not-yet-decoded positions).
+        Returns completion_ids [B, gen_max_new_tokens], completion_mask (1=real,
+        0=pad), and history: a list of [B, gen_max_new_tokens] completion-span
+        snapshots (one per denoising step, <mask> at not-yet-decoded positions).
         """
         prompt_len = prompt_ids.shape[1]
         was_training = model.training
@@ -248,8 +190,7 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         completion_ids = gen_out.sequences[:, prompt_len:].contiguous()
         completion_mask = self._build_completion_mask(completion_ids)
 
-        # Dream appends a full-sequence snapshot per denoising step; our LLaDA
-        # variant mirrors that. Slice each to the completion span.
+        # History snapshots are full-sequence; slice each to the completion span.
         raw_history = getattr(gen_out, "history", None) or []
         history = [h[:, prompt_len:].contiguous() for h in raw_history]
         return completion_ids, completion_mask, history
@@ -258,12 +199,10 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
     def _llada_generate_with_history(self, model, prompt_ids, prompt_mask):
         """LLaDA progressive-unmasking sampler that records per-step snapshots.
 
-        Identical sampling dynamics to `OPSDDLLMTrainer._llada_generate`; the
-        only addition is appending `full_ids.clone()` after each denoising step
-        (and the final force-unmask) so the trajectory can be replayed.
-
-        Returns an object with `.sequences = [B, prompt_len + gen_max_new_tokens]`
-        and `.history` = list of those full-sequence snapshots.
+        Same dynamics as `OPSDDLLMTrainer._llada_generate`, but appends
+        `full_ids.clone()` after each step so the trajectory can be replayed.
+        Returns an object with `.sequences` [B, prompt_len+gen_max_new_tokens] and
+        `.history` = list of full-sequence snapshots.
         """
         B, L_p = prompt_ids.shape
         L_c = self.gen_max_new_tokens
@@ -310,8 +249,8 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
 
             probs = F.softmax(logits, dim=-1)
             if self.gen_temperature > 0:
-                # Stochastic sampling so a replicated prompt yields DIVERSE rollouts
-                # (required for GRPO group advantages; argmax would make them identical).
+                # Stochastic sampling: replicated prompts must yield diverse rollouts
+                # for GRPO group advantages (argmax would make them identical).
                 Bc, Lc, Vc = probs.shape
                 sampled = torch.multinomial(probs.reshape(-1, Vc), 1).reshape(Bc, Lc)
                 confidence = probs.gather(-1, sampled.unsqueeze(-1)).squeeze(-1)
@@ -334,7 +273,7 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
 
             history.append(full_ids.clone())
 
-        # Safety net: force-unmask any residual <mask> with its argmax sample.
+        # Force-unmask any residual <mask> with its argmax sample.
         residual = full_ids[:, L_p:] == self.mask_token_id
         if residual.any():
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
@@ -358,35 +297,19 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         gen_out.history = history
         return gen_out
 
-    # ------------------------------------------------------------------
-    # Trajectory mask selection.
-    # ------------------------------------------------------------------
     def _trajectory_mask(self, completion_ids, jsd_valid_mask, history):
         """Pick, per example, a decoding step and return its still-masked positions.
 
-        For each history snapshot, compute the masked fraction over the
-        JSD-valid region (`jsd_valid_mask`). An example's *eligible* steps are
-        those whose masked fraction strictly exceeds `traj_mask_threshold`.
-        Among the eligible steps, pick one according to `traj_step_select`:
-            "least"  — smallest masked fraction still above threshold (closest
-                       to the 0.5 boundary; the default).
-            "most"   — largest masked fraction (noisiest).
-            "random" — uniform among the eligible steps.
-        If no step qualifies (e.g. a very short trajectory), fall back to the
-        most-masked available step so the example still contributes a mask.
-
-        Args:
-            completion_ids:  [B, L] final rollout (used only for shape/device).
-            jsd_valid_mask:  [B, L] 1 where a position is loss-eligible.
-            history:         list of [B, L] completion-span snapshots.
+        Among steps whose masked fraction (over the JSD-valid region) exceeds
+        `traj_mask_threshold`, pick per `traj_step_select`: "least" (smallest
+        fraction above threshold, default), "most" (largest), or "random". If none
+        qualify, fall back to the most-masked step.
 
         Returns:
-            mask:           [B, L] bool — True at the chosen step's masked positions
-                            (restricted to JSD-valid).
-            p_mask_sample:  [B] float  — chosen step's masked fraction (diagnostics).
-            chosen:         [B] long   — per-example index into `history` of the
-                            chosen step (None if no history was captured). Used by
-                            the teacher n-step-ahead view.
+            mask:           [B, L] bool — chosen step's masked & JSD-valid positions.
+            p_mask_sample:  [B] float  — chosen step's masked fraction (diagnostic).
+            chosen:         [B] long   — chosen step index into `history` (None if
+                            no history); used by the teacher n-step-ahead view.
         """
         device = completion_ids.device
         B, L = completion_ids.shape
@@ -395,13 +318,12 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         thr = self.traj_mask_threshold
 
         if not history:
-            # Degenerate fallback: no trajectory captured. Treat the whole valid
-            # region as masked (still satisfies the ≥1-mask invariant below).
+            # No trajectory captured: treat the whole valid region as masked.
             mask = valid.clone()
             p_mask_sample = mask.float().sum(dim=1) / valid_counts
             return self._ensure_min_one_mask(mask, valid), p_mask_sample, None
 
-        # [S, B, L] — masked-and-valid indicator for every snapshot.
+        # [S, B, L] masked-and-valid indicator per snapshot.
         is_mask_per_step = torch.stack(
             [(h == self.mask_token_id) & valid for h in history], dim=0
         )
@@ -424,12 +346,12 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
                 else:
                     j = int(torch.randint(0, qs.numel(), (1,), device=device).item())
                     chosen[b] = int(qs[j].item())
-        else:  # "least" (default): smallest fraction still above threshold.
+        else:  # "least": smallest fraction still above threshold
             score = frac.clone()
             score[~qualifies] = float("inf")
             chosen = score.argmin(dim=0)  # [B]
 
-        # Where nothing qualifies, fall back to the most-masked available step.
+        # Fall back to the most-masked step where nothing qualifies.
         fallback = frac.argmax(dim=0)
         chosen = torch.where(any_q, chosen, fallback)  # [B]
 
@@ -440,23 +362,13 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         return self._ensure_min_one_mask(mask, valid), p_mask_sample, chosen
 
     def _teacher_completion_n_ahead(self, completion_ids, history, chosen, n):
-        """Build the teacher's completion as the trajectory state `n` steps after
-        each example's chosen (student) step.
+        """Teacher's completion = the trajectory state `n` steps after each
+        example's chosen student step: `history[min(chosen[b]+n, S-1)]`. Positions
+        decoded by then are concrete (teacher sees them); still-masked positions
+        stay <mask> (honest peek-ahead, not the answer). Falls back to the final
+        rollout when no trajectory/`chosen` is available.
 
-        For example `b`, the teacher sees `history[min(chosen[b] + n, S - 1)]` —
-        i.e. `n` denoising steps further along the student's own trajectory,
-        clamped to the final captured state. Positions already decoded by that
-        step are concrete (the teacher sees them); positions still masked stay
-        <mask> (the teacher predicts them, conditioned only on the extra context
-        it has gained — an honest peek-ahead privilege rather than seeing the
-        answer at the scored position).
-
-        Falls back to the concrete final rollout when no trajectory/`chosen` is
-        available.
-
-        Returns:
-            teacher_completion: [B, L] long
-            teacher_step:       [B] long — the (clamped) step index the teacher saw
+        Returns teacher_completion [B, L] and teacher_step [B] (clamped step seen).
         """
         B, L = completion_ids.shape
         device = completion_ids.device
@@ -506,19 +418,14 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
     ):
         """Aggregate the teacher target over the full remaining trajectory.
 
-        For each scored position (masked at the student's step `k`), average the
-        teacher's predictive distribution over the FUTURE steps `t in (k, final]`
-        where that position is STILL masked — so the steps where the teacher has
-        already decoded the token (and would just copy it) do not contaminate the
-        target. Positions never masked in that window (decoded immediately after
-        `k`) fall back to the teacher distribution on the final concrete rollout.
+        For each scored position (masked at step `k`), average the teacher's
+        predictive distribution over future steps `t in (k, final]` where it is
+        STILL masked — so steps that already decoded the token can't contaminate
+        the target. Positions never masked in that window fall back to the final
+        rollout. One teacher forward per remaining step — EXPENSIVE.
 
-        Costs one teacher forward per distinct remaining step — EXPENSIVE.
-
-        Returns:
-            teacher_masked: [N, V] teacher LOG-probs, aligned to the row-major
-                (b, l) order of `mask_pattern` (matches
-                `student_completion_logits[mask_pattern]`).
+        Returns teacher_masked [N, V] LOG-probs, aligned to the row-major (b, l)
+        order of `mask_pattern`.
         """
         device = completion_ids.device
         scored = mask_pattern.nonzero(as_tuple=False)  # [N, 2] (b, l), row-major
@@ -556,7 +463,7 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
                     chosen_n = chosen[b_n]  # [N]
                     t_start = max(int(chosen.min().item()) + 1, 1)
                     for t in range(t_start, S):
-                        # scored positions masked at step t and in the (k, final] window
+                        # scored positions still masked at step t, within (k, final]
                         contribute = masked_states[t, b_n, l_n] & (t > chosen_n)  # [N]
                         if not bool(contribute.any()):
                             continue
@@ -580,26 +487,18 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
             if was_training:
                 model.train()
 
-        # Diagnostic: avg number of future steps averaged per scored position
-        # (1.0 ⇒ everything fell back to the endpoint).
+        # Diagnostic: avg future steps averaged per scored position (1.0 = all endpoint).
         mode = "train" if was_training else "eval"
         self._metrics[mode]["teacher_future_steps_avg"].append(float(count.mean().item()))
 
         avg = sum_probs / count.clamp(min=1.0).unsqueeze(-1)  # [N, V]
         return avg.clamp_min(1e-12).log().detach()
 
-    # ------------------------------------------------------------------
-    # Verify-gated gold-solution privileged information.
-    # ------------------------------------------------------------------
     @staticmethod
     def _extract_boxed_answer(text):
-        """Return the content of the LAST ``\\boxed{...}`` in `text` (nested-brace
-        aware, e.g. ``\\boxed{\\frac{1}{2}}``), or None if there is none.
-
-        This is the canonical MATH / MixChain-Z-PRM12K answer format: the gold
-        ``solution`` always ends in ``\\boxed{<target>}`` and a MATH-tuned student
-        emits the same. We scan from the LAST box so a worked solution that shows
-        intermediate boxes still resolves to the final answer.
+        """Content of the LAST ``\\boxed{...}`` in `text` (nested-brace aware), or
+        None. Canonical MATH answer format; scanning the last box resolves worked
+        solutions with intermediate boxes to the final answer.
         """
         if not text:
             return None
@@ -619,11 +518,8 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
 
     @staticmethod
     def _preprocess_for_parse(answer):
-        """Normalize an answer string so math_verify parses it.
-
-        * ``\\dfrac`` / ``\\tfrac`` → ``\\frac`` (display-style fractions math_verify
-          does not always parse; ~3% of MixChain golds use them).
-        * ratio notation ``a:b`` → ``\\frac{a}{b}`` (mirrors grpo_train.py).
+        """Normalize an answer string so math_verify parses it: ``\\dfrac``/
+        ``\\tfrac`` → ``\\frac`` and ratio ``a:b`` → ``\\frac{a}{b}``.
         """
         if answer is None:
             return None
@@ -636,13 +532,9 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
     def _answers_match(self, gold, pred):
         """True iff `pred` is mathematically equivalent to `gold`.
 
-        Uses math_verify (``parse`` + ``verify``) for symbolic/numeric
-        equivalence — essential here because a large fraction of MATH answers are
-        fractions / radicals / expressions where string equality fails (``1/2``
-        vs ``\\frac{1}{2}`` vs ``0.5``). Both sides are normalized first. Falls
-        back to a whitespace-stripped, case-insensitive string match (covers MCQ
-        letters, the ~20% of answers math_verify cannot parse, and the
-        no-math_verify environment).
+        Uses math_verify (``parse`` + ``verify``) for symbolic/numeric equivalence
+        (string equality fails on ``1/2`` vs ``\\frac{1}{2}`` vs ``0.5``), then
+        falls back to a whitespace-stripped, case-insensitive string match.
         """
         if gold is None or pred is None:
             return False
@@ -663,11 +555,9 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
     def _extract_pred_answer(self, completion_text):
         """Extract the student's final answer from a free-form completion.
 
-        Prefer an explicit ``\\boxed{...}``; otherwise hand the raw completion to
-        math_verify's ``parse`` (which pulls the last math expression / number out
-        of free text) by returning the text itself. As a last resort (no
-        math_verify), keep the substring after a trailing answer marker so the
-        string fallback in `_answers_match` has something tight to compare.
+        Prefer an explicit ``\\boxed{...}``; else return the raw text for
+        math_verify's ``parse`` to pull the trailing expression; last resort (no
+        math_verify) keep the substring after a trailing answer marker.
         """
         boxed = self._extract_boxed_answer(completion_text)
         if boxed is not None:
@@ -681,18 +571,12 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
     def _verify_rollouts(
         self, completion_ids, target_ids, target_mask, answer_ids=None, answer_mask=None
     ):
-        """Per-example correctness of the student rollout vs. the GROUND-TRUTH answer.
+        """Per-example correctness of the student rollout vs. the ground-truth answer.
 
-        Gold answer is taken DIRECTLY from the dataset's ``target`` column (the
-        clean final answer, e.g. ``"18"`` or ``"\\frac{1}{2}"``) — no extraction
-        from the long solution. The student answer is `_extract_pred_answer` and
-        the two are compared with `_answers_match` (math-equivalence). If a row
-        has no ``target`` (other datasets), fall back to the ``\\boxed{}`` of the
-        reference solution. Rows with no usable gold are treated as correct, so
-        they stay on-policy rather than being dropped on an unverifiable answer.
-
-        Returns:
-            correct: [B] bool on `completion_ids.device`.
+        Gold is the dataset's ``target`` column (falling back to the ``\\boxed{}``
+        of the reference solution); compared to `_extract_pred_answer` via
+        `_answers_match`. Rows with no usable gold are treated as correct so they
+        stay on-policy rather than being dropped. Returns correct [B] bool.
         """
         tok = self.processing_class
         B = completion_ids.shape[0]
@@ -704,7 +588,7 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
                 gold = tok.decode(
                     target_ids[b][target_mask[b].bool()], skip_special_tokens=True
                 ).strip() or None
-            if gold is None and answer_ids is not None:  # fallback: box from solution
+            if gold is None and answer_ids is not None:  # fallback: \boxed{} from solution
                 sol = tok.decode(
                     answer_ids[b][answer_mask[b].bool()], skip_special_tokens=True
                 )
@@ -727,18 +611,12 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
                 mask[i, int(valid_idx[j].item())] = True
         return mask
 
-    # ------------------------------------------------------------------
-    # GRPO (group-relative policy gradient) — learn from WRONG rollouts.
-    # ------------------------------------------------------------------
     def _grpo_advantage(self, correct, B, G):
         """Group-relative advantage from binary correctness rewards.
 
-        For each prompt's group of G rollouts: ``adv = (r - mean) / (std + eps)``.
-        Correct rollouts get POSITIVE advantage, wrong rollouts NEGATIVE — that
-        negative is how the model "knows" a rollout is wrong. Returns a detached
-        [B*G] tensor (rewards are constants w.r.t. the policy). Groups whose
-        rollouts all share a reward (all-right or all-wrong) get advantage 0 (no
-        signal), which is correct GRPO behaviour.
+        Per group of G rollouts: ``adv = (r - mean) / (std + eps)`` (correct
+        positive, wrong negative). Returns a detached [B*G] tensor; all-same-reward
+        groups get advantage 0 (correct GRPO behaviour).
         """
         reward = correct.float().view(B, G)
         mean = reward.mean(dim=1, keepdim=True)
@@ -749,19 +627,11 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
     def _grpo_loss(self, student_completion_logits, completion_ids, mask_pattern, advantage):
         """GRPO policy-gradient loss with an on-policy mean-field log-prob surrogate.
 
-        A masked diffusion model has no autoregressive sequence log-prob, so we
-        estimate the policy log-prob of each rollout by the per-token log-prob of
-        its OWN sampled tokens at the trajectory step-`k` masked positions —
-        ``log p(y_i | noisy step-k context)`` — reusing the same student forward
-        as the JSD term (so it stays on-policy and cheap). Per rollout we take the
-        length-normalized mean of those token log-probs, then minimize
-        ``-(advantage * mean_logprob)``:
-
-          * advantage > 0 (correct rollout) → increase those token log-probs (push UP)
-          * advantage < 0 (wrong   rollout) → decrease them (push DOWN — "this is wrong")
-
-        Rollouts are freshly sampled from the current policy each step, so this is
-        on-policy and uses plain REINFORCE-with-group-baseline (no PPO ratio/clip).
+        A masked diffusion model has no autoregressive sequence log-prob, so the
+        rollout log-prob is estimated as the length-normalized mean per-token
+        log-prob of its own sampled tokens at the step-`k` masked positions
+        (reusing the JSD student forward), then minimizing ``-(advantage *
+        mean_logprob)``. On-policy REINFORCE-with-group-baseline (no PPO clip).
         """
         masked_logits = student_completion_logits[mask_pattern]              # [M, V]
         true_tok = completion_ids[mask_pattern]                             # [M]
@@ -775,19 +645,14 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         mean_logp = seq_logp / counts.clamp(min=1.0)                        # [BG] per-token mean
         return -(advantage * mean_logp).mean()
 
-    # ------------------------------------------------------------------
-    # Loss.
-    # ------------------------------------------------------------------
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         student_prompt_ids = inputs["student_prompt_input_ids"]
         student_prompt_mask = inputs["student_prompt_attention_mask"]
         teacher_prompt_ids = inputs["teacher_prompt_input_ids"]
         teacher_prompt_mask = inputs["teacher_prompt_attention_mask"]
 
-        # 0. GROUP EXPANSION — G on-policy rollouts per prompt. GRPO needs a group
-        #    to form the relative advantage; the group also supplies the correct
-        #    rollouts that feed the JSD self-distillation. Everything below treats
-        #    the flattened B*G as the batch; only the GRPO advantage groups by G.
+        # 0. Group expansion: G rollouts/prompt. Below treats the flattened B*G as
+        #    the batch; only the GRPO advantage groups by G.
         G = self.grpo_num_rollouts
         B = student_prompt_ids.shape[0]
         if G > 1:
@@ -799,17 +664,14 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         s_prompt_len = student_prompt_ids.shape[1]
         t_prompt_len = teacher_prompt_ids.shape[1]
 
-        # 1. On-policy rollout WITH decoding history (B*G rollouts). Diversity
-        #    across the G copies of a prompt comes from stochastic sampling
-        #    (gen_temperature > 0) — without it the group collapses and GRPO has
-        #    no signal.
+        # 1. On-policy rollout with decoding history (B*G rollouts). Diversity
+        #    across a prompt's G copies needs gen_temperature > 0, else GRPO has no signal.
         completion_ids, completion_mask, history = self._generate_student_completion_with_history(
             model, student_prompt_ids, student_prompt_mask
         )
         BG, L_c = completion_ids.shape
 
-        # 1b. Buffer (prompt, completion) for the periodic JSON dump — one rollout
-        #     per group to keep the dump small.
+        # 1b. Buffer (prompt, completion) for the periodic JSON dump (one per group).
         if self.accelerator.is_main_process:
             prompt_texts = self.processing_class.batch_decode(
                 student_prompt_ids[::G], skip_special_tokens=True
@@ -842,9 +704,8 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
                 transition_mask.repeat_interleave(G, dim=0) if transition_mask is not None else None
             )
 
-        # 3-4. Student forward (with grad) over ALL B*G noisy rollouts. This one
-        #      forward serves BOTH the GRPO log-prob (all rollouts) and the JSD
-        #      (correct rollouts) — keeping everything on-policy and cheap.
+        # 3-4. Student forward (with grad) over all B*G noisy rollouts; this one
+        #      forward serves both the GRPO log-prob and the JSD (correct rollouts).
         student_full_ids = torch.cat([student_prompt_ids, noisy_completion], dim=1)
         student_full_mask = torch.cat([student_prompt_mask, completion_mask], dim=1)
         student_logits = self._forward(model, student_full_ids, student_full_mask)
@@ -861,7 +722,7 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
             target_mask = target_mask.repeat_interleave(G, 0) if target_mask is not None else None
             answer_ids = answer_ids.repeat_interleave(G, 0) if answer_ids is not None else None
             answer_mask = answer_mask.repeat_interleave(G, 0) if answer_mask is not None else None
-        # Verify when GRPO (needs correctness as the reward) or the JSD filter needs it.
+        # Verify when GRPO needs the reward or the JSD filter needs correctness.
         need_verify = (self.use_grpo or self.filter_wrong_rollouts) and (
             target_ids is not None or answer_ids is not None
         )
@@ -872,9 +733,7 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
         else:
             correct = torch.ones(BG, dtype=torch.bool, device=completion_ids.device)
 
-        # 5. GRPO term over the WHOLE group (correct + wrong). Correct rollouts get
-        #    positive advantage (pushed up); wrong rollouts get negative advantage
-        #    (pushed down) — this is how the model learns a rollout is wrong.
+        # 5. GRPO term over the whole group (correct pushed up, wrong pushed down).
         advantage = None
         grpo_loss = None
         if self.use_grpo and G > 1:
@@ -883,10 +742,8 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
                 student_completion_logits, completion_ids, mask_pattern, advantage
             )
 
-        # 6. JSD term on CORRECT rollouts only — on-policy self-distillation from
-        #    the decoding-step privileged information (unchanged machinery).
-        # JSD scores CORRECT rollouts only when filtering (the requested behaviour);
-        # otherwise it scores every rollout's masked positions.
+        # 6. JSD self-distillation. Scores correct rollouts only when filtering,
+        #    else every rollout's masked positions.
         if self.filter_wrong_rollouts:
             scored_mask = mask_pattern & correct.view(BG, 1)  # [B*G, L]
         else:
@@ -942,18 +799,17 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
             )  # [Nc]
             jsd_loss = per_token_jsd.mean()
         else:
-            # No correct rollout this step: graph-connected zero so every parameter
-            # still gets a (zero) gradient (keeps DDP happy) and no wrong rollout is
-            # distilled. The GRPO term (if on) still carries the real gradient.
+            # No correct rollout: graph-connected zero so every param still gets a
+            # (zero) gradient (keeps DDP happy). GRPO (if on) carries the real gradient.
             per_token_jsd = student_masked.new_zeros(0)
             jsd_loss = student_completion_logits.sum() * 0.0
 
-        # 7. Combined objective: JSD anchor (coef 1) + alpha * GRPO.
+        # 7. Combined objective: JSD anchor (coef 1) + grpo_coef * GRPO.
         loss = jsd_loss
         if grpo_loss is not None:
             loss = loss + self.grpo_coef * grpo_loss
 
-        # 8. Per-step diagnostics.
+        # 8. Diagnostics.
         with torch.no_grad():
             mode = "train" if model.training else "eval"
             comp_lens = completion_mask.sum(dim=1).float()
@@ -974,7 +830,6 @@ class OPSDDLLMTrajectoryTrainer(OPSDDLLMTrainer):
             self._metrics[mode]["num_rollouts"].append(n_total_g)
             self._metrics[mode]["frac_rollout_correct"].append(1.0 - n_wrong_g / max(1.0, n_total_g))
             self._metrics[mode]["num_scored_tokens"].append(float(scored_mask.sum().item()))
-            # Loss components + GRPO/group diagnostics.
             self._metrics[mode]["jsd_loss"].append(float(jsd_loss.detach().item()))
             if grpo_loss is not None:
                 self._metrics[mode]["grpo_loss"].append(float(grpo_loss.detach().item()))

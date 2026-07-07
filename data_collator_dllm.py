@@ -4,24 +4,11 @@ import torch
 class SelfDistillationDLLMDataCollator:
     """Data collator for dLLM (diffusion LM) self-distillation, e.g. Dream-7B.
 
-    Processes math-style (problem, solution) datasets. For each example:
-      - student prompt: chat template containing only the problem with the
-        "reason step by step, \\boxed{}" instruction.
-      - teacher prompt: chat template containing the problem AND the reference
-        solution appended as privileged context. It is IDENTICAL to the student
-        prompt except for the injected reference solution — no extra "explore /
-        backtrack" persona or answer-format instruction (those inflate the
-        distilled student's output length; see _compose_teacher_user_turn).
-      - answer ids:     tokenized reference solution; the trainer randomly
-        masks tokens inside this span so both student and teacher predict the
-        same masked positions.
-
-    Padding strategy: prompts are LEFT-padded to the per-batch maximum prompt
-    length and the answer is RIGHT-padded to the per-batch maximum answer
-    length. When the trainer concatenates `[prompt | answer]`, pad tokens sit
-    only on the outer edges of the full sequence (never between prompt and
-    answer), which matters because the model's bidirectional attention treats
-    every position equally.
+    Student prompt = problem only; teacher prompt = same, optionally with the
+    reference solution injected as privileged context. Answer ids are the
+    tokenized solution; the trainer masks tokens in this span for both models.
+    Prompts are LEFT-padded and answers RIGHT-padded so pad tokens sit only on
+    the outer edges of `[prompt | answer]` (matters for bidirectional attention).
     """
 
     def __init__(
@@ -38,29 +25,15 @@ class SelfDistillationDLLMDataCollator:
         self.max_answer_length = max_answer_length
         self.problem_field = problem_field
         self.solution_field = solution_field
-        # When False (default) the teacher prompt is IDENTICAL to the student
-        # prompt (problem only) — the no-privileged-information baseline. When
-        # True the teacher additionally sees the ground-truth solution as
-        # privileged context (see _build_teacher_prompt). This is the single
-        # knob the PI-vs-no-PI controlled experiment toggles.
+        # False (default) = no-PI baseline (teacher prompt == student prompt);
+        # True = teacher also sees the ground-truth solution. Single knob for the
+        # PI-vs-no-PI experiment.
         self.use_privileged_info = use_privileged_info
 
-        # Header that introduces the gold solution as reference material in the
-        # teacher's user turn. Deliberately minimal: it labels the privileged
-        # context and nothing more.
-        #
-        # NOTE (why this is bare): an earlier GT-PI run wrapped the solution in a
-        # long "explore different approaches / don't be afraid to backtrack"
-        # transition prompt plus a "#### <answer>" format instruction. Both were
-        # present in the teacher prompt only (never the student's), so on-policy
-        # forward-KL distillation copied that verbose, exploratory STYLE into the
-        # student. The result: median completion length ~2x the no-PI baseline
-        # (130 vs 62 words) and 32% of answers >150 words, where GSM8K accuracy
-        # collapses (~0.64 vs ~0.85 short) — net -3pt vs baseline despite the
-        # student's SHORT-answer accuracy actually matching/beating baseline.
-        # Keeping the teacher prompt identical to the student's except for the
-        # injected reference solution isolates the privileged information from
-        # any style/format confound.
+        # Minimal header labeling the gold solution. Kept bare on purpose: an
+        # earlier verbose "explore/backtrack" + answer-format framing (teacher-only)
+        # got distilled as STYLE, ~2x'ing student output length and hurting GSM8K.
+        # Differing from the student prompt by the solution alone isolates the PI.
         self.reference_solution_header = "\n\nReference solution:\n"
 
         if self.tokenizer.pad_token is None:
@@ -74,8 +47,8 @@ class SelfDistillationDLLMDataCollator:
         )
 
     def _build_student_prompt(self, problem: str) -> str:
-        # Match eval/Dream/dream_train.py: raw question wrapped in the chat
-        # template, no "Problem:" prefix, no boxed/step-by-step instruction.
+        # Raw question in the chat template (matches eval/Dream/dream_train.py):
+        # no prefix, no boxed/step-by-step instruction.
         return self.tokenizer.apply_chat_template(
             [{"role": "user", "content": problem}],
             tokenize=False,
@@ -83,13 +56,9 @@ class SelfDistillationDLLMDataCollator:
         )
 
     def _compose_teacher_user_turn(self, problem: str, solution: str) -> str:
-        # User turn = the student's exact problem text + the ground-truth
-        # reference solution appended as privileged context. No transition /
-        # persona / answer-format instruction (see __init__): the teacher prompt
-        # must differ from the student prompt by the reference solution ALONE so
-        # the only thing distilled is the privileged information, not a style.
-        # add_generation_prompt=True appends the assistant header so the teacher
-        # scores from there, matching the student prompt's structure.
+        # User turn = student's problem text + reference solution appended. No
+        # extra framing (see __init__), so the prompts differ by the solution
+        # alone. add_generation_prompt appends the assistant header for scoring.
         user_content = f"{problem}{self.reference_solution_header}{solution}"
         return self.tokenizer.apply_chat_template(
             [{"role": "user", "content": user_content}],
@@ -98,31 +67,23 @@ class SelfDistillationDLLMDataCollator:
         )
 
     def _build_teacher_prompt(self, problem: str, solution: str) -> str:
-        # No-PI baseline: teacher prompt == student prompt (problem only), so
-        # on-policy JSD compares two predictive distributions on the SAME
-        # condition. This is the configuration that reached the 82% GSM8K
-        # baseline.
+        # No-PI baseline: teacher prompt == student prompt (problem only).
         if not self.use_privileged_info:
             return self._build_student_prompt(problem)
 
-        # PRIVILEGED-INFORMATION TEACHER: the teacher's prompt embeds the
-        # ground-truth `solution` as privileged context the student never sees.
-        # Conditioned on the gold solution, the teacher's distribution over the
-        # (masked) answer positions is sharpened; OPSD's JSD then distills that
-        # distribution into the student, which is conditioned on the problem
-        # alone. The reference solution IS the teacher's privileged information.
+        # PI teacher: embed the gold `solution` as privileged context the student
+        # never sees; conditioning sharpens the teacher's masked-position
+        # distribution, which OPSD's JSD distills into the student.
         #
-        # The solution is token-budgeted so the assembled prompt fits inside
-        # max_prompt_length. Otherwise the tokenizer's right-truncation in
-        # _tokenize() would drop the trailing assistant generation header and
-        # break the teacher forward's prompt/completion alignment.
+        # Token-budget the solution so the assembled prompt fits max_prompt_length;
+        # otherwise right-truncation would drop the trailing assistant header and
+        # break prompt/completion alignment.
         skeleton = self._compose_teacher_user_turn(problem, solution="")
         skeleton_len = len(self.tokenizer(skeleton, add_special_tokens=False)["input_ids"])
-        # Leave a small margin to absorb decode/re-encode token drift below.
+        # Margin absorbs decode/re-encode token drift below.
         budget = self.max_prompt_length - skeleton_len - 8
         if budget <= 0:
-            # No room for the solution: fall back to a non-privileged prompt
-            # rather than emitting a header-less (truncated) teacher prompt.
+            # No room: fall back to a non-privileged (but header-complete) prompt.
             return self._build_student_prompt(problem)
         sol_ids = self.tokenizer(solution, add_special_tokens=False)["input_ids"]
         if len(sol_ids) > budget:

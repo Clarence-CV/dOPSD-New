@@ -1,12 +1,7 @@
 """Entry point: Trajectory-OPSD self-distillation for diffusion LLMs (Dream-7B or LLaDA-8B).
 
-Same plumbing as `opsd_dllm_train.py`, but drives `OPSDDLLMTrajectoryTrainer`:
-the student's noisy view is a real intermediate decoding step (least-masked
-step with >`traj_mask_threshold` masked tokens) and the teacher's privileged
-information is the concrete final rollout. The off-policy / synthetic-mask
-flags (`--off_policy`, `--mask_schedule`, `--fixed_mask_ratio`,
-`--diffusion_min_t/max_t`) do not apply here and are replaced by
-`--traj_mask_threshold` and `--traj_step_select`.
+Drives OPSDDLLMTrajectoryTrainer: the student's noisy view is a real intermediate
+decoding step and the teacher's privileged info is the concrete final rollout.
 """
 
 import os
@@ -38,17 +33,11 @@ os.environ.setdefault("TRACKIO_SPACE_ID", "trl-trackio")
 
 # Mirrors opsd_dllm_train.py's registry (problem/solution source columns).
 DATASET_REGISTRY = {
-    "zigeng": {
-        "id": "Zigeng/dParallel_Dream_Distill_Data",
-        "problem_field": "question",
-        "solution_field": "llm_response",
-        "target_field": "gt_answer",  # clean ground-truth answer used to verify rollouts
-    },
     "mixchain": {
         "id": "horseee/MixChain-Z-PRM12K",
         "problem_field": "question",
         "solution_field": "answer",
-        "target_field": "target",  # clean final answer, e.g. "18"
+        "target_field": "target",  # clean final answer used to verify rollouts
     },
 }
 DEFAULT_DATASET = "mixchain"
@@ -90,7 +79,7 @@ class CustomScriptArguments(ScriptArguments):
         default=1e-3,
         metadata={"help": "Lower bound on mask rate (kept for parity; unused by trajectory masking)."},
     )
-    # === Trajectory-mode knobs ===============================================
+    # Trajectory-mode knobs.
     traj_mask_threshold: float = field(
         default=0.5,
         metadata={
@@ -252,7 +241,6 @@ if __name__ == "__main__":
     else:
         model_args.lora_task_type = None
 
-    # === Run / output naming ==================================================
     lr_str = f"{training_args.learning_rate:.0e}".replace("e-0", "e-")
     num_processes = int(os.environ.get("WORLD_SIZE", 1))
     effective_bs = (
@@ -279,7 +267,6 @@ if __name__ == "__main__":
     print(f"Output dir: {training_args.output_dir}")
     print(f"{'='*80}\n")
 
-    # === Validate flag combinations ===========================================
     if script_args.fixed_teacher and not model_args.use_peft:
         raise ValueError("fixed_teacher=True requires use_peft=True (LoRA-disable serves as the fixed teacher).")
 
@@ -326,7 +313,6 @@ if __name__ == "__main__":
             },
         )
 
-    # === Tokenizer ============================================================
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.model_name_or_path,
         revision=model_args.model_revision,
@@ -342,7 +328,6 @@ if __name__ == "__main__":
         raise ValueError("Tokenizer has no mask_token_id; pass --mask_token_id explicitly.")
     print(f"[opsd_dllm_trajectory_train] Using mask_token_id = {mask_token_id}")
 
-    # === Model ================================================================
     model_dtype = _resolve_dtype(model_args)
     print(
         f"\n{'='*80}\nLoading {model_args.model_name_or_path} "
@@ -372,7 +357,6 @@ if __name__ == "__main__":
 
     training_args.model_init_kwargs = None
 
-    # === Dataset ==============================================================
     if script_args.dataset not in DATASET_REGISTRY:
         raise ValueError(
             f"--dataset must be one of {sorted(DATASET_REGISTRY)} (got {script_args.dataset!r})."
@@ -392,8 +376,7 @@ if __name__ == "__main__":
         )
     rename_map = {src_problem: BASELINE_PROBLEM_FIELD, src_solution: BASELINE_SOLUTION_FIELD}
     keep_cols = [BASELINE_PROBLEM_FIELD, BASELINE_SOLUTION_FIELD]
-    # Keep the clean ground-truth answer column (used by the trainer to verify
-    # rollouts directly, no extraction from the long solution).
+    # Keep the clean GT answer column so the trainer verifies rollouts directly.
     has_target = bool(src_target) and src_target in train_dataset.column_names
     if has_target:
         if src_target != BASELINE_TARGET_FIELD:
@@ -419,7 +402,6 @@ if __name__ == "__main__":
         transition_prompt=script_args.transition_prompt,
     )
 
-    # === Trainer ==============================================================
     trainer = OPSDDLLMTrajectoryTrainer(
         model=model,
         args=training_args,

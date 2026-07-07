@@ -1,40 +1,11 @@
 #!/usr/bin/env bash
-# Vanilla SFT for a diffusion LM (Dream-7B).
-# Adapted from run_sft.sh:
-#   * Entry script: sft_train_dllm.py (LLaDA-style masked-prediction loss).
-#   * AR-only --max_length dropped; Dream's prompt+answer length is set
-#     explicitly by --max_prompt_length and --max_answer_length.
-#   * --attn_implementation sdpa (Dream-7B is unsafe with flash_attention_2).
-#   * --torch_dtype bfloat16 + --sampling_eps added (diffusion ELBO knob).
-#
-# MASK-SCHEDULE TOGGLE (env vars), mirrors run_opsd_dllm_7b.sh:
-#   MASK_SCHEDULE=diffusion (default) — antithetic per-example rate t ∈
-#                                       [DIFF_MIN_T, DIFF_MAX_T], i.i.d.
-#                                       Bernoulli per valid answer position.
-#                                       This is the LLaDA ELBO default.
-#   MASK_SCHEDULE=fixed               — exact-count k = round(n_answer * ratio)
-#                                       positions per example. Tune with
-#                                       FIXED_MASK_RATIO ("0.75" or "lo:hi"
-#                                       like "0.25:0.75").
-#
-#
-# DATASET TOGGLE (env var):
-#   DATASET=zigeng   (default) — Zigeng/dParallel_Dream_Distill_Data (~30k).
-#   DATASET=mixchain           — horseee/MixChain-Z-PRM12K (~12k): trains on
-#                                question -> problem, answer -> solution.
-#
-#   Usage examples:
-#       ./scripts/run_sft_dllm.sh
-#       DATASET=mixchain ./scripts/run_sft_dllm.sh
-#       MASK_SCHEDULE=fixed FIXED_MASK_RATIO=0.5 ./scripts/run_sft_dllm.sh
-#       MASK_SCHEDULE=fixed FIXED_MASK_RATIO=0.25:0.75 ./scripts/run_sft_dllm.sh
-#
-# accelerate.yaml note: this repo's YAML pins `gradient_accumulation_steps: 1`.
-# To bump GA, edit both the YAML and the --gradient_accumulation_steps flag below.
+# Vanilla SFT for a diffusion LM (Dream-7B) via sft_train_dllm.py (masked-prediction loss).
+# Toggles (env): MASK_SCHEDULE=diffusion|fixed (tune DIFF_MIN_T/DIFF_MAX_T or
+# FIXED_MASK_RATIO="0.75"/"lo:hi").
 
 set -euo pipefail
 
-cd "$(dirname "$0")/.."   # cd into OPSD/
+cd "$(dirname "$0")/.."
 
 export TRL_EXPERIMENTAL_SILENCE=1
 export TOKENIZERS_PARALLELISM=false
@@ -51,7 +22,6 @@ if [[ "$WANDB_MODE" == "disabled" ]]; then
     WANDB_ARGS+=(--disable_wandb)
 fi
 
-# --- Mask-schedule toggle: diffusion (default) vs fixed -----------------------
 MASK_SCHEDULE="${MASK_SCHEDULE:-fixed}"
 FIXED_MASK_RATIO="${FIXED_MASK_RATIO:-0.5}"
 DIFF_MIN_T="${DIFF_MIN_T:-0.0}"
@@ -61,7 +31,6 @@ case "$MASK_SCHEDULE" in
         MASK_TAG="diff${DIFF_MIN_T//./}-${DIFF_MAX_T//./}"
         ;;
     fixed)
-        # Replace ':' / '.' so the tag is filesystem-safe.
         MASK_TAG="fix${FIXED_MASK_RATIO//[:.]/}"
         ;;
     *)
@@ -70,16 +39,8 @@ case "$MASK_SCHEDULE" in
         ;;
 esac
 
-# --- Dataset toggle: zigeng (default) vs mixchain -----------------------------
-DATASET="${DATASET:-mixchain}"
-case "$DATASET" in
-    zigeng)   DATA_TAG="zigeng30k" ;;
-    mixchain) DATA_TAG="mixchain12k" ;;
-    *)
-        echo "[run_sft_dllm] ERROR: DATASET must be 'zigeng' or 'mixchain' (got '$DATASET')" >&2
-        exit 1
-        ;;
-esac
+DATASET="mixchain"
+DATA_TAG="mixchain12k"
 
 RUN_CONFIG="sft_dllm_dream7b_${MASK_TAG}_2epochs_${DATA_TAG}"
 OUTPUT_DIR="./outputs/sft_dllm/dream7b-${MASK_TAG}-2epochs-${DATA_TAG}"

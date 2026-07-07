@@ -1,75 +1,19 @@
 #!/usr/bin/env bash
-# OPSD self-distillation training for a diffusion LM (Dream-7B or LLaDA-8B).
-# Adapted from run_opsd_1b.sh:
-#   * AR-only flags removed: --use_vllm / --vllm_* / --top_k / --lmbda / --max_completion_length.
-#   * Dream uses its own diffusion_generate; LLaDA uses the trainer's built-in
-#     progressive-unmasking sampler. Both are controlled by --gen_max_new_tokens,
-#     --gen_steps, --gen_temperature, --gen_top_p. (--gen_alg / --gen_alg_temp
-#     are Dream-only knobs; they are ignored on the LLaDA path.)
-#   * --max_length is dropped (prompt+answer length is set explicitly by
-#     --max_prompt_length and --max_answer_length).
-#   * --attn_implementation sdpa (Dream-7B is unsafe with flash_attention_2).
-#
-# MODE TOGGLES (env vars):
-#   OFF_POLICY=0 (default) — on-policy: the student rolls out a completion,
-#                            which is then remasked.
-#   OFF_POLICY=1           — off-policy: distill on the dataset's ground-truth
-#                            answer (no rollout). The --gen_* flags are unused.
-#
-#   STUDENT_BACKEND=dream  (default) — Dream-org/Dream-v0-Instruct-7B (AutoModel).
-#   STUDENT_BACKEND=llada            — GSAI-ML/LLaDA-8B-Instruct (AutoModelForCausalLM).
-#                                      Overrides the model path; pass MODEL_NAME=...
-#                                      to point at a different LLaDA checkpoint.
-#
-#   MASK_SCHEDULE=diffusion (default) — antithetic per-example rate, i.i.d.
-#                                       Bernoulli per valid position. Tune with
-#                                       DIFF_MIN_T / DIFF_MAX_T (default 0/1).
-#   MASK_SCHEDULE=fixed               — exact-count k = round(n_valid * ratio).
-#                                       Tune with FIXED_MASK_RATIO ("0.75" or
-#                                       a "lo:hi" range like "0.25:0.75").
-#
-#   DATASET=zigeng   (default) — Zigeng/dParallel_Dream_Distill_Data.
-#   DATASET=mixchain           — horseee/MixChain-Z-PRM12K (question -> problem,
-#                                answer -> solution).
-#
-#   Usage examples:
-#       ./scripts/run_opsd_dllm_7b.sh
-#       DATASET=mixchain ./scripts/run_opsd_dllm_7b.sh
-#       OFF_POLICY=1 ./scripts/run_opsd_dllm_7b.sh
-#       STUDENT_BACKEND=llada ./scripts/run_opsd_dllm_7b.sh
-#       STUDENT_BACKEND=llada OFF_POLICY=1 ./scripts/run_opsd_dllm_7b.sh
-#       MASK_SCHEDULE=fixed FIXED_MASK_RATIO=0.5 ./scripts/run_opsd_dllm_7b.sh
-#
-# HARD INVARIANTS for Dream OPSD (do not break these):
-#   * --beta 0  → forward KL. Reverse KL (--beta 1) is zero-forcing and causes
-#     on-policy mode collapse (student degenerates to repeated tokens).
-#   * --gen_steps MUST equal --gen_max_new_tokens. steps < tokens forces the
-#     diffusion sampler to commit multiple tokens per step → quality collapse.
-#     (On-policy only; the --gen_* flags are ignored when OFF_POLICY=1.)
-#   * The student/teacher forward length must stay within Dream-v0's 2048
-#     position limit:
-#       on-policy : --max_prompt_length + --gen_max_new_tokens  (1024 + 768 = 1792)
-#       off-policy: --max_prompt_length + --max_answer_length   (1024 + 768 = 1792)
-#   * LLaDA has a larger context window (8192 for LLaDA-8B-Instruct), so the
-#     2048 limit doesn't bind there, but keeping the same budget makes the
-#     two runs directly comparable.
-#   * Eval (eval/run_eval_dllm.sh) must use the same generation length and the
-#     same steps==tokens rule, otherwise train/eval mismatch.
-#
-# accelerate.yaml note: this repo's YAML has been updated to use a literal
-# `gradient_accumulation_steps: 1` (the prior 'auto' placeholder failed to
-# resolve in the installed accelerate version). If you want to bump GA, edit
-# both the YAML and the --gradient_accumulation_steps flag below.
+# OPSD self-distillation for a diffusion LM (Dream-7B or LLaDA-8B).
+# Toggles (env): OFF_POLICY, STUDENT_BACKEND=dream|llada, MASK_SCHEDULE=diffusion|fixed,
+# USE_PI. See run_config assembly below for tags.
+# Invariants: --beta 0 = forward KL (reverse KL collapses on-policy);
+# --gen_steps MUST equal --gen_max_new_tokens; max_prompt_length + gen len must
+# stay under Dream-v0's 2048 limit; eval must match the same gen len / steps rule.
 
 set -euo pipefail
 
-cd "$(dirname "$0")/.."   # cd into OPSD/
+cd "$(dirname "$0")/.."
 
 export TRL_EXPERIMENTAL_SILENCE=1
 export TOKENIZERS_PARALLELISM=false
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1,2,3,4}
 
-# --- Backend toggle: Dream (default) vs LLaDA ---------------------------------
 STUDENT_BACKEND="${STUDENT_BACKEND:-dream}"
 if [[ "$STUDENT_BACKEND" == "llada" ]]; then
     DEFAULT_MODEL_NAME="GSAI-ML/LLaDA-8B-Instruct"
@@ -83,7 +27,6 @@ else
 fi
 MODEL_NAME="${MODEL_NAME:-$DEFAULT_MODEL_NAME}"
 
-# --- Mask-schedule toggle: diffusion (default) vs fixed -----------------------
 MASK_SCHEDULE="${MASK_SCHEDULE:-fixed}"
 FIXED_MASK_RATIO="${FIXED_MASK_RATIO:-0.5}"
 DIFF_MIN_T="${DIFF_MIN_T:-0.0}"
@@ -93,7 +36,6 @@ case "$MASK_SCHEDULE" in
         MASK_TAG="diff${DIFF_MIN_T//./}-${DIFF_MAX_T//./}"
         ;;
     fixed)
-        # Replace ':' / '.' so the tag is filesystem-safe.
         MASK_TAG="fix${FIXED_MASK_RATIO//[:.]/}"
         ;;
     *)
@@ -102,27 +44,13 @@ case "$MASK_SCHEDULE" in
         ;;
 esac
 
-# --- Dataset toggle: zigeng (default) vs mixchain -----------------------------
-# zigeng   = Zigeng/dParallel_Dream_Distill_Data (question -> problem, llm_response -> solution).
-# mixchain = horseee/MixChain-Z-PRM12K          (question -> problem, answer       -> solution).
-DATASET="${DATASET:-mixchain}"
-case "$DATASET" in
-    zigeng)   DATA_TAG="zigeng" ;;
-    mixchain) DATA_TAG="mixchain" ;;
-    *)
-        echo "[run_opsd_dllm_7b] ERROR: DATASET must be 'zigeng' or 'mixchain' (got '$DATASET')" >&2
-        exit 1
-        ;;
-esac
+DATASET="mixchain"
+DATA_TAG="mixchain"
 
-# --- Mode toggle: on-policy rollout (default) vs off-policy GT distillation ---
-# Separate run_config per mode (and dataset) so output_dir / W&B runs never collide.
 OFF_POLICY="${OFF_POLICY:-0}"
 if [[ "$OFF_POLICY" == "1" ]]; then
     OFF_POLICY_FLAG="--off_policy"
     POLICY_TAG="offpolicy"
-    # Off-policy completion = GT answer; 1024 + 768 = 1792 keeps the forward
-    # under Dream-v0's 2048 limit and matches the on-policy answer budget.
     MAX_ANSWER_LENGTH=1024
 else
     OFF_POLICY_FLAG=""
@@ -130,11 +58,6 @@ else
     MAX_ANSWER_LENGTH=1024
 fi
 
-# --- Privileged-information toggle: teacher sees the GT solution or not -------
-# USE_PI=0 (default) — no-PI baseline: teacher prompt == student prompt.
-# USE_PI=1           — PI: teacher prompt embeds the ground-truth solution.
-# Folded into the run_config tag so the PI / no-PI arms get distinct
-# output_dir / W&B runs for a clean controlled comparison.
 USE_PI="${USE_PI:-1}"
 if [[ "$USE_PI" == "1" ]]; then
     PI_FLAG="--use_privileged_info"
@@ -143,11 +66,7 @@ else
     PI_FLAG=""
     PI_TAG="noPI"
 fi
-# v2: minimal PI teacher prompt (problem + reference solution only). v1 wrapped
-# the solution in an "explore/backtrack" transition + "#### " format instruction
-# that inflated the distilled student's length and cost ~3pt on GSM8K; that text
-# was removed in data_collator_dllm.py so PI now differs from the student prompt
-# by the reference solution alone.
+
 RUN_CONFIG="${BACKEND_TAG}_${MASK_TAG}_${DATA_TAG}_${POLICY_TAG}_${PI_TAG}_beta0_v2"
 echo "[run_opsd_dllm_7b] STUDENT_BACKEND=$STUDENT_BACKEND  MODEL_NAME=$MODEL_NAME  DATASET=$DATASET  MASK_SCHEDULE=$MASK_SCHEDULE  OFF_POLICY=$OFF_POLICY  USE_PI=$USE_PI  run_config=$RUN_CONFIG"
 

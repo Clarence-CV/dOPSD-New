@@ -1,45 +1,16 @@
-# Evaluate a TRAINED LLaDA model on the same four benchmark families used for
-# Dream (see eval/Dream/eval_instruct/eval.sh): gsm8k, minerva_math, humaneval,
-# mbpp. LLaDA uses eval_llada.py with --model llada_dist; the model is selected
-# via `model_path=`.
-#
-# IMPORTANT — merge LoRA first. eval_llada.py loads a FULL model
-# (LLaDAModelLM.from_pretrained), so a raw LoRA adapter will NOT work. Merge the
-# trained adapter into the base model with merge_lora.py, then point MODEL_PATH
-# at the merged dir. Keep "instruct" in the merged dir name so the chat template
-# is applied (eval_llada.py auto-detects is_instruct from the path).
-#
-# ALG note: alg=llada_original == the original LLaDA decoding (low_confidence
-# remasking, no dParallel entropy threshold). This harness uses that by default
-# (remasking='low_confidence' and NO threshold passed). temperature is 0 and
-# top_p is unused by LLaDA's gumbel-argmax sampling, so they are informational.
-#
-#   Usage:
-#       bash eval/LLaDA/eval.sh                              # all four tasks
-#       TASKS="gsm8k_cot mbpp_instruct" bash eval/LLaDA/eval.sh
-#       MODEL_PATH=/abs/path/to/merged GPUS=0,1,2,3 bash eval/LLaDA/eval.sh
 
-# Set the environment variables first before running the command.
 export HF_ALLOW_CODE_EVAL=1
 export HF_DATASETS_TRUST_REMOTE_CODE=true
 
-# Absolute dir of this script (used to register the custom minerva_math500 task).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# --- Model under test ---------------------------------------------------------
-# Merged checkpoint of the trained LLaDA run
-# (run_config: llada8b_traj05-least-endpt_mixchain_forwardbeta0_filterwrong_v2).
-# Must be a FULL merged model dir whose name contains "instruct".
 MODEL_PATH="${MODEL_PATH:-/home/tuan/local_home/ptuandat/on_policy_self_distill_dLLM/outputs/opsd_dllm_trajectory/eval_checkpoint/LLaDa/llada8b_traj05-least-allfut_mixchain_forwardbeta0_filterwrong_v2_1500}"
 GPUS="${GPUS:-6}"
 PORT="${PORT:-29600}"
-# Short tag for output dirs (basename of the model path).
 TAG="$(basename "$MODEL_PATH")"
 OUT_ROOT="${OUT_ROOT:-evals_results/$TAG}"
 
-# Tasks to run (use the Dream-style labels; mapped to LLaDA task names below).
 TASKS="${TASKS:-gsm8k_cot}"
-#TASKS="${TASKS:-minerva_math500 humaneval_instruct mbpp_instruct}"
 
 echo "[eval/LLaDA] MODEL_PATH=$MODEL_PATH  GPUS=$GPUS  OUT_ROOT=$OUT_ROOT  TASKS='$TASKS'"
 
@@ -52,7 +23,6 @@ for TASK in $TASKS; do
   case "$TASK" in
     gsm8k_cot)
       LLADA_TASK=gsm8k
-      # export BLOCK_LENGTH=32 to match trajectory blocks (default 8 for legacy reproducibility)
       MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-256}"
       DIFF_STEPS="${DIFF_STEPS:-256}"
       BLOCK_LENGTH="${BLOCK_LENGTH:-8}"
@@ -116,7 +86,4 @@ for TASK in $TASKS; do
     --output_path ${OUT_DIR} --log_samples
 done
 
-## NOTICE: the code tasks need postprocessing before scoring — pass the
-## generated samples_*.jsonl under the matching output_path:
-#   python postprocess_code_humaneval.py ${OUT_ROOT}/humaneval_instruct-ns0-512/.../samples_*.jsonl
-#   python postprocess_code_mbpp.py       ${OUT_ROOT}/mbpp_instruct-ns0-256/.../samples_*.jsonl
+
