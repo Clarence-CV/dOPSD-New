@@ -1,8 +1,7 @@
 # On-Policy Self-Distillation for Diffusion LLMs (dLLM)
 
 <p align="center">
-<a href="https://arxiv.org/pdf/2601.18734v3"><img src="https://img.shields.io/badge/arXiv-2601.18734-b31b1b.svg"></a>
-<a href="https://siyan-zhao.github.io/blog/2026/opsd/"><img src="https://img.shields.io/badge/Blog-Post-blue.svg"></a>
+<a href="https://arxiv.org/abs/2607.04428"><img src="https://img.shields.io/badge/arXiv-2601.18734-b31b1b.svg"></a>
 </p>
 
 ---
