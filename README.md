@@ -158,12 +158,4 @@ If you find this useful, please consider citing:
 
 ## Acknowledgements
 
-This work builds on On-Policy Self-Distillation (OPSD):
-```bibtex
-@article{zhao2026self,
-  title={Self-Distilled Reasoner: On-Policy Self-Distillation for Large Language Models},
-  author={Zhao, Siyan and Xie, Zhihui and Liu, Mengchen and Huang, Jing and Pang, Guan and Chen, Feiyu and Grover, Aditya},
-  journal={arXiv preprint arXiv:2601.18734},
-  year={2026}
-}
-```
+This work builds on On-Policy Self-Distillation ([OPSD](https://arxiv.org/pdf/2601.18734v3))
