@@ -1,4 +1,4 @@
-# On-Policy Self-Distillation for Diffusion LLMs (dLLM)
+# dOPSD: On-Policy Self-Distillation for Diffusion Language Models
 
 <p align="center">
 <a href="https://arxiv.org/abs/2607.04428"><img src="https://img.shields.io/badge/arXiv-2601.18734-b31b1b.svg"></a>
@@ -145,14 +145,11 @@ the same `MASK_SCHEDULE` toggles as remask OPSD for a controlled comparison.
 
 If you find this useful, please consider citing:
 ```bibtex
-@misc{dat2026dopsdonpolicyselfdistillationdiffusion,
-      title={dOPSD: On-Policy Self-Distillation for Diffusion Language Models}, 
-      author={Phuong Tuan Dat and Qi Li and Xinchao Wang},
-      year={2026},
-      eprint={2607.04428},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2607.04428}, 
+@article{dat2026dopsd,
+ title={dOPSD: On-Policy Self-Distillation for Diffusion Language Models},
+ author={Dat, Phuong Tuan and Li, Qi and Wang, Xinchao},
+ journal={arXiv preprint arXiv:2607.04428},
+ year={2026}
 }
 ```
 
