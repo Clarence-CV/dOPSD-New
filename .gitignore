@@ -1,0 +1,8 @@
+__pycache__/
+outputs/
+checkpoints/
+wandb/
+logs/
+
+# 本地工作手册，不入库
+CLAUDE.md

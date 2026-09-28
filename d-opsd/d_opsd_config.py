@@ -244,6 +244,32 @@ class dOPSDConfig(TrainingArguments):
             "help": "Threshold for the Sudoku puzzle accuracy. Higher than this value will be considered in the training."
         }
     )
+    trace_every: int = field(
+        default=0,
+        metadata={
+            "help": "Dump the per-step denoising trace of the kept on-policy rollout every N generation rounds "
+            "(per process) to <output_dir>/traces. 0 disables tracing."
+        }
+    )
+    trace_topk: int = field(
+        default=20,
+        metadata={"help": "Top-k probabilities stored per masked position in traces."}
+    )
+    activation_checkpointing: str = field(
+        default="",
+        metadata={
+            "help": "LLaDA-native activation checkpointing strategy (whole_layer | one_in_two | one_in_three | "
+            "one_in_four | fine_grained). '' = off. LLaDA's remote code has no HF gradient_checkpointing_enable."
+        }
+    )
+    adapter_save_steps: int = field(
+        default=0,
+        metadata={
+            "help": "Every N steps, save a bf16 LoRA-adapter-only snapshot (no optimizer state) to "
+            "<output_dir>/adapters/step-N for evaluation. 0 = off. Full resumable checkpoints still follow "
+            "save_steps / save_total_limit."
+        }
+    )
     ### New parameters for d-OPSD end here.
 
     # Parameters that control the data preprocessing

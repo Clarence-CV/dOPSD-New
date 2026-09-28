@@ -328,6 +328,12 @@ def aggregate_results(directory=".", setup_name=None):
 
 
 if __name__ == "__main__":
+    # CLI: python parse_and_get_acc.py <generations_dir> <gsm|math|countdown|sudoku>
+    # setup_name selects the answer parser, so it must match the task.
+    import sys
+    if len(sys.argv) == 3:
+        aggregate_results(directory=sys.argv[1], setup_name=sys.argv[2])
+        sys.exit(0)
     directory_list = ["path/to/your/generations"] # TODO: Update this with the actual path to your generations
     for directory in directory_list:
         aggregate_results(directory=directory,

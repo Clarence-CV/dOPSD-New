@@ -24,6 +24,11 @@ from trl.trainer.utils import (
 
 from utils import main_print, generate, get_all_parsed_answer, get_parsed_answer_sudoku, get_parsed_answer_countdown
 
+import os
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "analysis"))
+from llada_trace import LLaDATraceRecorder
+
 
 if is_peft_available():
     from peft import PeftConfig, get_peft_model
@@ -90,6 +95,9 @@ class dOPSDTrainer(GRPOTrainer):
         self.diff_student_mask = args.diff_student_mask
         self.dataset_name = args.dataset
         self.sudoku_threshold = args.sudoku_threshold
+        self.trace_every = args.trace_every
+        self.trace_topk = args.trace_topk
+        self._gen_round = 0  # generation rounds on this process (for trace_every)
         if self.add_ref:
             self.teacher_max_prompt_length = args.teacher_max_prompt_length
         if args.max_grad_norm is not None:
@@ -109,6 +117,7 @@ class dOPSDTrainer(GRPOTrainer):
         main_print(f"Dataset name: {self.dataset_name}")
         main_print(f"Sudoku accuracy threshold: {self.sudoku_threshold}")
         main_print(f'gen_length: {self.args.max_completion_length}, block_length: {self.args.block_length}, diffusion_steps: {self.args.diffusion_steps}')
+        main_print(f"Trace every {self.trace_every} generation rounds (0 = off)")
 
     def get_logits(self, model, batch, prompt_index, cfg_scale, mask_id):
         input = batch
@@ -416,6 +425,10 @@ class dOPSDTrainer(GRPOTrainer):
         temperature = self.args.temperature or 0.0
         cfg_scale = self.args.cfg_scale
 
+        tracing = self.trace_every > 0 and self._gen_round % self.trace_every == 0
+        new_recorder = lambda: (
+            LLaDATraceRecorder(self.args.mask_id, prompt_ids.shape[1], topk=self.trace_topk) if tracing else None
+        )
         with unwrap_model_for_generation(self.model_wrapped, self.accelerator) as unwrapped_model:
             generation_batch_size = 1 # we fix it here. It almost won't slow the training..
             with torch.no_grad():
@@ -425,6 +438,7 @@ class dOPSDTrainer(GRPOTrainer):
                     # WARNING: Attention masks are not currently used during generation.
                     # This works fine here as long as the generation batch only consists of same prompts (our case a single prompt).
                     
+                    recorder = new_recorder()
                     batch_prompt_completion_ids, batch_trajectory = generate(
                         model=unwrapped_model,
                         prompt=batch_prompt_ids,
@@ -436,7 +450,8 @@ class dOPSDTrainer(GRPOTrainer):
                         remasking=self.args.remasking,
                         mask_id=self.args.mask_id,
                         debug1=self.debug1,
-                        fp16=self.args.fp16
+                        fp16=self.args.fp16,
+                        recorder=recorder,
                     )
                     completions_text = self.processing_class.batch_decode(batch_prompt_completion_ids[:, -gen_length:], skip_special_tokens=False)
                     # if self.debug1:
@@ -448,6 +463,7 @@ class dOPSDTrainer(GRPOTrainer):
                         best_completion_text = completions_text
                         best_batch_prompt_completion_ids = batch_prompt_completion_ids
                         best_batch_trajectory = batch_trajectory
+                        best_recorder = recorder
                         is_correct = False
                     elif self.dataset_name == "countdown":
                         parsed_answer, is_correct = get_parsed_answer_countdown(completions_text[0], inputs[0]["numbers"], inputs[0]["target"])
@@ -479,6 +495,7 @@ class dOPSDTrainer(GRPOTrainer):
                     iter_num = 1
                     while (not self.add_ref) and iter_num < self.passk and (not is_correct or self.dataset_name == "sudoku"):
                         iter_num = iter_num + 1
+                        recorder = new_recorder()
                         batch_prompt_completion_ids, batch_trajectory = generate(
                             model=unwrapped_model,
                             prompt=batch_prompt_ids,
@@ -490,7 +507,8 @@ class dOPSDTrainer(GRPOTrainer):
                             remasking=self.args.remasking,
                             mask_id=self.args.mask_id,
                             debug1=self.debug1,
-                            fp16=self.args.fp16
+                            fp16=self.args.fp16,
+                            recorder=recorder,
                         )
                         completions_text = self.processing_class.batch_decode(batch_prompt_completion_ids[:, -gen_length:], skip_special_tokens=False)
                         if self.dataset_name == "sudoku":
@@ -501,6 +519,7 @@ class dOPSDTrainer(GRPOTrainer):
                                 best_completion_text = completions_text
                                 best_batch_prompt_completion_ids = batch_prompt_completion_ids
                                 best_batch_trajectory = batch_trajectory
+                                best_recorder = recorder
                         elif self.dataset_name == "countdown":
                             parsed_answer, is_correct = get_parsed_answer_countdown(completions_text[0], inputs[0]["numbers"], inputs[0]["target"])
                         else:
@@ -530,6 +549,7 @@ class dOPSDTrainer(GRPOTrainer):
             completions_text = best_completion_text
             batch_prompt_completion_ids = best_batch_prompt_completion_ids
             batch_trajectory = best_batch_trajectory
+            recorder = best_recorder
             accuracy_tensor = torch.tensor(accuracy, device=device, dtype=torch.float32)
         prompt_length = prompt_ids.size(1)
         completion_part_ids = batch_prompt_completion_ids[:, prompt_length:]
@@ -623,6 +643,24 @@ class dOPSDTrainer(GRPOTrainer):
             self._metrics[mode]["accuracy"].append(accuracy_value)
             self._metrics[mode]["effective_num"].append(effective_num_gathered)
             is_correct = accuracy
+
+        if recorder is not None:  # trace of the rollout actually used for training
+            tr = recorder.finalize(batch_prompt_completion_ids)[0]
+            tr["meta"] = {
+                "global_step": self.state.global_step, "gen_round": self._gen_round,
+                "rank": self.accelerator.process_index, "dataset": self.dataset_name,
+                "is_correct": is_correct, "iter_num": iter_num, "prompt": prompts_text[0],
+                "completion": completions_text[0], "parsed_answer": parsed_answer,
+                "example": {k: v for k, v in inputs[0].items() if k != "prompt"},
+                "prompt_len": prompt_length, "gen_length": gen_length, "block_length": block_length,
+                "steps": steps, "temperature": temperature, "passk_temperature": self.passk_temperature,
+                "trajectory_len": steps_till_eos, "teacher_retain_ratio": self.teacher_retain_ratio,
+            }
+            trace_dir = os.path.join(self.args.output_dir, "traces")
+            os.makedirs(trace_dir, exist_ok=True)
+            torch.save(tr, os.path.join(
+                trace_dir, f"step{self.state.global_step:06d}_rank{self.accelerator.process_index}.pt"))
+        self._gen_round += 1
 
         if self.log_completions and self.state.global_step % self.args.completion_logging_steps == 0:
             prompts_to_log = gather_object(prompts_text)

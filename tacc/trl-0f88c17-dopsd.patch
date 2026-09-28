@@ -1,0 +1,59 @@
+--- a/trl/trainer/grpo_trainer.py
++++ b/trl/trainer/grpo_trainer.py
+@@ -421,7 +421,9 @@
+         # Check if the per_device_train/eval_batch_size * num processes can be divided by the number of generations
+         num_processes = self.accelerator.num_processes
+         global_batch_size = args.per_device_train_batch_size * num_processes
+-        possible_values = [n_gen for n_gen in range(2, global_batch_size + 1) if (global_batch_size) % n_gen == 0]
++        # modify
++        # possible_values = [n_gen for n_gen in range(2, global_batch_size + 1) if (global_batch_size) % n_gen == 0]
++        possible_values = [n_gen for n_gen in range(1, global_batch_size + 1) if (global_batch_size) % n_gen == 0]
+         if self.num_generations not in possible_values:
+             raise ValueError(
+                 f"The global train batch size ({num_processes} x {args.per_device_train_batch_size}) must be evenly "
+@@ -430,7 +432,7 @@
+             )
+         if self.args.eval_strategy != "no":
+             global_batch_size = args.per_device_eval_batch_size * num_processes
+-            possible_values = [n_gen for n_gen in range(2, global_batch_size + 1) if (global_batch_size) % n_gen == 0]
++            possible_values = [n_gen for n_gen in range(1, global_batch_size + 1) if (global_batch_size) % n_gen == 0]
+             if self.num_generations not in possible_values:
+                 raise ValueError(
+                     f"The global eval batch size ({num_processes} x {args.per_device_eval_batch_size}) must be evenly "
+--- a/trl/trainer/utils.py
++++ b/trl/trainer/utils.py
+@@ -1691,7 +1691,7 @@
+     return per_token_logps
+ 
+ 
+-def print_prompt_completions_sample(prompts: list[str], completions: list[str], rewards: list[int], step: int) -> None:
++def print_prompt_completions_sample(prompts: list[str], completions: list[str], rewards: list[int], step: int, teacher_prompts: list[str] | None = None) -> None:
+     """
+     Print out a sample of model completions to the console.
+ 
+@@ -1736,10 +1736,22 @@
+     table.add_column("Prompt", style="bright_yellow")
+     table.add_column("Completion", style="bright_green")
+     table.add_column("Reward", style="bold cyan", justify="right")
++    if teacher_prompts is not None:
++        table.add_column("Teacher Prompt", style="bright_magenta")
+ 
+-    for prompt, completion, reward in zip(prompts, completions, rewards):
+-        table.add_row(Text(prompt), Text(completion), f"{reward:.2f}")  # Formatting reward to 2 decimal places
+-        table.add_section()  # Adds a separator between rows
++    if teacher_prompts is not None:
++        for prompt, completion, reward, teacher_prompt in zip(prompts, completions, rewards, teacher_prompts):
++            table.add_row(
++                Text(prompt),
++                Text(completion),
++                f"{reward:.2f}",  # Formatting reward to 2 decimal places
++                Text(teacher_prompt)
++            )
++            table.add_section()  # Adds a separator between rows
++    else:
++        for prompt, completion, reward in zip(prompts, completions, rewards):
++            table.add_row(Text(prompt), Text(completion), f"{reward:.2f}")  # Formatting reward to 2 decimal places
++            table.add_section()  # Adds a separator between rows
+ 
+     panel = Panel(table, expand=False, title=f"Step {step}", border_style="bold white")
+     console.print(panel)

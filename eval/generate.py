@@ -96,9 +96,11 @@ def generate(
     pre_answer_keep_mode="prefix",
     clean_answer=False,
     debug=False,
+    recorder=None,
 ):
     """
     Optimized version of the generate function.
+    recorder: optional analysis.llada_trace.LLaDATraceRecorder; records every step.
     """
     has_pre_answer = pre_answer is not None
     batch_size = prompt.shape[0]
@@ -240,6 +242,10 @@ def generate(
                             'confidence': block_confidence[j].cpu().tolist()
                         })
 
+                if recorder is not None:
+                    x_before = x.clone()
+                    transfer = torch.zeros_like(x, dtype=torch.bool)
+
                 # Select tokens to transfer based on confidence
                 for j in range(confidence.shape[0]):
                     if calculate_distance and stop_recording[j]:
@@ -258,6 +264,11 @@ def generate(
                             })
                         
                         x[j, select_indices] = x0[j, select_indices]
+                        if recorder is not None:
+                            transfer[j, select_indices] = True
+
+                if recorder is not None:
+                    recorder.record_step(num_block, x_before, logits, x0, transfer)
 
             eos_present = torch.any(x[:, prompt.shape[1]:] == eos_token_id, dim=1)
             stop_recording |= eos_present

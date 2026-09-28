@@ -443,10 +443,12 @@ def generate(
     mask_id=126336,
     eos_token_id=126081,
     debug1=False,
-    fp16=False # self.args.fp16
+    fp16=False, # self.args.fp16
+    recorder=None,
 ):
     """
     Optimized version of the generate function.
+    recorder: optional analysis.llada_trace.LLaDATraceRecorder; records every step.
     """
     with torch.cuda.amp.autocast(enabled=True):
         batch_size = prompt.shape[0]
@@ -528,7 +530,9 @@ def generate(
                             if num_tokens > 0:
                                 _, select_index = torch.topk(confidence[j], k=num_tokens)
                                 transfer_index[j, select_index] = True
-                                
+
+                        if recorder is not None:
+                            recorder.record_step(num_block, x, logits, x0, transfer_index)
                         x[transfer_index] = x0[transfer_index]
         
         return x, x_trajectory

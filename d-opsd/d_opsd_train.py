@@ -1,8 +1,10 @@
 import torch
 import wandb
-from transformers import AutoTokenizer, AutoModel, BitsAndBytesConfig
+from transformers import AutoTokenizer, AutoModel, BitsAndBytesConfig, TrainerCallback
 from trl import TrlParser, ModelConfig
 from peft import LoraConfig
+from transformers.trainer_utils import get_last_checkpoint
+import os
 import warnings
 
 # Custom imports
@@ -26,6 +28,28 @@ from data_utils import (
     get_math_questions,
 )
 from utils import set_random_seed
+
+
+class AdapterSnapshotCallback(TrainerCallback):
+    """Every `every` steps, save a bf16 LoRA-adapter-only snapshot (no optimizer state).
+
+    Cheap evaluation checkpoints; full resumable checkpoints are left to save_steps /
+    save_total_limit. ZeRO-2 keeps full parameters on every rank, so rank 0 saves alone.
+    """
+
+    def __init__(self, output_dir, every):
+        self.output_dir = output_dir
+        self.every = every
+
+    def on_step_end(self, args, state, control, model=None, **kwargs):
+        if state.global_step % self.every != 0 or not state.is_world_process_zero:
+            return
+        peft_model = getattr(model, "module", model)
+        # named_parameters, not state_dict(): the latter re-serializes every 4-bit base weight.
+        lora_sd = {k: v.detach().to(torch.bfloat16) for k, v in peft_model.named_parameters() if "lora_" in k}
+        path = os.path.join(self.output_dir, "adapters", f"step-{state.global_step}")
+        peft_model.save_pretrained(path, state_dict=lora_sd)
+        print(f"[adapter snapshot] step {state.global_step} -> {path}")
 
 
 def main(opsd_config, model_config):
@@ -85,6 +109,10 @@ def main(opsd_config, model_config):
     tokenizer = AutoTokenizer.from_pretrained(opsd_config.model_path, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
     model.config.use_cache = False
+    if opsd_config.activation_checkpointing:
+        # LLaDA's own (non-reentrant) checkpointing; the strategy enum is a StrEnum.
+        model.model.set_activation_checkpointing(opsd_config.activation_checkpointing)
+        print(f"LLaDA activation checkpointing: {opsd_config.activation_checkpointing}")
 
     # Configure LoRA for parameter-efficient fine-tuning
     peft_config = LoraConfig(
@@ -102,13 +130,24 @@ def main(opsd_config, model_config):
         reward_funcs=reward_functions,
         train_dataset=train_set,
     )
+    if opsd_config.adapter_save_steps > 0:
+        trainer.add_callback(AdapterSnapshotCallback(opsd_config.output_dir, opsd_config.adapter_save_steps))
 
     if opsd_config.save_steps % opsd_config.num_iterations != 0:
         warnings.warn(
             f"save_steps ({opsd_config.save_steps}) is not divisible by num_iterations ({opsd_config.num_iterations}). If resuming training from a checkpoint, you might need to manually specify the checkpoint where the training step is divisible by {opsd_config.num_iterations}."
         )
 
-    trainer.train()
+    # resume_from_checkpoint: a checkpoint dir, or "auto" = latest checkpoint-* in output_dir
+    # (fresh start if none). Needed to chain jobs past a cluster wall-clock limit.
+    resume = opsd_config.resume_from_checkpoint
+    if resume in (None, False, "", "false", "False"):
+        resume = None
+    elif resume == "auto":
+        resume = get_last_checkpoint(opsd_config.output_dir) if os.path.isdir(opsd_config.output_dir) else None
+    print(f"resume_from_checkpoint = {resume}")
+
+    trainer.train(resume_from_checkpoint=resume)
 
 
 if __name__ == "__main__":

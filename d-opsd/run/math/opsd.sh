@@ -6,12 +6,12 @@ export LOGDIR="checkpoints"
 mkdir -p $LOGDIR
 
 DATASET="math"
-RUN_NAME=opsd
-MODEL_PATH='GSAI-ML/LLaDA-8B-Instruct'
+RUN_NAME="${RUN_NAME:-opsd}"
+MODEL_PATH="${MODEL_PATH:-GSAI-ML/LLaDA-8B-Instruct}"
 PASSK=8
 PASSK_TEMP=0.9 
 TEACHER_RETAIN_RATIO=0.25
-BATCH_DIVIDE=4 # for A100 / H100, set to 8
+BATCH_DIVIDE="${BATCH_DIVIDE:-4}" # for A100 / H100, set to 8
 # num_iter=barch_divide
 TOP_K_LOSS=20
 BETA=1
@@ -20,6 +20,18 @@ fixed_teacher=True
 add_ref=False
 diff_student_mask=False
 JSD_TOKEN_CLIP=0.04
+# Cluster knobs (defaults reproduce the original script).
+NUM_GPUS="${NUM_GPUS:-4}"               # accelerate.yaml num_processes
+OUTPUT_DIR="${OUTPUT_DIR:-checkpoints/$DATASET/$RUN_NAME}"
+MAX_STEPS="${MAX_STEPS:--1}"            # >0 overrides num_train_epochs
+SAVE_STEPS="${SAVE_STEPS:-25}"          # opsd.yaml default; keep divisible by BATCH_DIVIDE
+RESUME_FROM="${RESUME_FROM:-false}"     # checkpoint dir | auto | false
+TRACE_EVERY="${TRACE_EVERY:-0}"         # dump a rollout trace every N generation rounds; 0 = off
+SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-500}"   # opsd.yaml default; 1 = keep only the latest full checkpoint
+ADAPTER_SAVE_STEPS="${ADAPTER_SAVE_STEPS:-0}" # bf16 adapter-only snapshots every N steps; 0 = off
+ACT_CKPT="${ACT_CKPT:-}"                # LLaDA activation checkpointing (e.g. whole_layer); '' = off
+MASTER_PORT="${MASTER_PORT:-16595}"
+
 if [ "$debug1" = "True" ]; then
     DEBUG_FLAG="--debug1"
 else
@@ -44,14 +56,22 @@ fi
 
 accelerate launch \
     --config_file accelerate.yaml \
-    --main_process_port 16595 d_opsd_train.py \
+    --num_processes $NUM_GPUS \
+    --main_process_port $MASTER_PORT d_opsd_train.py \
     --config opsd.yaml \
     --model_path $MODEL_PATH \
     --num_iterations $BATCH_DIVIDE \
     --batch_divide $BATCH_DIVIDE \
     --dataset $DATASET \
     --run_name $RUN_NAME \
-    --output_dir checkpoints/$DATASET/$RUN_NAME \
+    --output_dir "$OUTPUT_DIR" \
+    --max_steps $MAX_STEPS \
+    --save_steps $SAVE_STEPS \
+    --resume_from_checkpoint "$RESUME_FROM" \
+    --trace_every $TRACE_EVERY \
+    --save_total_limit $SAVE_TOTAL_LIMIT \
+    --adapter_save_steps $ADAPTER_SAVE_STEPS \
+    --activation_checkpointing "$ACT_CKPT" \
     --passk $PASSK \
     --passk_temperature $PASSK_TEMP \
     --teacher_retain_ratio $TEACHER_RETAIN_RATIO \
@@ -61,4 +81,5 @@ accelerate launch \
     $DEBUG_FLAG \
     $DIFF_STUDENT_MASK_FLAG \
     $ADD_REF_FLAG \
-    $FIXED_TEACHER_FLAG
+    $FIXED_TEACHER_FLAG \
+    "$@"

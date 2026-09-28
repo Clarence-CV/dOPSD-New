@@ -22,6 +22,10 @@ from sudoku import SudokuDataset
 from utils import main_print, get_parsed_answer, get_parsed_answer_math, get_parsed_answer_sudoku, get_parsed_answer_countdown
 from parser_helper import is_equiv
 
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "analysis"))
+from llada_trace import LLaDATraceRecorder
+
 
 DATASET_MAP = {
     "gsm": GSM8KDataset,
@@ -91,6 +95,8 @@ def evaluate(
     clean_answer=False,
     add_ref=False,
     dataset="gsm",
+    trace_dir="",
+    trace_topk=20,
 ):
     model.eval()
     total_processed = torch.tensor(0, device=model.device)
@@ -127,6 +133,10 @@ def evaluate(
                 pre_answer = answer_data[batch_idx]["generations"]
             else:
                 pre_answer = None
+            recorder = (
+                LLaDATraceRecorder(126336, input_ids.shape[1], topk=trace_topk)
+                if trace_dir and not passk else None
+            )
             out, distances_list, confidence_list = generate(
                 model,
                 input_ids,
@@ -143,6 +153,7 @@ def evaluate(
                 pre_answer_keep_mode=pre_answer_keep_mode,
                 clean_answer=clean_answer,
                 debug=debug,
+                recorder=recorder,
             )
             generated_texts = tokenizer.batch_decode(out[:, -gen_length:], skip_special_tokens=False)
             if dataset == "sudoku":
@@ -168,20 +179,33 @@ def evaluate(
                     print(f'Parsed answer: {parsed_answer}, Accuracy: {is_correct}, ground truth: {gt_answers[0]}')    
             else:
                 parsed_answer, effective_tokens, is_correct = get_all_parsed_answer(generated_texts[0], gt_answers[0], dataset, questions[0]) 
+            # Per-row answers (the original graded row 0 and copied it to the whole batch;
+            # reported accuracy was unaffected since parse_and_get_acc.py re-parses generations).
+            parsed_list, correct_list = [parsed_answer] * len(gt_answers), [is_correct] * len(gt_answers)
+            if dataset != "sudoku" and not passk:
+                for j in range(len(gt_answers)):
+                    parsed_list[j], _, correct_list[j] = get_all_parsed_answer(generated_texts[j], gt_answers[j], dataset, questions[j])
             if (not passk) or dataset == "sudoku":
                 example_result = [
                     {
                         "question": questions[j],
                         "prompt_input": prompts[j],
                         "generations": generated_texts[j],
-                        "parsed_answer": parsed_answer,
+                        "parsed_answer": parsed_list[j],
                         "ground_truth": gt_answers[j],
-                        "is_correct": is_correct,
+                        "is_correct": correct_list[j],
                     }
                     for j in range(len(gt_answers))
                 ]
                 all_generations.extend(example_result)
                 total_processed += len(generated_texts)
+                if recorder is not None:
+                    for j, tr in enumerate(recorder.finalize(out)):
+                        tr["meta"] = dict(example_result[j], rank=dist.get_rank(), batch=batch_idx, row=j,
+                                          prompt_len=int(input_ids.shape[1]), gen_length=gen_length,
+                                          block_length=block_length, steps=steps, temperature=temperature,
+                                          remasking=remasking)
+                        torch.save(tr, os.path.join(trace_dir, f"rank{dist.get_rank()}_b{batch_idx:04d}_r{j}.pt"))
             # For the reported pass@1 accuracy, the branch already ends here.
             
             else:
@@ -391,7 +415,12 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--num_answer_per_question", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--trace_dir", type=str, default="", help="Save per-step denoising traces here (off if empty).")
+    parser.add_argument("--trace_topk", type=int, default=20)
+    parser.add_argument("--subsample", type=int, default=0, help="Evaluate a seeded random subset of N problems (0 = task default).")
     args = parser.parse_args()
+    if args.trace_dir:
+        os.makedirs(args.trace_dir, exist_ok=True)
 
     init_seed(args.seed)
 
@@ -416,7 +445,7 @@ if __name__ == "__main__":
 
     dataset = DATASET_MAP[args.dataset](
         tokenizer,
-        subsample=num_evals[args.dataset],
+        subsample=args.subsample if args.subsample > 0 else num_evals[args.dataset],
         num_examples=args.few_shot,
         add_reasoning=True,  # prefill for all models
         split=args.split,
@@ -488,6 +517,8 @@ if __name__ == "__main__":
         clean_answer=args.clean_answer,
         add_ref=args.add_ref,
         dataset=args.dataset,
+        trace_dir=args.trace_dir,
+        trace_topk=args.trace_topk,
     )
 
     if not args.dont_save:
