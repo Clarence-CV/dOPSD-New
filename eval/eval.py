@@ -205,6 +205,7 @@ def evaluate(
                                           prompt_len=int(input_ids.shape[1]), gen_length=gen_length,
                                           block_length=block_length, steps=steps, temperature=temperature,
                                           remasking=remasking)
+                        tr["prompt_ids"] = input_ids[j].int().cpu()  # exact (left-padded) model input
                         torch.save(tr, os.path.join(trace_dir, f"rank{dist.get_rank()}_b{batch_idx:04d}_r{j}.pt"))
             # For the reported pass@1 accuracy, the branch already ends here.
             

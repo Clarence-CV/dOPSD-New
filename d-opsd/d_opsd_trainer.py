@@ -656,6 +656,7 @@ class dOPSDTrainer(GRPOTrainer):
                 "steps": steps, "temperature": temperature, "passk_temperature": self.passk_temperature,
                 "trajectory_len": steps_till_eos, "teacher_retain_ratio": self.teacher_retain_ratio,
             }
+            tr["prompt_ids"] = prompt_ids[0].int().cpu()
             trace_dir = os.path.join(self.args.output_dir, "traces")
             os.makedirs(trace_dir, exist_ok=True)
             torch.save(tr, os.path.join(
