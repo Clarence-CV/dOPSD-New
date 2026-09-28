@@ -97,6 +97,7 @@ def evaluate(
     dataset="gsm",
     trace_dir="",
     trace_topk=20,
+    threshold=None,
 ):
     model.eval()
     total_processed = torch.tensor(0, device=model.device)
@@ -154,6 +155,7 @@ def evaluate(
                 clean_answer=clean_answer,
                 debug=debug,
                 recorder=recorder,
+                threshold=threshold,
             )
             generated_texts = tokenizer.batch_decode(out[:, -gen_length:], skip_special_tokens=False)
             if dataset == "sudoku":
@@ -204,7 +206,7 @@ def evaluate(
                         tr["meta"] = dict(example_result[j], rank=dist.get_rank(), batch=batch_idx, row=j,
                                           prompt_len=int(input_ids.shape[1]), gen_length=gen_length,
                                           block_length=block_length, steps=steps, temperature=temperature,
-                                          remasking=remasking)
+                                          remasking=remasking, threshold=threshold)
                         tr["prompt_ids"] = input_ids[j].int().cpu()  # exact (left-padded) model input
                         torch.save(tr, os.path.join(trace_dir, f"rank{dist.get_rank()}_b{batch_idx:04d}_r{j}.pt"))
             # For the reported pass@1 accuracy, the branch already ends here.
@@ -419,6 +421,8 @@ if __name__ == "__main__":
     parser.add_argument("--trace_dir", type=str, default="", help="Save per-step denoising traces here (off if empty).")
     parser.add_argument("--trace_topk", type=int, default=20)
     parser.add_argument("--subsample", type=int, default=0, help="Evaluate a seeded random subset of N problems (0 = task default).")
+    parser.add_argument("--threshold", type=float, default=0.0,
+                        help="Confidence-threshold parallel decoding (e.g. 0.9); 0 = fixed-budget decoding (paper).")
     args = parser.parse_args()
     if args.trace_dir:
         os.makedirs(args.trace_dir, exist_ok=True)
@@ -477,6 +481,9 @@ if __name__ == "__main__":
     if args.few_shot > 0:
         base_path = base_path + f"_fs{args.few_shot}"
 
+    if args.threshold > 0:
+        base_path = base_path + f"_thr{args.threshold}"
+
     if len(args.suffix) > 0:
         base_path = base_path + f"_{args.suffix}"
 
@@ -520,6 +527,7 @@ if __name__ == "__main__":
         dataset=args.dataset,
         trace_dir=args.trace_dir,
         trace_topk=args.trace_topk,
+        threshold=args.threshold if args.threshold > 0 else None,
     )
 
     if not args.dont_save:

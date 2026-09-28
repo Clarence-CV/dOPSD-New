@@ -97,12 +97,20 @@ def generate(
     clean_answer=False,
     debug=False,
     recorder=None,
+    threshold=None,
 ):
     """
     Optimized version of the generate function.
     recorder: optional analysis.llada_trace.LLaDATraceRecorder; records every step.
+    threshold: if set, confidence-threshold parallel decoding instead of the fixed budget:
+        within the current block, every masked position whose low_confidence score exceeds
+        `threshold` is revealed in the same step (at least the single most confident one),
+        until the block is full. `steps` is ignored; the number of steps is adaptive.
     """
     has_pre_answer = pre_answer is not None
+    if threshold is not None:
+        assert not has_pre_answer and cfg_scale == 0.0 and remasking == "low_confidence", \
+            "threshold decoding supports plain low_confidence sampling only"
     batch_size = prompt.shape[0]
     if pre_answer:
         pre_answer_tokens = tokenizer(pre_answer, return_tensors="pt").to(prompt.device)["input_ids"]
@@ -166,6 +174,31 @@ def generate(
         for num_block in tqdm(range(num_blocks), disable=(dist.get_rank() != 0)):
             start_idx = prompt.shape[1] + num_block * block_length
             end_idx = prompt.shape[1] + (num_block + 1) * block_length
+
+            if threshold is not None:
+                while (x[:, start_idx:end_idx] == mask_id).any():
+                    mask_index = x == mask_id
+                    logits = model(x).logits
+                    x0 = torch.argmax(add_gumbel_noise(logits, temperature), dim=-1)
+                    x0_p = torch.gather(F.softmax(logits, dim=-1), dim=-1, index=x0.unsqueeze(-1)).squeeze(-1)
+                    x0_p[:, end_idx:] = -np.inf
+                    x0 = torch.where(mask_index, x0, x)
+                    confidence = torch.where(mask_index, x0_p, torch.tensor(-np.inf, device=x0.device))
+                    x_before = x.clone()
+                    transfer = torch.zeros_like(x, dtype=torch.bool)
+                    for j in range(confidence.shape[0]):
+                        if not (x[j, start_idx:end_idx] == mask_id).any():
+                            continue  # this row's block is already full
+                        select_indices = (confidence[j] > threshold).nonzero(as_tuple=True)[0]
+                        if select_indices.numel() == 0:
+                            select_indices = confidence[j].argmax().view(1)
+                        transfer[j, select_indices] = True
+                    x[transfer] = x0[transfer]
+                    if recorder is not None:
+                        recorder.record_step(num_block, x_before, logits, x0, transfer)
+                eos_present = torch.any(x[:, prompt.shape[1]:] == eos_token_id, dim=1)
+                stop_recording |= eos_present
+                continue
 
             if has_pre_answer and clean_answer:
                 # prevent answer leaking

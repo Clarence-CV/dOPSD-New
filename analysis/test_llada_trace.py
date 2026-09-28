@@ -78,6 +78,43 @@ def check(rows, final, P, L, block_len, steps, greedy, traj=None):
     return torch.cat([tr["n_revealed"] for tr in rows])
 
 
+class PeakyLLaDA(FakeLLaDA):
+    """Random logits with a random per-position sharpness, so some slots exceed the threshold."""
+
+    def __call__(self, x):
+        out = super().__call__(x)
+        out.logits = out.logits * torch.rand(x.shape[0], x.shape[1], 1) * 12
+        out.logits[..., MASK] = -1e4
+        out.logits[..., EOS] = -1e4
+        return out
+
+
+def check_threshold(rows, final, P, L, block_len, tau):
+    sizes = []
+    for b, tr in enumerate(rows):
+        S = tr["states"]
+        assert (S[0] == MASK).all() and not (S[-1] == MASK).any()
+        assert torch.equal(S[-1], final[b, P:].int())
+        rv, mk = tr["reveal"], tr["masked"]
+        for t in range(S.shape[0] - 1):
+            c_t = rv["pos"][rv["step"] == t].long()
+            changed = (S[t] != S[t + 1]).nonzero().flatten()
+            assert torch.equal(changed, c_t.sort().values)
+            if c_t.numel() == 0:
+                continue  # this row's block was already full while other rows kept decoding
+            blk = int(tr["block"][t])
+            lo, hi = blk * block_len, (blk + 1) * block_len
+            assert ((c_t >= lo) & (c_t < hi)).all()
+            sel = (mk["step"] == t) & (mk["pos"] >= lo) & (mk["pos"] < hi)
+            conf, rev = mk["cand_prob"][sel], mk["revealed"][sel]
+            if rev.sum() > 1:
+                assert (conf[rev] > tau).all() and (conf[~rev] <= tau).all()
+            else:
+                assert conf[rev].item() > tau or conf[rev].item() >= conf.max().item() - 1e-6
+            sizes.append(c_t.numel())
+    return sizes
+
+
 def main():
     os.environ.setdefault("LOCAL_RANK", "0")
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
@@ -105,6 +142,16 @@ def main():
         assert len(traj) == steps - steps // (L // block_len)  # last block never appended
         check(rec.finalize(out), out, P, L, block_len, steps, greedy=temp == 0.0, traj=traj)
         print(f"ok  d-opsd/utils.py       temp={temp}  trajectory len={len(traj)} matches S_t")
+
+    # confidence-threshold decoding (eval only): adaptive |C_t|, all in-block slots > tau revealed
+    tau = 0.9
+    prompt = torch.randint(10, V, (B, P))
+    rec = LLaDATraceRecorder(MASK, P, topk=5, chunk=7)
+    out, _, _ = ev.generate(PeakyLLaDA(), prompt, None, steps=steps, gen_length=L, block_length=block_len,
+                            temperature=0.0, mask_id=MASK, eos_token_id=EOS, recorder=rec, threshold=tau)
+    sizes = check_threshold(rec.finalize(out), out, P, L, block_len, tau)
+    assert len(set(sizes)) > 1, sizes
+    print(f"ok  eval/generate.py      threshold={tau}  |C_t| counts={torch.bincount(torch.tensor(sizes)).tolist()}")
 
     # recorder=None must leave the samplers bit-identical
     for gen, kw in ((ev.generate, dict(tokenizer=None)), (tr_utils.generate, {})):

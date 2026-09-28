@@ -39,11 +39,12 @@ class ContextModel(torch.nn.Module):
         return type("O", (), {"logits": logits})()
 
 
-def make_trace(ev, steps, L=32, block=8, P=5):
+def make_trace(ev, steps, L=32, block=8, P=5, threshold=None):
     prompt = torch.randint(10, T.V, (1, P))
     rec = LLaDATraceRecorder(T.MASK, P, topk=5)
-    out, _, _ = ev.generate(T.FakeLLaDA(), prompt, None, steps=steps, gen_length=L, block_length=block,
-                            temperature=0.0, mask_id=T.MASK, eos_token_id=T.EOS, recorder=rec)
+    gen_model = T.PeakyLLaDA() if threshold else T.FakeLLaDA()
+    out, _, _ = ev.generate(gen_model, prompt, None, steps=steps, gen_length=L, block_length=block,
+                            temperature=0.0, mask_id=T.MASK, eos_token_id=T.EOS, recorder=rec, threshold=threshold)
     tr = rec.finalize(out)[0]
     tr["prompt_ids"] = prompt[0].int()
     tr["meta"] = {"is_correct": True, "block_length": block, "steps": steps, "temperature": 0.0}
@@ -126,6 +127,17 @@ def main():
         print(f"ok  steps={steps} |C_t|={npar} ratio={ratio}: tokens={r['g'].numel()}  ctrl_ok={ok.float().mean():.2f}  "
               f"g={r['g'].mean():+.3f}  D_S={r['D_S'].mean():+.3f}  D_T={r['D_T'].mean():+.3f}  "
               f"coord={r['coord'].mean():+.3f}  coord_ctrl={r['coord_ctrl'][ok].mean():+.3f}")
+    # threshold-decoded trace: variable |C_t| per step
+    tr = make_trace(ev, steps=16, threshold=0.9)
+    tr["meta"]["teacher_retain_ratio"] = 0.25
+    an = A.Analyzer(model, False, "fixed", pi_samples=1, topk=5, batch_size=4, steps_per_chunk=3, device="cpu")
+    r = an.analyze(tr, seed=0)
+    n_last = int((tr["reveal"]["pos"] >= 24).sum())  # tokens of the last block are excluded
+    assert r["g"].numel() == 32 - n_last
+    assert torch.allclose(r["coord"], r["D_S"] - r["D_T"])
+    sizes = torch.unique(r["n_parallel"]).tolist()
+    ok_by_n = {n: float(r["ctrl_ok"][r["n_parallel"] == n].float().mean()) for n in sizes}
+    print(f"ok  threshold trace: |C_t| values={sizes}  ctrl_ok by |C_t|={ok_by_n}")
     dist.destroy_process_group()
     print("all passed")
 

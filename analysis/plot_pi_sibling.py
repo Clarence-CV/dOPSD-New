@@ -20,6 +20,8 @@ are correlated, so a token-level CI would be overconfident).
   fig8_cogain.png             A: P(CoGain_t = 1) for real co-decoded groups vs groups shuffled
                               within (rollout, block); the MEAN CoGain is shuffle-invariant when
                               all |C_t| are equal, so the all-up rate is the informative statistic
+  fig9_threshold_parallel.png sibling gap vs |C_t| WITHIN a threshold-decoded run (--thr_records),
+                              where |C_t| varies naturally; |C_t|=1 has no siblings and is left out
   summary.csv                 every plotted number (table view)
 """
 
@@ -317,9 +319,39 @@ def fig8(groups, out, rows):
     plt.close(fig)
 
 
+THR_BINS = [(2, 2, "2"), (3, 4, "3-4"), (5, 8, "5-8"), (9, 10**6, "9+")]
+
+
+def fig9(tag, groups, out, rows):
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
+    for ax, key, ylabel in ((axes[0], "js_sib", r"mean $D_{JS}(p_S, p_{sib})$"), (axes[1], "D_S", r"mean $D_S$")):
+        for k, name in enumerate(("correct", "wrong")):
+            xs, ms, err = [], [], []
+            for b, (lo_n, hi_n, lab) in enumerate(THR_BINS):
+                sub = [r[key][(r["n_parallel"] >= lo_n) & (r["n_parallel"] <= hi_n)] for r in groups[name]]
+                sub = [v for v in sub if v.size]
+                if not sub:
+                    continue
+                m, lo, hi = cluster_boot(sub, np.mean)
+                xs.append(b), ms.append(m), err.append((m - lo, hi - m))
+                rows.append(["fig9", f"{key} | |C_t| in {lab}", name, len(sub), tag, "mean", m, lo, hi])
+            if xs:
+                ax.errorbar(np.array(xs) + (k - 0.5) * 0.08, ms, yerr=np.array(err).T, color=COLORS[name],
+                            linewidth=2, marker="o", markersize=6, capsize=3, label=name)
+        ax.set_xticks(range(len(THR_BINS)), [lab for _, _, lab in THR_BINS])
+        style(ax, r"tokens revealed in the same step  $|C_t|$", ylabel)
+        ax.legend(frameon=False, fontsize=9, labelcolor=INK)
+    axes[0].set_title(f"Threshold decoding ({tag}): sibling gap vs natural |C_t| (95% CI)", color=INK,
+                      fontsize=11, loc="left")
+    fig.tight_layout()
+    fig.savefig(os.path.join(out, "fig9_threshold_parallel.png"), dpi=160, facecolor=SURFACE)
+    plt.close(fig)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--records", action="append", required=True, help="name=records_dir (first = primary)")
+    ap.add_argument("--thr_records", default="", help="name=records_dir of a threshold-decoded run (fig9)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--include_special", action="store_true")
     args = ap.parse_args()
@@ -340,11 +372,15 @@ def main():
     fig6(primary, args.out, rows)
     fig7(primary, args.out, rows)
     fig8(primary, args.out, rows)
+    if args.thr_records:
+        name, d = args.thr_records.split("=", 1)
+        fig9(name, split(load(d, args.include_special)), args.out, rows)
     with open(os.path.join(args.out, "summary.csv"), "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["figure", "quantity", "group", "n_rollouts", "n_tokens/note", "stat", "value", "ci_lo", "ci_hi"])
         w.writerows(rows)
-    print(f"[plot] wrote 8 figures + summary.csv to {args.out}")
+    n_fig = len(glob.glob(os.path.join(args.out, "fig*.png")))
+    print(f"[plot] wrote {n_fig} figures + summary.csv to {args.out}")
 
 
 if __name__ == "__main__":
