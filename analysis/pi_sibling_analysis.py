@@ -1,33 +1,40 @@
-"""PI-gain and same-step sibling-dependency analysis over LLaDA rollout traces.
+"""PI gain, intra-step coordination gap, and matched-control analysis over LLaDA traces.
 
-Reads trace files written by `eval.py --trace_dir` (or trainer `traces/`), which hold
-every state S_t, the tokens revealed at each step (C_t), the final rollout y and its
-correctness. For every step t (outside the last block) and every i in C_t it runs
-analysis-only forwards on three views of the same state:
+Question: does the successful self-future (d-OPSD's privileged information, PI) carry
+information that coordinates tokens committed in the SAME denoising step?
 
-  student  S_t                                   -> p_S(x_i | S_t)
-  teacher  S_t + PI (d-OPSD construction: a random
-           teacher_retain_ratio of the positions from
-           the NEXT block to the end, filled with y)  -> p_T(x_i | S_t, PI)
-  sibling  S_t + y at C_t \\ {i}, i still masked      -> p_sib(x_i | S_t, Y_{C_t\\i})
+Reads trace files written by `eval.py --trace_dir` (or trainer `traces/`): every state
+S_t, the tokens revealed at each step (C_t), the final rollout y and its correctness.
+For every step t outside the last block and every i in C_t it forwards
 
-and records per token i:
-  log p_S(y_i), log p_T(y_i), log p_sib(y_i)
-  g_i = log p_T(y_i) - log p_S(y_i)            (PI gain)
-  delta_i = log p_sib(y_i) - log p_S(y_i)      (sibling gain)
-  JS(p_S, p_sib), JS(p_S, p_T)                 (full vocabulary)
-  cos(p_T - p_S, p_sib - p_S)                  (PI shift vs sibling shift, full vocabulary)
-  entropy / top-1 / top-k of p_S, p_T, p_sib
-  context: step, block, step-in-block, |C_t|, sibling distance, special/after-answer flags.
+  student  S_t                        -> p_S(.)            teacher  S_t+PI            -> p_T(.)
+  student  S_t + y[C_t\\i]  (siblings) -> p_S(.|sib)        teacher  S_t+PI+y[C_t\\i]  -> p_T(.|sib,PI)
+  student  S_t + y[M_i]     (control)  -> p_S(.|ctrl)       teacher  S_t+PI+y[M_i]     -> p_T(.|ctrl,PI)
 
-PI never covers C_t itself (C_t lies in the current block, PI starts at the next one),
-so g_i measures help from the future, not answer leakage. Teacher weights follow
-training's fixed_teacher: with --adapter, `--teacher fixed` (default) runs the teacher
-view with the LoRA disabled (= base model); `--teacher self` keeps the adapter.
+PI = d-OPSD construction: a random teacher_retain_ratio of positions from the NEXT block
+to the end, filled with y. PI never touches the current block, so it never covers C_t
+or the controls. Teacher weights follow training's fixed_teacher: with --adapter,
+`--teacher fixed` (default) disables the LoRA for teacher views (= base model).
+
+Matched control M_i: for each sibling k of i, one position j in the CURRENT block (so PI
+can never pre-fill it), not in C_t, still masked at S_t (it is revealed later), chosen to
+match |j-i| ~ |k-i|, student confidence log p_S(y_j) ~ log p_S(y_k), and earliest reveal.
+Missing when the block has too few candidates (ctrl_ok=False).
+
+Per token i (y_i = its value in the final rollout):
+  g        = log p_T(y_i) - log p_S(y_i)                       PI gain
+  D_S      = log p_S(y_i|sib) - log p_S(y_i)                   what siblings add for the student
+  D_T      = log p_T(y_i|sib,PI) - log p_T(y_i|PI)             what siblings still add once PI is known
+  coord    = D_S - D_T                                         coordination gap PI already fills
+  D_S_ctrl, D_T_ctrl, coord_ctrl                               same with the matched control
+  JS(p_S,p_sib), JS(p_S,p_ctrl), JS(p_S,p_T); cos(p_T-p_S, p_sib-p_S), cos(p_T-p_S, p_ctrl-p_S)
+  entropy / top-1 / top-k of p_S, p_T, p_sib; step, block, |C_t|, sibling distance,
+  control match quality (distance gap, confidence gap, reveal delay), special/after-answer flags.
+CoGain_t (fraction of C_t with g>0) is formed at plotting time from `step` + `g`.
 
     python analysis/pi_sibling_analysis.py --trace_dir T --out_dir O [--adapter A] \\
         [--pi_samples K] [--shard_id k --num_shards n]
-Outputs one records file per rollout in O/records/ (skips existing -> resumable).
+Writes one records file per rollout to O/records/ (existing ones are skipped -> resumable).
 """
 
 import argparse
@@ -40,6 +47,7 @@ import torch.nn.functional as F
 
 MASK_ID = 126336
 SPECIAL_IDS = (126081, 126348)  # <|endoftext|>, <|eot_id|>
+CONF_FLOOR = -20.0  # clamp log-probs used for control matching
 
 
 def js_divergence(logp, logq):
@@ -73,12 +81,44 @@ def pi_view(state, final, block, block_length, ratio, gen):
     return view
 
 
+def reveal(view, final, positions):
+    """Copy of `view` with `positions` set to their final-rollout values."""
+    out = view.clone()
+    if len(positions):
+        idx = torch.as_tensor(positions, dtype=torch.long)
+        out[idx] = final[idx]
+    return out
+
+
 def sibling_view(state, final, c_t, i):
     """S_t with every other token of C_t revealed to its actual value; i stays masked."""
-    view = state.clone()
-    others = c_t[c_t != i]
-    view[others] = final[others]
-    return view
+    return reveal(state, final, c_t[c_t != i].tolist())
+
+
+def match_controls(i, siblings, cands, conf, reveal_step, t, block_length):
+    """One matched non-sibling future position per sibling of i (greedy, without reuse).
+
+    siblings: list of positions k; cands: candidate positions j (current block, masked, not
+    in C_t); conf: dict pos -> clamped log p_S(y_pos) at S_t. Returns (positions, diagnostics)
+    or (None, None) if there are not enough candidates.
+    """
+    avail = [j for j in cands if j != i]
+    if len(avail) < len(siblings):
+        return None, None
+    chosen, dgap, cgap, delay = [], [], [], []
+    for k in siblings:
+        d_k = abs(k - i)
+        best = min(avail, key=lambda j: abs(abs(j - i) - d_k) / block_length
+                   + abs(conf[j] - conf[k]) + 0.05 * (int(reveal_step[j]) - t - 1))
+        avail.remove(best)
+        chosen.append(best)
+        dgap.append(abs(abs(best - i) - d_k))
+        cgap.append(abs(conf[best] - conf[k]))
+        delay.append(int(reveal_step[best]) - t)
+    n = len(siblings)
+    nan = float("nan")  # no siblings -> no control needed, match quality undefined
+    diag = (sum(dgap) / n, sum(cgap) / n, sum(delay) / n) if n else (nan, nan, nan)
+    return chosen, diag
 
 
 class Analyzer:
@@ -109,11 +149,15 @@ class Analyzer:
                     logits = self.model(ids).logits
             out.append(F.log_softmax(logits[rows, cols].float(), dim=-1))
             del logits
-        return torch.cat(out)
+        return torch.cat(out) if out else torch.empty(0, device=self.device)
 
     def _topk(self, logp):
         p, i = logp.exp().topk(self.topk, dim=-1)
         return i.int().cpu(), p.half().cpu()
+
+    def _mix(self, lp):
+        """[K, n, V] log-probs of K PI samples -> log of their mixture [n, V]."""
+        return torch.logsumexp(lp, dim=0) - torch.log(torch.tensor(float(lp.shape[0]), device=lp.device))
 
     def analyze(self, tr, seed):
         meta = tr["meta"]
@@ -125,10 +169,12 @@ class Analyzer:
         num_blocks = L // bl
         ratio = float(meta.get("teacher_retain_ratio", 0.25))
         rv_step, rv_pos = tr["reveal"]["step"].long(), tr["reveal"]["pos"].long()
+        reveal_step = tr["reveal_step"].long()
         blocks = tr["block"].long()
         special = torch.isin(final, torch.tensor(SPECIAL_IDS))
         answer_end = int(special.nonzero()[0]) if special.any() else L
         gen = torch.Generator().manual_seed(seed)
+        K = self.pi_samples
         first_step_of_block = {}
         for t in range(len(blocks)):
             first_step_of_block.setdefault(int(blocks[t]), t)
@@ -137,37 +183,90 @@ class Analyzer:
         work = []
         for t in range(len(blocks)):
             c_t = rv_pos[rv_step == t].sort().values
-            if int(blocks[t]) < num_blocks - 1 and c_t.numel() > 0:
-                work.append((t, c_t))
+            blk = int(blocks[t])
+            if blk < num_blocks - 1 and c_t.numel() > 0:
+                S = states[t]
+                bpos = torch.arange(blk * bl, (blk + 1) * bl)
+                cands = bpos[(S[bpos] == MASK_ID) & ~torch.isin(bpos, c_t)]
+                work.append((t, blk, c_t, cands))
 
-        rec, K = {}, self.pi_samples
+        rec = {}
         add = lambda k, v: rec.setdefault(k, []).append(v)
         for c0 in range(0, len(work), self.steps_per_chunk):
             chunk = work[c0:c0 + self.steps_per_chunk]
-            s_items, t_items = [], []
-            for t, c_t in chunk:
-                S, blk, ps = states[t], int(blocks[t]), c_t.tolist()
-                s_items.append((S, ps))                                        # student: 1 forward, n rows
-                s_items += [(sibling_view(S, final, c_t, i), [i]) for i in ps]  # sibling: 1 forward per i
-                t_items += [(pi_view(S, final, blk, bl, ratio, gen), ps) for _ in range(K)]
-            s_lp = self._logprobs(prompt, s_items, teacher_weights=False)
-            t_lp = self._logprobs(prompt, t_items, teacher_weights=True)
+
+            # Phase 1: p_S at C_t and at control candidates; p_T at C_t for each PI sample.
+            s1, t1, pis = [], [], {}
+            for t, blk, c_t, cands in chunk:
+                s1.append((states[t], c_t.tolist() + cands.tolist()))
+                for k in range(K):
+                    pis[t, k] = pi_view(states[t], final, blk, bl, ratio, gen)
+                    t1.append((pis[t, k], c_t.tolist()))
+            s1_lp = self._logprobs(prompt, s1, teacher_weights=False)
+            t1_lp = self._logprobs(prompt, t1, teacher_weights=True)
+
+            # Match controls, then Phase 2: sibling / control views under both weights.
+            info, s2, t2 = [], [], []
+            so = to = 0
+            for t, blk, c_t, cands in chunk:
+                n, m = c_t.numel(), cands.numel()
+                rows = s1_lp[so:so + n + m]
+                so += n + m
+                lp_T = self._mix(t1_lp[to:to + K * n].view(K, n, -1))
+                to += K * n
+                pos_all = c_t.tolist() + cands.tolist()
+                y_all = final[torch.tensor(pos_all)].to(rows.device)
+                conf_all = rows.gather(-1, y_all.unsqueeze(-1)).squeeze(-1).clamp_min(CONF_FLOOR).tolist()
+                conf = dict(zip(pos_all, conf_all))
+                ctrls = []
+                for i in c_t.tolist():
+                    sibs = [k for k in c_t.tolist() if k != i]
+                    ctrls.append(match_controls(i, sibs, cands.tolist(), conf, reveal_step, t, bl))
+                info.append((t, blk, c_t, rows[:n], lp_T, ctrls))
+                S = states[t]
+                for i, (cpos, _) in zip(c_t.tolist(), ctrls):
+                    s2.append((sibling_view(S, final, c_t, i), [i]))
+                    if cpos is not None:
+                        s2.append((reveal(S, final, cpos), [i]))
+                    for k in range(K):
+                        t2.append((sibling_view(pis[t, k], final, c_t, i), [i]))
+                        if cpos is not None:
+                            t2.append((reveal(pis[t, k], final, cpos), [i]))
+            s2_lp = self._logprobs(prompt, s2, teacher_weights=False)
+            t2_lp = self._logprobs(prompt, t2, teacher_weights=True)
 
             so = to = 0
-            for t, c_t in chunk:
-                n, blk = c_t.numel(), int(blocks[t])
-                lp_S, lp_sib = s_lp[so:so + n], s_lp[so + n:so + 2 * n]
-                so += 2 * n
-                tk_ = t_lp[to:to + K * n].view(K, n, -1)
-                to += K * n
-                lp_T = torch.logsumexp(tk_, dim=0) - torch.log(torch.tensor(float(K), device=tk_.device))
+            for t, blk, c_t, lp_S, lp_T, ctrls in info:
+                n = c_t.numel()
+                V = lp_S.shape[-1]
+                nan_row = torch.full((V,), float("nan"), device=lp_S.device)
+                lp_Ssib, lp_Sctrl, lp_Tsib, lp_Tctrl = [], [], [], []
+                for cpos, _ in ctrls:
+                    ok = cpos is not None
+                    lp_Ssib.append(s2_lp[so]); so += 1
+                    if ok:
+                        lp_Sctrl.append(s2_lp[so]); so += 1
+                    else:
+                        lp_Sctrl.append(nan_row)
+                    tsib, tctrl = [], []
+                    for _ in range(K):
+                        tsib.append(t2_lp[to]); to += 1
+                        if ok:
+                            tctrl.append(t2_lp[to]); to += 1
+                    lp_Tsib.append(self._mix(torch.stack(tsib).unsqueeze(1))[0])
+                    lp_Tctrl.append(self._mix(torch.stack(tctrl).unsqueeze(1))[0] if ok else nan_row)
+                lp_Ssib, lp_Sctrl = torch.stack(lp_Ssib), torch.stack(lp_Sctrl)
+                lp_Tsib, lp_Tctrl = torch.stack(lp_Tsib), torch.stack(lp_Tctrl)
 
                 y = final[c_t].to(lp_S.device)
                 gy = lambda lp: lp.gather(-1, y.unsqueeze(-1)).squeeze(-1)
                 ent = lambda lp: -(lp.exp() * lp).sum(-1)
-                pS, pT, pSib = lp_S.exp(), lp_T.exp(), lp_sib.exp()
+                pS = lp_S.exp()
                 d = (c_t.unsqueeze(0) - c_t.unsqueeze(1)).abs().float()
                 d.fill_diagonal_(float("inf"))
+                D_S, D_T = gy(lp_Ssib) - gy(lp_S), gy(lp_Tsib) - gy(lp_T)
+                D_Sc, D_Tc = gy(lp_Sctrl) - gy(lp_S), gy(lp_Tctrl) - gy(lp_T)
+                diag = torch.tensor([c[1] if c[1] is not None else (float("nan"),) * 3 for c in ctrls])
 
                 add("step", torch.full((n,), t))
                 add("block", torch.full((n,), blk))
@@ -178,16 +277,25 @@ class Analyzer:
                 add("sib_dist", d.min(1).values if n > 1 else torch.full((1,), float("nan")))
                 add("is_special", special[c_t])
                 add("after_answer", c_t > answer_end)
+                add("ctrl_ok", torch.tensor([c[0] is not None for c in ctrls]))
+                add("ctrl_dist_gap", diag[:, 0])
+                add("ctrl_conf_gap", diag[:, 1])
+                add("ctrl_delay", diag[:, 2])
                 for name, val in (
-                    ("logp_S", gy(lp_S)), ("logp_T", gy(lp_T)), ("logp_sib", gy(lp_sib)),
-                    ("g", gy(lp_T) - gy(lp_S)), ("delta", gy(lp_sib) - gy(lp_S)),
-                    ("js_sib", js_divergence(lp_S, lp_sib)), ("js_pi", js_divergence(lp_S, lp_T)),
-                    ("cos_pi_sib", cosine(pT - pS, pSib - pS)),
-                    ("ent_S", ent(lp_S)), ("ent_T", ent(lp_T)), ("ent_sib", ent(lp_sib)),
-                    ("top1_S", lp_S.argmax(-1)), ("top1_T", lp_T.argmax(-1)), ("top1_sib", lp_sib.argmax(-1)),
+                    ("logp_S", gy(lp_S)), ("logp_T", gy(lp_T)), ("logp_sib", gy(lp_Ssib)),
+                    ("logp_Tsib", gy(lp_Tsib)), ("logp_Sctrl", gy(lp_Sctrl)), ("logp_Tctrl", gy(lp_Tctrl)),
+                    ("g", gy(lp_T) - gy(lp_S)),
+                    ("delta", D_S), ("D_S", D_S), ("D_T", D_T), ("coord", D_S - D_T),
+                    ("D_S_ctrl", D_Sc), ("D_T_ctrl", D_Tc), ("coord_ctrl", D_Sc - D_Tc),
+                    ("js_sib", js_divergence(lp_S, lp_Ssib)), ("js_ctrl", js_divergence(lp_S, lp_Sctrl)),
+                    ("js_pi", js_divergence(lp_S, lp_T)),
+                    ("cos_pi_sib", cosine(lp_T.exp() - pS, lp_Ssib.exp() - pS)),
+                    ("cos_pi_ctrl", cosine(lp_T.exp() - pS, lp_Sctrl.exp() - pS)),
+                    ("ent_S", ent(lp_S)), ("ent_T", ent(lp_T)), ("ent_sib", ent(lp_Ssib)),
+                    ("top1_S", lp_S.argmax(-1)), ("top1_T", lp_T.argmax(-1)), ("top1_sib", lp_Ssib.argmax(-1)),
                 ):
                     add(name, val.cpu())
-                for tag, lp in (("S", lp_S), ("T", lp_T), ("sib", lp_sib)):
+                for tag, lp in (("S", lp_S), ("T", lp_T), ("sib", lp_Ssib)):
                     ids, p = self._topk(lp)
                     add(f"topk_{tag}_ids", ids)
                     add(f"topk_{tag}_p", p)
@@ -213,7 +321,7 @@ def main():
     ap.add_argument("--teacher", default="fixed", choices=["fixed", "self"])
     ap.add_argument("--pi_samples", type=int, default=1, help="PI views per step; p_T is their mixture.")
     ap.add_argument("--topk", type=int, default=20)
-    ap.add_argument("--batch_size", type=int, default=8, help="Sequences per forward.")
+    ap.add_argument("--batch_size", type=int, default=16, help="Sequences per forward.")
     ap.add_argument("--steps_per_chunk", type=int, default=8, help="Denoising steps whose views are batched together.")
     ap.add_argument("--max_rollouts", type=int, default=0)
     ap.add_argument("--shard_id", type=int, default=0)

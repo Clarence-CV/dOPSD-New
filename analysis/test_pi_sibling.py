@@ -75,6 +75,24 @@ def main():
     assert not torch.isin(changed, c_t).any()
     print(f"ok  views: sibling reveals C_t\\{{i}}; PI touches {changed.numel()} future slots (<= {int(n_cand * 0.25)})")
 
+    # --- matched controls: current block, not in C_t, masked at S_t, revealed later ---
+    t = 4  # first step of block 1 (the last step of a block has no candidates left by design)
+    S = tr["states"][t].long()
+    c_t = tr["reveal"]["pos"][tr["reveal"]["step"] == t].long()
+    blk = int(tr["block"][t])
+    bpos = torch.arange(blk * 8, (blk + 1) * 8)
+    cands = bpos[(S[bpos] == T.MASK) & ~torch.isin(bpos, c_t)].tolist()
+    conf = {j: -float(j % 5) for j in range(32)}
+    for i in c_t.tolist():
+        sibs = [k for k in c_t.tolist() if k != i]
+        cpos, diag = A.match_controls(i, sibs, cands, conf, tr["reveal_step"], t, 8)
+        assert cpos is not None and len(cpos) == len(sibs)
+        for j in cpos:
+            assert j in cands and j not in c_t.tolist() and S[j] == T.MASK and int(tr["reveal_step"][j]) > t
+        assert diag[2] >= 1  # controls are revealed strictly later than the siblings
+    assert A.match_controls(0, [1, 2], [5], conf, tr["reveal_step"], t, 8) == (None, None)
+    print(f"ok  controls: {len(cands)} candidates at step {t}, matched ones are same-block future tokens")
+
     # --- metrics ---
     for steps, ratio in ((16, 0.25), (16, 0.0), (32, 0.25), (8, 0.25)):
         tr = make_trace(ev, steps=steps)
@@ -88,17 +106,26 @@ def main():
         assert (r["js_sib"] >= -1e-6).all() and (r["js_pi"] >= -1e-6).all()
         assert (r["cos_pi_sib"].abs() <= 1 + 1e-5).all()
         assert torch.allclose(r["g"], r["logp_T"] - r["logp_S"])
-        if ratio == 0.0:
+        ok = r["ctrl_ok"]
+        assert torch.allclose(r["coord"], r["D_S"] - r["D_T"])
+        assert torch.equal(r["D_S"], r["delta"])
+        multi = ok & (r["n_parallel"] > 1)
+        assert (r["ctrl_delay"][multi] >= 1).all() and torch.isnan(r["D_S_ctrl"][~ok]).all()
+        if ratio == 0.0:  # no PI: teacher view == student view
             assert r["g"].abs().max() < 1e-5 and r["js_pi"].abs().max() < 1e-6 and (r["cos_pi_sib"] == 0).all()
-        if npar == 1:
+            assert r["coord"].abs().max() < 1e-4 and r["coord_ctrl"][ok].abs().max() < 1e-4
+        if npar == 1:  # no siblings: nothing to add, control is empty
             assert r["delta"].abs().max() < 1e-5 and r["js_sib"].abs().max() < 1e-6
+            assert r["D_T"].abs().max() < 1e-5 and ok.all() and r["D_S_ctrl"].abs().max() < 1e-5
         else:
             assert r["delta"].abs().max() > 0  # context model: siblings do shift p
+            assert r["D_S_ctrl"][ok].abs().max() > 0
         assert r["topk_S_ids"].shape == (r["g"].numel(), 5)
         # reproducible PI sampling
         assert torch.equal(an.analyze(tr, seed=0)["g"], r["g"])
-        print(f"ok  steps={steps} |C_t|={npar} ratio={ratio}: tokens={r['g'].numel()}  "
-              f"mean g={r['g'].mean():+.3f}  mean delta={r['delta'].mean():+.3f}  mean cos={r['cos_pi_sib'].mean():+.3f}")
+        print(f"ok  steps={steps} |C_t|={npar} ratio={ratio}: tokens={r['g'].numel()}  ctrl_ok={ok.float().mean():.2f}  "
+              f"g={r['g'].mean():+.3f}  D_S={r['D_S'].mean():+.3f}  D_T={r['D_T'].mean():+.3f}  "
+              f"coord={r['coord'].mean():+.3f}  coord_ctrl={r['coord_ctrl'][ok].mean():+.3f}")
     dist.destroy_process_group()
     print("all passed")
 

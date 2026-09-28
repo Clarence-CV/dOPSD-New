@@ -15,6 +15,11 @@ are correlated, so a token-level CI would be overconfident).
   fig3_sibling_vs_step.png    sibling gap vs denoising step
   fig4_sibling_vs_parallel.png sibling gap vs |C_t|
   fig5_cos_pi_sib.png         cos(p_T - p_S, p_sib - p_S), correct vs wrong
+  fig6_coord_gap.png          B: D_S, D_T, coord = D_S - D_T (sibling and matched control), correct vs wrong
+  fig7_sibling_vs_control.png C: sibling vs matched non-sibling control, paired (ctrl_ok tokens only)
+  fig8_cogain.png             A: P(CoGain_t = 1) for real co-decoded groups vs groups shuffled
+                              within (rollout, block); the MEAN CoGain is shuffle-invariant when
+                              all |C_t| are equal, so the all-up rate is the informative statistic
   summary.csv                 every plotted number (table view)
 """
 
@@ -34,7 +39,9 @@ import matplotlib.pyplot as plt  # noqa: E402
 # Reference categorical slots 1-2 (validated: CVD dE 24.7, normal dE 33.6 on #fcfcfb).
 COLORS = {"correct": "#2a78d6", "wrong": "#eb6834"}
 INK, INK_2, GRID, SURFACE = "#1f1f1e", "#5c5b55", "#e4e3dd", "#fcfcfb"
-FIELDS = ("g", "delta", "js_sib", "js_pi", "cos_pi_sib", "logp_S", "step", "n_parallel")
+FIELDS = ("g", "delta", "js_sib", "js_pi", "cos_pi_sib", "logp_S", "step", "block", "n_parallel",
+          "D_S", "D_T", "coord", "D_S_ctrl", "D_T_ctrl", "coord_ctrl", "ctrl_ok")
+N_PERM = 500
 N_BOOT = 2000
 
 
@@ -199,6 +206,117 @@ def fig5(groups, out, rows):
     plt.close(fig)
 
 
+def dot_panel(ax, groups, keys, labels, rows, tag, note="ctrl_ok tokens"):
+    """Mean +/- 95% CI per quantity (x) and group (colour), on the ctrl_ok paired subset."""
+    for k, name in enumerate(("correct", "wrong")):
+        rs = groups[name]
+        if not rs:
+            continue
+        ms, err = [], []
+        for key in keys:
+            vals = [r[key][r["ctrl_ok"] > 0] for r in rs]
+            m, lo, hi = cluster_boot([v for v in vals if v.size], np.mean)
+            ms.append(m), err.append((m - lo, hi - m))
+            rows.append([tag, key, name, len(rs), note, "mean", m, lo, hi])
+        x = np.arange(len(keys)) + (k - 0.5) * 0.18
+        ax.errorbar(x, ms, yerr=np.array(err).T, fmt="o", color=COLORS[name], markersize=7, capsize=4,
+                    linewidth=2, label=name)
+    ax.axhline(0, color=INK_2, linewidth=0.8)
+    ax.set_xticks(range(len(keys)), labels)
+    ax.legend(frameon=False, fontsize=9, labelcolor=INK)
+
+
+def fig6(groups, out, rows):
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.4), gridspec_kw={"width_ratios": [2, 1]})
+    dot_panel(axes[0], groups, ["D_S", "D_T", "D_S_ctrl", "D_T_ctrl"],
+              ["D_S\nsiblings", "D_T\nsiblings", "D_S\ncontrol", "D_T\ncontrol"], rows, "fig6")
+    style(axes[0], "", "mean change in log p(y_i)  (nats)")
+    axes[0].set_title("What revealed tokens add: student (D_S) vs PI teacher (D_T)", color=INK, fontsize=10, loc="left")
+    dot_panel(axes[1], groups, ["coord", "coord_ctrl"], ["siblings", "control"], rows, "fig6")
+    style(axes[1], "", "coord = D_S - D_T  (nats)")
+    axes[1].set_title("Gap PI already fills", color=INK, fontsize=10, loc="left")
+    fig.suptitle("B. Coordination gap (paired subset with a matched control)", color=INK, fontsize=11,
+                 x=0.01, ha="left")
+    fig.tight_layout()
+    fig.savefig(os.path.join(out, "fig6_coord_gap.png"), dpi=160, facecolor=SURFACE)
+    plt.close(fig)
+
+
+def fig7(groups, out, rows):
+    pairs = [("D_S", "D_S_ctrl", "D_S: sibling - control"), ("coord", "coord_ctrl", "coord: sibling - control")]
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.4))
+    for ax, (sib, ctrl, label) in zip(axes, pairs):
+        names = [n for n in ("correct", "wrong") if groups[n]]
+        for k, name in enumerate(names):
+            diffs = [(r[sib] - r[ctrl])[r["ctrl_ok"] > 0] for r in groups[name]]
+            m, lo, hi = cluster_boot([d for d in diffs if d.size], np.mean)
+            rows.append(["fig7", f"{sib} - {ctrl} (paired)", name, len(groups[name]), "ctrl_ok tokens", "mean", m, lo, hi])
+            ax.bar(k, m, width=0.5, color=COLORS[name])
+            ax.errorbar(k, m, yerr=[[m - lo], [hi - m]], color=INK, capsize=4, linewidth=1)
+            ax.annotate(f"{m:+.4f}", (k, hi), xytext=(0, 4), textcoords="offset points",
+                        ha="center", va="bottom", color=INK, fontsize=9)
+        ax.axhline(0, color=INK_2, linewidth=0.8)
+        ax.set_xticks(range(len(names)), names)
+        ax.margins(y=0.15)
+        style(ax, "", f"{label}  (nats)")
+    fig.suptitle("C. Same-step siblings vs matched non-sibling future tokens, paired  (> 0: siblings special)",
+                 color=INK, fontsize=11, x=0.01, ha="left")
+    fig.tight_layout()
+    fig.savefig(os.path.join(out, "fig7_sibling_vs_control.png"), dpi=160, facecolor=SURFACE)
+    plt.close(fig)
+
+
+def all_up_rate(rolls, shuffle_rng=None):
+    """P(every token of a co-decoded group has g > 0); optionally regroup within (rollout, block)."""
+    hits = total = 0
+    for r in rolls:
+        up = r["g"] > 0
+        for b in np.unique(r["block"]):
+            sel = np.where(r["block"] == b)[0]
+            vals = up[sel]
+            if shuffle_rng is not None:
+                vals = vals[shuffle_rng.permutation(vals.size)]
+            steps = r["step"][sel]  # group sizes are preserved; membership is shuffled
+            for t in np.unique(steps):
+                grp = vals[steps == t]
+                if grp.size > 1:
+                    hits += bool(grp.all())
+                    total += 1
+    return hits / total if total else float("nan")
+
+
+def fig8(groups, out, rows):
+    fig, ax = plt.subplots(figsize=(6.4, 4.2))
+    names = [n for n in ("correct", "wrong") if groups[n]]
+    rng = np.random.default_rng(0)
+    for k, name in enumerate(names):
+        rs = groups[name]
+        real = all_up_rate(rs)
+        boots = [all_up_rate([rs[i] for i in rng.integers(0, len(rs), len(rs))]) for _ in range(200)]
+        lo, hi = np.percentile(boots, [2.5, 97.5])
+        null = np.array([all_up_rate(rs, np.random.default_rng(s)) for s in range(N_PERM)])
+        p = (1 + np.sum(null >= real)) / (1 + null.size)
+        rows.append(["fig8", "P(CoGain=1) real", name, len(rs), "", "fraction", real, lo, hi])
+        rows.append(["fig8", "P(CoGain=1) shuffled null", name, len(rs), f"perm p={p:.4f}", "fraction",
+                     float(null.mean()), *np.percentile(null, [2.5, 97.5])])
+        ax.bar(k - 0.14, real, width=0.26, color=COLORS[name], label=f"{name}: co-decoded")
+        ax.errorbar(k - 0.14, real, yerr=[[real - lo], [hi - real]], color=INK, capsize=4, linewidth=1)
+        ax.bar(k + 0.14, null.mean(), width=0.26, color=COLORS[name], alpha=0.35, label=f"{name}: shuffled")
+        nlo, nhi = np.percentile(null, [2.5, 97.5])
+        ax.errorbar(k + 0.14, null.mean(), yerr=[[null.mean() - nlo], [nhi - null.mean()]], color=INK,
+                    capsize=4, linewidth=1)
+        ax.annotate(f"perm p={p:.3f}", (k, max(hi, nhi)), xytext=(0, 4), textcoords="offset points",
+                    ha="center", va="bottom", color=INK, fontsize=9)
+    ax.set_xticks(range(len(names)), names)
+    style(ax, "", "P(all tokens of a step have g > 0)")
+    ax.set_title("A. Does PI lift co-decoded tokens together?", color=INK, fontsize=11, loc="left")
+    ax.set_ylim(0, 1.18)
+    ax.legend(frameon=False, fontsize=8, labelcolor=INK, ncol=2, loc="upper center", bbox_to_anchor=(0.5, 1.0))
+    fig.tight_layout()
+    fig.savefig(os.path.join(out, "fig8_cogain.png"), dpi=160, facecolor=SURFACE)
+    plt.close(fig)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--records", action="append", required=True, help="name=records_dir (first = primary)")
@@ -219,11 +337,14 @@ def main():
     fig3(primary, args.out, rows)
     fig4(sets, args.out, rows)
     fig5(primary, args.out, rows)
+    fig6(primary, args.out, rows)
+    fig7(primary, args.out, rows)
+    fig8(primary, args.out, rows)
     with open(os.path.join(args.out, "summary.csv"), "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["figure", "quantity", "group", "n_rollouts", "n_tokens/note", "stat", "value", "ci_lo", "ci_hi"])
         w.writerows(rows)
-    print(f"[plot] wrote 5 figures + summary.csv to {args.out}")
+    print(f"[plot] wrote 8 figures + summary.csv to {args.out}")
 
 
 if __name__ == "__main__":

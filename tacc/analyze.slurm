@@ -19,7 +19,7 @@ TRACES="${TRACES:?set TRACES=<trace dir>}"
 OUT="${OUT:-$(dirname "$TRACES")/pisib${ADAPTER:+_$(basename "$ADAPTER")}}"
 NGPU="${NGPU:-3}"
 ARGS=(--trace_dir "$TRACES" --out_dir "$OUT" --pi_samples "${PI_SAMPLES:-1}" --teacher "${TEACHER:-fixed}"
-      --max_rollouts "${MAX_ROLLOUTS:-0}" --batch_size "${BATCH:-8}")
+      --max_rollouts "${MAX_ROLLOUTS:-0}" --batch_size "${BATCH:-16}")
 [[ -n "${ADAPTER:-}" ]] && ARGS+=(--adapter "$ADAPTER")
 echo "[slurm] job=$SLURM_JOB_ID traces=$TRACES adapter=${ADAPTER:-none} ngpu=$NGPU -> $OUT"
 
