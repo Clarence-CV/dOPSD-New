@@ -24,25 +24,27 @@ A.SPECIAL_IDS = (T.EOS,)
 
 
 class ContextModel(torch.nn.Module):
-    """Logits depend on the whole input (embedding mean + own token), so views differ."""
+    """Logits depend on the whole input (embedding mean), the own token and the position, so
+    views differ AND masked slots get distinct confidences (needed to test decoding order)."""
 
     def __init__(self):
         super().__init__()
         g = torch.Generator().manual_seed(0)
         self.emb = torch.randn(T.V, 16, generator=g)
+        self.pos = torch.randn(512, 16, generator=g)
         self.out = torch.randn(16, T.V, generator=g)
 
     def forward(self, x):
-        h = self.emb[x] + self.emb[x].mean(1, keepdim=True)
+        h = self.emb[x] + self.pos[: x.shape[1]] + self.emb[x].mean(1, keepdim=True)
         logits = h @ self.out
         logits[..., T.MASK] = -1e4
         return type("O", (), {"logits": logits})()
 
 
-def make_trace(ev, steps, L=32, block=8, P=5, threshold=None):
+def make_trace(ev, steps, L=32, block=8, P=5, threshold=None, model=None):
     prompt = torch.randint(10, T.V, (1, P))
     rec = LLaDATraceRecorder(T.MASK, P, topk=5)
-    gen_model = T.PeakyLLaDA() if threshold else T.FakeLLaDA()
+    gen_model = model if model is not None else (T.PeakyLLaDA() if threshold else T.FakeLLaDA())
     out, _, _ = ev.generate(gen_model, prompt, None, steps=steps, gen_length=L, block_length=block,
                             temperature=0.0, mask_id=T.MASK, eos_token_id=T.EOS, recorder=rec, threshold=threshold)
     tr = rec.finalize(out)[0]
@@ -96,7 +98,7 @@ def main():
 
     # --- metrics ---
     for steps, ratio in ((16, 0.25), (16, 0.0), (32, 0.25), (8, 0.25)):
-        tr = make_trace(ev, steps=steps)
+        tr = make_trace(ev, steps=steps, model=model)  # same model decodes and is analysed
         tr["meta"]["teacher_retain_ratio"] = ratio
         an = A.Analyzer(model, False, "fixed", pi_samples=2, topk=5, batch_size=3, steps_per_chunk=3, device="cpu")
         r = an.analyze(tr, seed=0)
@@ -112,6 +114,14 @@ def main():
         assert torch.equal(r["D_S"], r["delta"])
         multi = ok & (r["n_parallel"] > 1)
         assert (r["ctrl_delay"][multi] >= 1).all() and torch.isnan(r["D_S_ctrl"][~ok]).all()
+        # greedy decoding: the student's own C_t are its top-|C_t| confident slots of the block
+        assert (r["rank_S"] <= r["n_parallel"]).all(), (r["rank_S"], r["n_parallel"])
+        assert ((r["rank_T_norm"] >= 0) & (r["rank_T_norm"] <= 1)).all()
+        assert ((r["order_overlap"] >= 0) & (r["order_overlap"] <= 1)).all()
+        if ratio == 0.0:  # no PI: teacher order == student order
+            assert torch.equal(r["rank_T"], r["rank_S"]) and (r["order_overlap"] == 1).all()
+            rho = r["order_spearman"][~torch.isnan(r["order_spearman"])]
+            assert (rho > 1 - 1e-5).all()
         if ratio == 0.0:  # no PI: teacher view == student view
             assert r["g"].abs().max() < 1e-5 and r["js_pi"].abs().max() < 1e-6 and (r["cos_pi_sib"] == 0).all()
             assert r["coord"].abs().max() < 1e-4 and r["coord_ctrl"][ok].abs().max() < 1e-4
@@ -120,13 +130,16 @@ def main():
             assert r["D_T"].abs().max() < 1e-5 and ok.all() and r["D_S_ctrl"].abs().max() < 1e-5
         else:
             assert r["delta"].abs().max() > 0  # context model: siblings do shift p
+        if ratio > 0 and npar > 1:  # PI shifts confidences, so the teacher's order can differ
+            assert (r["rank_T"] != r["rank_S"]).any() or (r["order_overlap"] < 1).any()
             assert r["D_S_ctrl"][ok].abs().max() > 0
         assert r["topk_S_ids"].shape == (r["g"].numel(), 5)
         # reproducible PI sampling
         assert torch.equal(an.analyze(tr, seed=0)["g"], r["g"])
         print(f"ok  steps={steps} |C_t|={npar} ratio={ratio}: tokens={r['g'].numel()}  ctrl_ok={ok.float().mean():.2f}  "
               f"g={r['g'].mean():+.3f}  D_S={r['D_S'].mean():+.3f}  D_T={r['D_T'].mean():+.3f}  "
-              f"coord={r['coord'].mean():+.3f}  coord_ctrl={r['coord_ctrl'][ok].mean():+.3f}")
+              f"coord={r['coord'].mean():+.3f}  coord_ctrl={r['coord_ctrl'][ok].mean():+.3f}  "
+              f"overlap={r['order_overlap'].mean():.2f}")
     # threshold-decoded trace: variable |C_t| per step
     tr = make_trace(ev, steps=16, threshold=0.9)
     tr["meta"]["teacher_retain_ratio"] = 0.25

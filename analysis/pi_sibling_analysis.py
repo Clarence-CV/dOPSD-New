@@ -30,6 +30,9 @@ Per token i (y_i = its value in the final rollout):
   JS(p_S,p_sib), JS(p_S,p_ctrl), JS(p_S,p_T); cos(p_T-p_S, p_sib-p_S), cos(p_T-p_S, p_ctrl-p_S)
   entropy / top-1 / top-k of p_S, p_T, p_sib; step, block, |C_t|, sibling distance,
   control match quality (distance gap, confidence gap, reveal delay), special/after-answer flags.
+  Decoding order (over ALL masked positions of the current block at S_t, confidence = top-1 prob):
+  rank_S / rank_T of i (1 = most confident), rank_T_norm in [0,1], n_block_masked, and per step
+  order_overlap = |C_t & teacher's top-|C_t|| / |C_t| and order_spearman(conf_S, conf_T).
 CoGain_t (fraction of C_t with g>0) is formed at plotting time from `step` + `g`.
 
     python analysis/pi_sibling_analysis.py --trace_dir T --out_dir O [--adapter A] \\
@@ -121,6 +124,24 @@ def match_controls(i, siblings, cands, conf, reveal_step, t, block_length):
     return chosen, diag
 
 
+def order_metrics(conf_S, conf_T, n):
+    """Decoding-order agreement at one step. conf_*: [M] top-1 probs over the block's masked
+    positions, the first n being C_t. Returns ranks of C_t (1 = most confident), the teacher's
+    top-n overlap with C_t, and the Spearman correlation of the two confidence vectors."""
+    M = conf_S.numel()
+    rank = lambda c: 1 + (c.unsqueeze(0) > c[:n].unsqueeze(1)).sum(1)
+    rank_S, rank_T = rank(conf_S), rank(conf_T)
+    overlap = float((conf_T.argsort(descending=True)[:n] < n).sum()) / n
+    if M >= 3:
+        rs = conf_S.argsort().argsort().float()
+        rt = conf_T.argsort().argsort().float()
+        rs, rt = rs - rs.mean(), rt - rt.mean()
+        rho = float((rs * rt).sum() / (rs.norm() * rt.norm()).clamp_min(1e-12))
+    else:
+        rho = float("nan")
+    return rank_S, rank_T, overlap, rho, M
+
+
 class Analyzer:
     def __init__(self, model, has_adapter, teacher, pi_samples, topk, batch_size, steps_per_chunk, device):
         self.model = model
@@ -201,7 +222,7 @@ class Analyzer:
                 s1.append((states[t], c_t.tolist() + cands.tolist()))
                 for k in range(K):
                     pis[t, k] = pi_view(states[t], final, blk, bl, ratio, gen)
-                    t1.append((pis[t, k], c_t.tolist()))
+                    t1.append((pis[t, k], c_t.tolist() + cands.tolist()))
             s1_lp = self._logprobs(prompt, s1, teacher_weights=False)
             t1_lp = self._logprobs(prompt, t1, teacher_weights=True)
 
@@ -212,8 +233,10 @@ class Analyzer:
                 n, m = c_t.numel(), cands.numel()
                 rows = s1_lp[so:so + n + m]
                 so += n + m
-                lp_T = self._mix(t1_lp[to:to + K * n].view(K, n, -1))
-                to += K * n
+                lp_Tall = self._mix(t1_lp[to:to + K * (n + m)].view(K, n + m, -1))
+                to += K * (n + m)
+                lp_T = lp_Tall[:n]
+                order = order_metrics(rows.max(-1).values.exp(), lp_Tall.max(-1).values.exp(), n)
                 pos_all = c_t.tolist() + cands.tolist()
                 y_all = final[torch.tensor(pos_all)].to(rows.device)
                 conf_all = rows.gather(-1, y_all.unsqueeze(-1)).squeeze(-1).clamp_min(CONF_FLOOR).tolist()
@@ -222,7 +245,7 @@ class Analyzer:
                 for i in c_t.tolist():
                     sibs = [k for k in c_t.tolist() if k != i]
                     ctrls.append(match_controls(i, sibs, cands.tolist(), conf, reveal_step, t, bl))
-                info.append((t, blk, c_t, rows[:n], lp_T, ctrls))
+                info.append((t, blk, c_t, rows[:n], lp_T, ctrls, order))
                 S = states[t]
                 for i, (cpos, _) in zip(c_t.tolist(), ctrls):
                     s2.append((sibling_view(S, final, c_t, i), [i]))
@@ -236,7 +259,7 @@ class Analyzer:
             t2_lp = self._logprobs(prompt, t2, teacher_weights=True)
 
             so = to = 0
-            for t, blk, c_t, lp_S, lp_T, ctrls in info:
+            for t, blk, c_t, lp_S, lp_T, ctrls, order in info:
                 n = c_t.numel()
                 V = lp_S.shape[-1]
                 nan_row = torch.full((V,), float("nan"), device=lp_S.device)
@@ -278,6 +301,13 @@ class Analyzer:
                 add("is_special", special[c_t])
                 add("after_answer", c_t > answer_end)
                 add("ctrl_ok", torch.tensor([c[0] is not None for c in ctrls]))
+                rank_S, rank_T, overlap, rho, M = order
+                add("rank_S", rank_S.cpu())
+                add("rank_T", rank_T.cpu())
+                add("rank_T_norm", ((rank_T - 1).float() / max(M - 1, 1)).cpu())
+                add("n_block_masked", torch.full((n,), M))
+                add("order_overlap", torch.full((n,), overlap))
+                add("order_spearman", torch.full((n,), rho))
                 add("ctrl_dist_gap", diag[:, 0])
                 add("ctrl_conf_gap", diag[:, 1])
                 add("ctrl_delay", diag[:, 2])
