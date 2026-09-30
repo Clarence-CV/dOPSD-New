@@ -143,8 +143,10 @@ def order_metrics(conf_S, conf_T, n):
 
 
 class Analyzer:
-    def __init__(self, model, has_adapter, teacher, pi_samples, topk, batch_size, steps_per_chunk, device):
+    def __init__(self, model, has_adapter, teacher, pi_samples, topk, batch_size, steps_per_chunk, device,
+                 autocast_dtype=torch.float16):
         self.model = model
+        self.autocast_dtype = autocast_dtype
         self.has_adapter = has_adapter
         self.teacher = teacher
         self.pi_samples = pi_samples
@@ -162,7 +164,7 @@ class Analyzer:
             ids = torch.stack([torch.cat([prompt, v]) for v, _ in chunk]).to(self.device)
             rows = torch.tensor([b for b, (_, ps) in enumerate(chunk) for _ in ps], device=self.device)
             cols = torch.tensor([p for _, ps in chunk for p in ps], device=self.device) + prompt.numel()
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            with torch.autocast(device_type="cuda", dtype=self.autocast_dtype):
                 if teacher_weights and self.has_adapter and self.teacher == "fixed":
                     with self.model.disable_adapter():
                         logits = self.model(ids).logits
@@ -357,6 +359,10 @@ def main():
     ap.add_argument("--shard_id", type=int, default=0)
     ap.add_argument("--num_shards", type=int, default=1)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--autocast_dtype", default="float16", choices=["float16", "bfloat16"],
+                    help="Match the sampler that produced the traces: eval/generate.py and the training sampler run "
+                         "under torch.autocast('cuda'), whose default is float16. bf16 re-scoring reorders ~2%% of "
+                         "near-tied confidences (checked on the smoke traces).")
     args = ap.parse_args()
 
     from transformers import AutoModel
@@ -379,7 +385,7 @@ def main():
         model = PeftModel.from_pretrained(model, args.adapter, torch_dtype=torch.bfloat16).to(device)
     model.eval()
     an = Analyzer(model, bool(args.adapter), args.teacher, args.pi_samples, args.topk, args.batch_size,
-                  args.steps_per_chunk, device)
+                  args.steps_per_chunk, device, autocast_dtype=getattr(torch, args.autocast_dtype))
 
     for k, f in enumerate(todo):
         tr = torch.load(f, weights_only=False)
