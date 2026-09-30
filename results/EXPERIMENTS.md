@@ -1,6 +1,6 @@
 # Experiment log: THU d-OPSD reproduction on TACC Lonestar6
 
-Allocation CDA26008 (class-shared). SU = nodes × max(elapsed h, 0.25) × rate. Rates (fetched 2026-09-20, CLAUDE.md B.3):
+Allocation CDA26008 (class-shared). SU = nodes × max(elapsed h, 0.25) × rate. Request walltimes tightly (~1.3× the expected runtime): shorter requests backfill more easily. Rates (fetched 2026-09-20, CLAUDE.md B.3):
 gpu-a100 / gpu-a100-dev 3 SU/h (3× A100-40GB), gpu-a100-small 1.5 SU/h (1× A100), gpu-h100 6 SU/h.
 Elapsed times come from `sacct`. Paths: code `$WORK/inf385t/dOPSD`, outputs `$SCRATCH/dopsd/`.
 
@@ -21,9 +21,10 @@ Elapsed times come from `sacct`. Paths: code `$WORK/inf385t/dOPSD`, outputs `$SC
 | 2026-09-28 | 3476761 | gpu-a100-small | threshold-decoding smoke | base, 20 problems, greedy, threshold 0.9, trace + analysis v2 | 00:28:12 | 0.71 | done | `dopsd/anasmoke/thr0.9/` | acc 75%; ~85 effective steps/rollout; wide |C_t| distribution |
 | 2026-09-30 | 3474952 | gpu-a100 | **main training** | GSM8K d-OPSD, 3 GPUs, BATCH_DIVIDE 8, 1344 steps, ACT_CKPT whole_layer, adapters every 64, full ckpt every 128 (keep 1), trace every 25 rounds | running (started 09:06 after ~57 h in queue) | est. ~11 | running; 1274/1344 at 12:29, no errors, ~9.1 s/step | `dopsd/runs/gsm_opsd` → `$WORK/inf385t/runs/gsm_opsd` | loss is negative at times: d-OPSD clamps per-vocab-entry KL terms (jsd_token_clip), which breaks non-negativity; grad_norm 0 on wrong rollouts (loss*0 by design) |
 | 2026-09-29 | 3479225-7 | gpu-a100-small | analysis v3 reruns (order metrics) | smoke traces s128 / s64 / thr0.9 | – | est. ~1.8 | pending | `dopsd/anasmoke/<mode>/pisib3` | – |
-| 2026-09-30 | 3480928 | gpu-a100 | base model, full GSM8K (paper protocol) | greedy, fixed 128 steps, 1319 problems, no traces | – | est. ~3.6 | pending | `dopsd/eval/gsm_base_full` | paper: 76.0 |
+| 2026-09-30 | 3480928 | gpu-a100 | base model, full GSM8K | – | never ran | 0 | cancelled (we look for phenomena, not exact paper numbers; base on the 300 subset suffices) | – | – |
 | 2026-09-30 | 3480929 | gpu-a100 | adapter sweep (all 21 snapshots) | – | never ran | 0 | cancelled; replaced by 3480947 | – | – |
-| 2026-09-30 | 3480947 | gpu-a100 | adapter sweep (one job) | base + steps 128 256 384 448 512 576 640 768 896 1024 1152 1280 1344 on a 300-problem seeded subset, greedy fixed 128; afterok:3474952 | – | est. ~11 | pending (dependency) | `dopsd/eval/sweep_gsm_opsd_n300/sweep.csv` | Paper Table 2: best GSM8K at 425 gradient updates on 4 GPUs (BATCH_DIVIDE unreported), i.e. ~425 (same #updates), ~567 (same data if BD=8) or ~1133 (same data if BD=4) of our steps; 448/576/1152 cover these |
+| 2026-09-30 | 3480947 | gpu-a100 | adapter sweep (13 ckpts) | – | never ran | 0 | cancelled; too many checkpoints for a phenomenon study | – | – |
+| 2026-09-30 | 3480958 | gpu-a100 | adapter sweep (one job, 2 h request) | base + steps 448, 576 (paper step 425 under same #updates / same data with BD=8), 1152 (same data with BD=4), 1344 (final); 300-problem seeded subset, greedy fixed 128; afterok:3474952 | – | est. ~4 | pending (dependency) | `dopsd/eval/sweep_gsm_opsd_n300/sweep.csv` | – |
 
 ## Result snapshots
 
