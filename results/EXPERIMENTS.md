@@ -25,7 +25,8 @@ Elapsed times come from `sacct`. Paths: code `$WORK/inf385t/dOPSD`, outputs `$SC
 | 2026-09-30 | 3480929 | gpu-a100 | adapter sweep (all 21 snapshots) | – | never ran | 0 | cancelled; replaced by 3480947 | – | – |
 | 2026-09-30 | 3480947 | gpu-a100 | adapter sweep (13 ckpts) | – | never ran | 0 | cancelled; too many checkpoints for a phenomenon study | – | – |
 | 2026-09-30 | 3480958 | gpu-a100 | adapter sweep (4 ckpts) | – | never ran | 0 | cancelled; merged into the pipeline job below (one queue wait instead of two) | – | – |
-| 2026-09-30 | 3480959 | gpu-a100 | **pipeline** (one job, 8.5 h request) | (1) greedy sweep: base + steps 448/576/1152/1344 on 300 seeded problems; (2) pick best adapter; (3) traced rollouts at T=0.9, fixed 128 steps, 300 problems for base and best; (4) PI/sibling/order analysis (3 shards); (5) figures + report; afterok:3474952 | – | est. ~20 | pending (dependency) | `dopsd/pipeline_gsm_opsd/` (report in `report/`, copy in `$WORK/inf385t/results/pipeline_gsm_opsd/`) | – |
+| 2026-09-30 | 3480959 | gpu-a100 | pipeline v1 (fixed budget only) | – | never ran | 0 | cancelled; replaced by the 2x2 version | – | – |
+| 2026-09-30 | 3480966 | gpu-a100 | **pipeline** (one job, 12.5 h request) | (1) sweep, greedy + fixed 128: base + steps 448/576/1152/1344 on 300 seeded problems; (2) pick best adapter; (3) traced rollouts, T=0.9, 300 problems, for {base, best} x {fixed budget 128, threshold 0.9}; (4) PI/sibling/order analysis, 3 shards each. Figures/report made offline | – | est. ~27 | pending | `dopsd/pipeline_gsm_opsd/` (csv/txt/log copied to `$WORK/inf385t/results/pipeline_gsm_opsd/`) | – |
 
 ## Result snapshots
 
