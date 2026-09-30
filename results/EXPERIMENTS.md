@@ -8,7 +8,7 @@ Elapsed times come from `sacct`. Paths: code `$WORK/inf385t/dOPSD`, outputs `$SC
 
 | as of | SU spent |
 |---|---|
-| 2026-09-29 | 8.63 |
+| 2026-09-30 | 19.68 |
 
 ## Jobs
 
@@ -19,7 +19,7 @@ Elapsed times come from `sacct`. Paths: code `$WORK/inf385t/dOPSD`, outputs `$SC
 | 2026-09-28 | 3476726 | gpu-a100-small | analysis v2 (coord gap, controls) | same traces, s128, batch 16 | 00:27:16 | 0.68 | done | `dopsd/anasmoke/s128/pisib2` | ~75 s/rollout; 16.9 GB peak |
 | 2026-09-28 | 3476727 | gpu-a100-small | analysis v2 | same traces, s64 | 00:22:17 | 0.56 | done | `dopsd/anasmoke/s64/pisib2` | 17.0 GB peak |
 | 2026-09-28 | 3476761 | gpu-a100-small | threshold-decoding smoke | base, 20 problems, greedy, threshold 0.9, trace + analysis v2 | 00:28:12 | 0.71 | done | `dopsd/anasmoke/thr0.9/` | acc 75%; ~85 effective steps/rollout; wide |C_t| distribution |
-| 2026-09-30 | 3474952 | gpu-a100 | **main training** | GSM8K d-OPSD, 3 GPUs, BATCH_DIVIDE 8, 1344 steps, ACT_CKPT whole_layer, adapters every 64, full ckpt every 128 (keep 1), trace every 25 rounds | running (started 09:06 after ~57 h in queue) | est. ~11 | running; 1274/1344 at 12:29, no errors, ~9.1 s/step | `dopsd/runs/gsm_opsd` → `$WORK/inf385t/runs/gsm_opsd` | loss is negative at times: d-OPSD clamps per-vocab-entry KL terms (jsd_token_clip), which breaks non-negativity; grad_norm 0 on wrong rollouts (loss*0 by design) |
+| 2026-09-30 | 3474952 | gpu-a100 | **main training** | GSM8K d-OPSD, 3 GPUs, BATCH_DIVIDE 8, 1344 steps, ACT_CKPT whole_layer, adapters every 64, full ckpt every 128 (keep 1), trace every 25 rounds | 03:41:00 (09:06-12:47, after ~57 h in queue) | 11.05 | done (exit 0) | `dopsd/runs/gsm_opsd` → `$WORK/inf385t/runs/gsm_opsd` (21 adapters, checkpoint-1344, 21 traces) | train_runtime 12699 s; loss can be negative (d-OPSD clamps per-vocab-entry KL terms via jsd_token_clip); grad_norm 0 on wrong rollouts (loss*0 by design) |
 | 2026-09-29 | 3479225-7 | gpu-a100-small | analysis v3 reruns (order metrics) | smoke traces s128 / s64 / thr0.9 | – | est. ~1.8 | pending | `dopsd/anasmoke/<mode>/pisib3` | – |
 | 2026-09-30 | 3480928 | gpu-a100 | base model, full GSM8K | – | never ran | 0 | cancelled (we look for phenomena, not exact paper numbers; base on the 300 subset suffices) | – | – |
 | 2026-09-30 | 3480929 | gpu-a100 | adapter sweep (all 21 snapshots) | – | never ran | 0 | cancelled; replaced by 3480947 | – | – |
