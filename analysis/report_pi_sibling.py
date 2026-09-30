@@ -150,6 +150,8 @@ def write_report(out, runs, rows, primary, note=""):
         L += [f"### {titles[fig]} ({fig})", "", "| quantity | group | n_rollouts | note | stat | value | 95% CI |",
               "|---|---|---|---|---|---|---|"]
         for _, q, g, n, note_, stat, v, lo, hi in sub:
+            # one table row per entry: no newlines, and escape "|" (a markdown column separator)
+            q, note_ = (str(x).replace("\n", " ").replace("|", "\\|") for x in (q, note_))
             ci = f"[{_num(lo)}, {_num(hi)}]" if _num(lo) != "" else ""
             L.append(f"| {q} | {g} | {n} | {note_} | {stat} | {_num(v)} | {ci} |")
         L.append("")

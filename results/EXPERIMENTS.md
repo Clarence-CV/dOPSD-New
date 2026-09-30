@@ -8,7 +8,7 @@ Elapsed times come from `sacct`. Paths: code `$WORK/inf385t/dOPSD`, outputs `$SC
 
 | as of | SU spent |
 |---|---|
-| 2026-09-30 | 19.68 |
+| 2026-09-30 | 21.40 |
 
 ## Jobs
 
@@ -21,7 +21,8 @@ Elapsed times come from `sacct`. Paths: code `$WORK/inf385t/dOPSD`, outputs `$SC
 | 2026-09-28 | 3476761 | gpu-a100-small | threshold-decoding smoke | base, 20 problems, greedy, threshold 0.9, trace + analysis v2 | 00:28:12 | 0.71 | done | `dopsd/anasmoke/thr0.9/` | acc 75%; ~85 effective steps/rollout; wide |C_t| distribution |
 | 2026-09-30 | 3474952 | gpu-a100 | **main training** | GSM8K d-OPSD, 3 GPUs, BATCH_DIVIDE 8, 1344 steps, ACT_CKPT whole_layer, adapters every 64, full ckpt every 128 (keep 1), trace every 25 rounds | 03:41:00 (09:06-12:47, after ~57 h in queue) | 11.05 | done (exit 0) | `dopsd/runs/gsm_opsd` → `$WORK/inf385t/runs/gsm_opsd` (21 adapters, checkpoint-1344, 21 traces) | train_runtime 12699 s; loss can be negative (d-OPSD clamps per-vocab-entry KL terms via jsd_token_clip); grad_norm 0 on wrong rollouts (loss*0 by design) |
 | 2026-09-30 | 3479225 | gpu-a100-small | analysis v3 (order metrics), s128 smoke traces | bf16 re-scoring | 00:24:35 | 0.61 | done | `dopsd/anasmoke/s128/pisib3` | order metrics OK (17.1 GB peak); sanity rank_S <= |C_t| fails for 2.3% of tokens (near-ties, 97/105 off by one rank) -> the sampler runs fp16 autocast, so the analysis now defaults to fp16 |
-| 2026-09-30 | 3479226, 3479227 | gpu-a100-small | analysis v3, s64 / thr0.9 smoke traces | bf16 re-scoring | running | – | running | `dopsd/anasmoke/{s64,thr0.9}/pisib3` | – |
+| 2026-09-30 | 3479226 | gpu-a100-small | analysis v3, s64 smoke traces | bf16 re-scoring | 00:22:21 | 0.56 | done | `dopsd/anasmoke/s64/pisib3` | 17.1 GB peak |
+| 2026-09-30 | 3479227 | gpu-a100-small | analysis v3, thr0.9 smoke traces | bf16 re-scoring | 00:21:51 | 0.55 | done | `dopsd/anasmoke/thr0.9/pisib3` | 17.1 GB peak |
 | 2026-09-30 | 3481013 | gpu-a100-small | fp16 re-scoring check, s128 smoke traces | --autocast_dtype float16 (new default) | – | est. ~0.6 | pending | `dopsd/anasmoke/s128/pisib4` | – |
 | 2026-09-30 | 3480928 | gpu-a100 | base model, full GSM8K | – | never ran | 0 | cancelled (we look for phenomena, not exact paper numbers; base on the 300 subset suffices) | – | – |
 | 2026-09-30 | 3480929 | gpu-a100 | adapter sweep (all 21 snapshots) | – | never ran | 0 | cancelled; replaced by 3480947 | – | – |
@@ -37,4 +38,4 @@ Per-analysis reports (tables + definitions) live next to the figures as `report.
 
 | date | what | report |
 |---|---|---|
-| 2026-09-29 | smoke (base, 20 problems, greedy): fixed 128 / 64 + threshold 0.9 | `results/smoke_20260929/report.md` |
+| 2026-09-30 | smoke (base, 20 problems, greedy, bf16 re-scoring): fixed 128 / 64 + threshold 0.9, all metrics incl. order / effect types / distance-matched co-gain | `results/smoke_20260929/report.md` (token/step tables in `outputs/smoke_20260929/`) |

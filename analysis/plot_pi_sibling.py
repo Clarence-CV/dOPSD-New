@@ -496,7 +496,7 @@ def main():
     with open(os.path.join(args.out, "summary.csv"), "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["figure", "quantity", "group", "n_rollouts", "n_tokens/note", "stat", "value", "ci_lo", "ci_hi"])
-        w.writerows(rows)
+        w.writerows([[str(c).replace("\n", " ") if isinstance(c, str) else c for c in r] for r in rows])
     from report_pi_sibling import export_tables, write_report
 
     if args.thr_records:
