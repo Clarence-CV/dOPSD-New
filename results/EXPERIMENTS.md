@@ -8,7 +8,7 @@ Elapsed times come from `sacct`. Paths: code `$WORK/inf385t/dOPSD`, outputs `$SC
 
 | as of | SU spent |
 |---|---|
-| 2026-09-30 | 21.40 |
+| 2026-10-01 | 22.08 |
 
 ## Jobs
 
@@ -23,7 +23,7 @@ Elapsed times come from `sacct`. Paths: code `$WORK/inf385t/dOPSD`, outputs `$SC
 | 2026-09-30 | 3479225 | gpu-a100-small | analysis v3 (order metrics), s128 smoke traces | bf16 re-scoring | 00:24:35 | 0.61 | done | `dopsd/anasmoke/s128/pisib3` | order metrics OK (17.1 GB peak); sanity rank_S <= |C_t| fails for 2.3% of tokens (near-ties, 97/105 off by one rank) -> the sampler runs fp16 autocast, so the analysis now defaults to fp16 |
 | 2026-09-30 | 3479226 | gpu-a100-small | analysis v3, s64 smoke traces | bf16 re-scoring | 00:22:21 | 0.56 | done | `dopsd/anasmoke/s64/pisib3` | 17.1 GB peak |
 | 2026-09-30 | 3479227 | gpu-a100-small | analysis v3, thr0.9 smoke traces | bf16 re-scoring | 00:21:51 | 0.55 | done | `dopsd/anasmoke/thr0.9/pisib3` | 17.1 GB peak |
-| 2026-09-30 | 3481013 | gpu-a100-small | fp16 re-scoring check, s128 smoke traces | --autocast_dtype float16 (new default) | – | est. ~0.6 | pending | `dopsd/anasmoke/s128/pisib4` | – |
+| 2026-09-30 | 3481013 | gpu-a100-small | fp16 re-scoring check, s128 smoke traces | --autocast_dtype float16 (new default) | 00:27:21 | 0.68 | done | `dopsd/anasmoke/s128/pisib4` | rank_S > |C_t| violations: bf16 105/4480 (2.34%) -> fp16 2/4480 (0.04%, both off by one rank); 18.2 GB peak. The fp16 default is confirmed |
 | 2026-09-30 | 3480928 | gpu-a100 | base model, full GSM8K | – | never ran | 0 | cancelled (we look for phenomena, not exact paper numbers; base on the 300 subset suffices) | – | – |
 | 2026-09-30 | 3480929 | gpu-a100 | adapter sweep (all 21 snapshots) | – | never ran | 0 | cancelled; replaced by 3480947 | – | – |
 | 2026-09-30 | 3480947 | gpu-a100 | adapter sweep (13 ckpts) | – | never ran | 0 | cancelled; too many checkpoints for a phenomenon study | – | – |
