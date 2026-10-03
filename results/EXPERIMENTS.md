@@ -8,7 +8,7 @@ Elapsed times come from `sacct`. Paths: code `$WORK/inf385t/dOPSD`, outputs `$SC
 
 | as of | SU spent |
 |---|---|
-| 2026-10-01 | 22.08 |
+| 2026-10-02 | 47.38 |
 
 ## Jobs
 
@@ -29,7 +29,7 @@ Elapsed times come from `sacct`. Paths: code `$WORK/inf385t/dOPSD`, outputs `$SC
 | 2026-09-30 | 3480947 | gpu-a100 | adapter sweep (13 ckpts) | – | never ran | 0 | cancelled; too many checkpoints for a phenomenon study | – | – |
 | 2026-09-30 | 3480958 | gpu-a100 | adapter sweep (4 ckpts) | – | never ran | 0 | cancelled; merged into the pipeline job below (one queue wait instead of two) | – | – |
 | 2026-09-30 | 3480959 | gpu-a100 | pipeline v1 (fixed budget only) | – | never ran | 0 | cancelled; replaced by the 2x2 version | – | – |
-| 2026-09-30 | 3480966 | gpu-a100 | **pipeline** (one job, 12.5 h request) | (1) sweep, greedy + fixed 128: base + steps 448/576/1152/1344 on 300 seeded problems; (2) pick best adapter; (3) traced rollouts, T=0.9, 300 problems, for {base, best} x {fixed budget 128, threshold 0.9}; (4) PI/sibling/order analysis, 3 shards each. Figures/report made offline | – | est. ~27 | pending | `dopsd/pipeline_gsm_opsd/` (csv/txt/log copied to `$WORK/inf385t/results/pipeline_gsm_opsd/`) | – |
+| 2026-10-02 | 3480966 | gpu-a100 | **pipeline** (one job) | (1) sweep, greedy + fixed 128, 300 seeded GSM8K test problems; (2) best adapter = step-448; (3) T=0.9 traced rollouts, 300 problems, {base, step-448} x {fixed 128, threshold 0.9}; (4) analysis (fp16), 3 shards | 08:25:59 (12:27-20:53, after ~48 h in queue) | 25.30 | done (exit 0) | `dopsd/pipeline_gsm_opsd/`; records pulled to `outputs/pipeline_gsm_20261002/` | sweep accuracy: base 78.3%, step-448 82.7%, step-576 82.3%, step-1152 59.3%, step-1344 18.0% -> +4.4 pt at the best step (paper +5.0); the best step matches the paper's 425 updates; **training collapses past ~600 steps** (likely why the paper only evaluates up to step 500) |
 
 ## Result snapshots
 
