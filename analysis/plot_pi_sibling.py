@@ -324,15 +324,24 @@ def fig8(groups, out, rows):
         pairs = [p for t in tabs for p in t]
         if not pairs:
             continue
-        real = float(np.mean([p[0] for p in pairs]))
-        expect = float(np.mean([p[1].mean() for p in pairs]))
-        null = np.array([np.mean([p[1][rng.integers(p[1].size)] for p in pairs]) for _ in range(N_PERM)])
+        # Vectorised: candidates of all pairs flattened with offsets (threshold runs give 1e5+ pairs).
+        real_v = np.array([p[0] for p in pairs], dtype=float)
+        counts = np.array([p[1].size for p in pairs])
+        offs = np.concatenate([[0], np.cumsum(counts)[:-1]])
+        cand = np.concatenate([p[1] for p in pairs]).astype(float)
+        cmean = np.add.reduceat(cand, offs) / counts
+        real, expect = float(real_v.mean()), float(cmean.mean())
+        null = np.array([cand[offs + (rng.random(counts.size) * counts).astype(int)].mean() for _ in range(N_PERM)])
         pval = (1 + np.sum(null >= real)) / (1 + null.size)
+        rid = np.repeat(np.arange(len(tabs)), [len(t) for t in tabs])  # rollout of each pair
+        s_real = np.bincount(rid, real_v, minlength=len(tabs))
+        s_cm = np.bincount(rid, cmean, minlength=len(tabs))
+        n_pr = np.bincount(rid, minlength=len(tabs))
         diffs = []
-        for _ in range(N_BOOT // 4):
-            sample = [p for i in rng.integers(0, len(tabs), len(tabs)) for p in tabs[i]]
-            if sample:
-                diffs.append(np.mean([p[0] for p in sample]) - np.mean([p[1].mean() for p in sample]))
+        for _ in range(N_BOOT):
+            i = rng.integers(0, len(tabs), len(tabs))
+            if n_pr[i].sum():
+                diffs.append((s_real[i].sum() - s_cm[i].sum()) / n_pr[i].sum())
         dlo, dhi = np.percentile(diffs, [2.5, 97.5])
         nlo, nhi = np.percentile(null, [2.5, 97.5])
         note = f"{len(pairs)} co-decoded pairs with a distance match"
