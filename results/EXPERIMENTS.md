@@ -39,4 +39,4 @@ Per-analysis reports (tables + definitions) live next to the figures as `report.
 | date | what | report |
 |---|---|---|
 | 2026-09-30 | smoke (base, 20 problems, greedy, bf16 re-scoring): fixed 128 / 64 + threshold 0.9, all metrics incl. order / effect types / distance-matched co-gain | `results/smoke_20260929/report.md` (token/step tables in `outputs/smoke_20260929/`) |
-| 2026-10-03 | **GSM8K pipeline: {base, step-448} x {fixed 128, threshold 0.9}, T=0.9, 300 problems, full analysis** | `results/pipeline_gsm_20261002/SUMMARY.md` (key table + interpretation), per-run `report.md` / `summary.csv` / `rollouts.csv` |
+| 2026-10-03 | **GSM8K pipeline: {base, step-448} x {fixed 128, threshold 0.9}, T=0.9, 300 problems, full analysis** | `results/pipeline_gsm_20261002/SUMMARY.md` (single consolidated report organised by the discussion-doc questions; all numbers in `metrics.csv`; per-run figures in `figs/`; big tables incl. top-20 in `outputs/pipeline_gsm_20261002/tables/`) |

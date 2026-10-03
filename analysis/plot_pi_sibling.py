@@ -1,33 +1,21 @@
-"""Figures + summary table for pi_sibling_analysis records.
+"""Per-run figures for pi_sibling_analysis records (tables and the report: analysis/make_summary.py).
 
-    python analysis/plot_pi_sibling.py --out FIG_DIR \\
-        --records s128=/path/records_steps128 [--records s64=... --records s32=...]
+    python analysis/plot_pi_sibling.py --out FIG_DIR --records name=records_dir [--thr_records name=dir]
 
-The FIRST --records set is the primary run (figures 1-3, 5); figure 4 pools every set
-(one per steps setting -> one |C_t| value each). Tokens that are special (EOS/EOT)
-or after the answer end are excluded unless --include_special.
+Figures are drawn for the FIRST --records set. Special tokens (EOS/EOT) and tokens after the answer
+end are excluded unless --include_special. CIs: 95% cluster bootstrap over rollouts.
 
-Confidence intervals are 95% cluster-bootstrap over ROLLOUTS (tokens within a rollout
-are correlated, so a token-level CI would be overconfident).
-
-  fig1_pi_gain.png            g = log p_T(y) - log p_S(y), correct vs wrong (ECDF)
-  fig2_sibling_gap.png        delta = log p_sib(y) - log p_S(y) and JS(p_S, p_sib), correct vs wrong
-  fig3_sibling_vs_step.png    sibling gap vs denoising step
-  fig4_sibling_vs_parallel.png sibling gap vs |C_t|
-  fig5_cos_pi_sib.png         cos(p_T - p_S, p_sib - p_S), correct vs wrong
-  fig6_coord_gap.png          B: D_S, D_T, coord = D_S - D_T (sibling and matched control), correct vs wrong
-  fig7_sibling_vs_control.png C: sibling vs matched non-sibling control, paired (ctrl_ok tokens only)
-  fig8_cogain.png             A: pairwise co-gain P(g_i>0 and g_j>0) for co-decoded pairs vs DISTANCE-
-                              MATCHED pairs (same rollout and block, same |i-j|, different steps);
-                              the within-block shuffle of the all-up rate is kept in the table only
-                              (it ignores adjacency, so it is confounded by position)
-  fig10_pi_effect_types.png   PI effect per token: sharpen (top1_T=y, g>0), defer (top1_T=y, g<=0),
-                              redirect (top1_T!=y); and defer/redirect rate given sibling conflict (D_S<0)
-  fig11_decoding_order.png    teacher-vs-student decoding order: top-|C_t| overlap, premature-commit
-                              rate (rank_T_norm > 0.5), Spearman of block confidences
-  fig9_threshold_parallel.png sibling gap vs |C_t| WITHIN a threshold-decoded run (--thr_records),
-                              where |C_t| varies naturally; |C_t|=1 has no siblings and is left out
-  summary.csv                 every plotted number (table view)
+  pi_gain.png                          g = log p_T(y) - log p_S(y), correct vs wrong (ECDF)
+  sibling_gap.png                      D_S and JS(p_S, p_sib), correct vs wrong (ECDF)
+  sibling_vs_step.png                  sibling gap vs denoising step
+  pi_vs_sibling_direction.png          cos(p_T - p_S, p_sib - p_S)
+  B_coordination_gap.png               D_S, D_T, coord (siblings and matched control)
+  C_sibling_vs_control.png             sibling minus matched control, paired
+  A_cogain.png                         pairwise co-gain vs distance-matched pairs
+  pi_effect_types.png                  sharpen / defer / redirect, and given sibling conflict
+  decoding_order.png                   teacher-vs-student order overlap, premature commits, Spearman
+  threshold_sibling_vs_parallel.png    (--thr_records) sibling gap vs natural |C_t|
+  summary.csv                          the plotted numbers
 """
 
 import argparse
@@ -95,6 +83,15 @@ def cluster_boot(rolls, fn, seed=0):
     return float(point), float(lo), float(hi)
 
 
+SIB_KEYS = {"delta", "D_S", "D_T", "coord", "D_S_ctrl", "D_T_ctrl", "coord_ctrl", "js_sib", "cos_pi_sib"}
+
+
+def vals_of(r, key):
+    """Values of `key`; sibling metrics only on steps with >= 2 revealed tokens (|C_t| = 1 has no sibling)."""
+    v = r[key]
+    return v[r["n_parallel"] > 1] if key in SIB_KEYS else v
+
+
 def split(rolls):
     return {"correct": [r for r in rolls if r["correct"]], "wrong": [r for r in rolls if not r["correct"]]}
 
@@ -103,13 +100,13 @@ def ecdf_panel(ax, groups, key, xlabel, rows, tag):
     for name, rs in groups.items():
         if not rs:
             continue
-        v = np.sort(np.concatenate([r[key] for r in rs]))
+        v = np.sort(np.concatenate([vals_of(r, key) for r in rs]))
         y = np.arange(1, v.size + 1) / v.size
         ax.plot(v, y, color=COLORS[name], linewidth=2, label=f"{name} ({len(rs)} rollouts)")
-        m, lo, hi = cluster_boot([r[key] for r in rs], np.mean)
+        m, lo, hi = cluster_boot([vals_of(r, key) for r in rs], np.mean)
         ax.axvline(m, color=COLORS[name], linewidth=1, linestyle=(0, (3, 3)))
-        rows.append([tag, key, name, len(rs), sum(r[key].size for r in rs), "mean", m, lo, hi])
-    lo_, hi_ = np.percentile(np.concatenate([r[key] for rs in groups.values() for r in rs]), [0.5, 99.5])
+        rows.append([tag, key, name, len(rs), sum(vals_of(r, key).size for r in rs), "mean", m, lo, hi])
+    lo_, hi_ = np.percentile(np.concatenate([vals_of(r, key) for rs in groups.values() for r in rs]), [0.5, 99.5])
     ax.set_xlim(lo_, hi_)
     style(ax, xlabel, "cumulative fraction of tokens")
     ax.legend(frameon=False, fontsize=9, labelcolor=INK)
@@ -117,25 +114,25 @@ def ecdf_panel(ax, groups, key, xlabel, rows, tag):
 
 def fig1(groups, out, rows):
     fig, ax = plt.subplots(figsize=(6.4, 4.2))
-    ecdf_panel(ax, groups, "g", r"PI gain  $g_i=\log p_T(y_i)-\log p_S(y_i)$  (nats)", rows, "fig1")
+    ecdf_panel(ax, groups, "g", r"PI gain  $g_i=\log p_T(y_i)-\log p_S(y_i)$  (nats)", rows, "pi_gain")
     ax.set_title("PI gain on the rollout's own tokens (dashed = mean)", color=INK, fontsize=11, loc="left")
     # Hypothesis metric: student lukewarm on y (p_S < 0.5) but PI lifts it (g > 0.5 nat).
     for name, rs in groups.items():
         m, lo, hi = cluster_boot([np.stack([r["logp_S"], r["g"]], 1) for r in rs],
                                  lambda a: float(np.mean((np.exp(a[:, 0]) < 0.5) & (a[:, 1] > 0.5))))
-        rows.append(["fig1", "frac(p_S<0.5 & g>0.5)", name, len(rs), "", "fraction", m, lo, hi])
+        rows.append(["pi_gain", "frac(p_S<0.5 & g>0.5)", name, len(rs), "", "fraction", m, lo, hi])
     fig.tight_layout()
-    fig.savefig(os.path.join(out, "fig1_pi_gain.png"), dpi=160, facecolor=SURFACE)
+    fig.savefig(os.path.join(out, "pi_gain.png"), dpi=160, facecolor=SURFACE)
     plt.close(fig)
 
 
 def fig2(groups, out, rows):
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
-    ecdf_panel(axes[0], groups, "delta", r"sibling gain  $\Delta_i=\log p_{sib}(y_i)-\log p_S(y_i)$", rows, "fig2")
-    ecdf_panel(axes[1], groups, "js_sib", r"$D_{JS}(p_S, p_{sib})$  (nats)", rows, "fig2")
+    ecdf_panel(axes[0], groups, "delta", r"sibling gain  $\Delta_i=\log p_{sib}(y_i)-\log p_S(y_i)$", rows, "sibling_gap")
+    ecdf_panel(axes[1], groups, "js_sib", r"$D_{JS}(p_S, p_{sib})$  (nats)", rows, "sibling_gap")
     axes[0].set_title("Same-step sibling gap (dashed = mean)", color=INK, fontsize=11, loc="left")
     fig.tight_layout()
-    fig.savefig(os.path.join(out, "fig2_sibling_gap.png"), dpi=160, facecolor=SURFACE)
+    fig.savefig(os.path.join(out, "sibling_gap.png"), dpi=160, facecolor=SURFACE)
     plt.close(fig)
 
 
@@ -144,7 +141,7 @@ def band_panel(ax, groups, key, xkey, bins, xlabel, ylabel, rows, tag):
     for name, rs in groups.items():
         m_, lo_, hi_ = [], [], []
         for a, b in zip(bins[:-1], bins[1:]):
-            sub = [r[key][(r[xkey] >= a) & (r[xkey] < b)] for r in rs]
+            sub = [r[key][(r[xkey] >= a) & (r[xkey] < b) & ((r["n_parallel"] > 1) if key in SIB_KEYS else True)] for r in rs]
             sub = [s for s in sub if s.size]
             m, lo, hi = cluster_boot(sub, np.mean) if sub else (np.nan,) * 3
             m_.append(m), lo_.append(lo), hi_.append(hi)
@@ -159,49 +156,22 @@ def fig3(groups, out, rows, width=8):
     max_step = int(max(r["step"].max() for rs in groups.values() for r in rs)) + 1
     bins = list(range(0, max_step + width, width))
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
-    band_panel(axes[0], groups, "js_sib", "step", bins, "denoising step t", r"mean $D_{JS}(p_S, p_{sib})$", rows, "fig3")
-    band_panel(axes[1], groups, "delta", "step", bins, "denoising step t", r"mean $\Delta_i$", rows, "fig3")
+    band_panel(axes[0], groups, "js_sib", "step", bins, "denoising step t", r"mean $D_{JS}(p_S, p_{sib})$", rows, "sibling_vs_step")
+    band_panel(axes[1], groups, "delta", "step", bins, "denoising step t", r"mean $\Delta_i$", rows, "sibling_vs_step")
     axes[0].set_title(f"Sibling gap vs step ({width}-step bins, band = 95% CI)", color=INK, fontsize=11, loc="left")
     fig.tight_layout()
-    fig.savefig(os.path.join(out, "fig3_sibling_vs_step.png"), dpi=160, facecolor=SURFACE)
-    plt.close(fig)
-
-
-def fig4(sets, out, rows):
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
-    for ax, key, ylabel in ((axes[0], "js_sib", r"mean $D_{JS}(p_S, p_{sib})$"), (axes[1], "delta", r"mean $\Delta_i$")):
-        for k, name in enumerate(("correct", "wrong")):
-            xs, ms, err = [], [], []
-            for tag, rolls in sets.items():
-                rs = split(rolls)[name]
-                if not rs:
-                    continue
-                npar = int(np.median(np.concatenate([r["n_parallel"] for r in rs])))
-                m, lo, hi = cluster_boot([r[key] for r in rs], np.mean)
-                xs.append(npar), ms.append(m), err.append((m - lo, hi - m))
-                rows.append(["fig4", key, name, len(rs), f"{tag} |C_t|={npar}", "mean", m, lo, hi])
-            order = np.argsort(xs)
-            x = np.log2(np.array(xs)[order]) + (k - 0.5) * 0.08
-            ax.errorbar(x, np.array(ms)[order], yerr=np.array(err)[order].T, color=COLORS[name], linewidth=2,
-                        marker="o", markersize=6, capsize=3, label=name)
-        ticks = sorted({int(np.median(np.concatenate([r["n_parallel"] for r in rl]))) for rl in sets.values()})
-        ax.set_xticks(np.log2(ticks), [str(t) for t in ticks])
-        style(ax, r"tokens revealed per step  $|C_t|$", ylabel)
-        ax.legend(frameon=False, fontsize=9, labelcolor=INK)
-    axes[0].set_title("Sibling gap vs parallel reveal count (95% CI)", color=INK, fontsize=11, loc="left")
-    fig.tight_layout()
-    fig.savefig(os.path.join(out, "fig4_sibling_vs_parallel.png"), dpi=160, facecolor=SURFACE)
+    fig.savefig(os.path.join(out, "sibling_vs_step.png"), dpi=160, facecolor=SURFACE)
     plt.close(fig)
 
 
 def fig5(groups, out, rows):
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
-    ecdf_panel(axes[0], groups, "cos_pi_sib", r"$\cos(p_T-p_S,\ p_{sib}-p_S)$", rows, "fig5")
+    ecdf_panel(axes[0], groups, "cos_pi_sib", r"$\cos(p_T-p_S,\ p_{sib}-p_S)$", rows, "pi_vs_sibling_direction")
     axes[0].axvline(0, color=INK_2, linewidth=0.8)
     names = [n for n in ("correct", "wrong") if groups[n]]
     for k, name in enumerate(names):
-        m, lo, hi = cluster_boot([r["cos_pi_sib"] for r in groups[name]], lambda a: float(np.mean(a > 0)))
-        rows.append(["fig5", "frac(cos>0)", name, len(groups[name]), "", "fraction", m, lo, hi])
+        m, lo, hi = cluster_boot([vals_of(r, "cos_pi_sib") for r in groups[name]], lambda a: float(np.mean(a > 0)))
+        rows.append(["pi_vs_sibling_direction", "frac(cos>0)", name, len(groups[name]), "", "fraction", m, lo, hi])
         axes[1].bar(k, m, width=0.5, color=COLORS[name])
         axes[1].errorbar(k, m, yerr=[[m - lo], [hi - m]], color=INK, capsize=4, linewidth=1)
         axes[1].text(k, hi + 0.01, f"{m:.3f}", ha="center", va="bottom", color=INK, fontsize=9)
@@ -210,7 +180,7 @@ def fig5(groups, out, rows):
     style(axes[1], "", "fraction of tokens with cos > 0")
     axes[0].set_title("Do the PI shift and the sibling shift agree?", color=INK, fontsize=11, loc="left")
     fig.tight_layout()
-    fig.savefig(os.path.join(out, "fig5_cos_pi_sib.png"), dpi=160, facecolor=SURFACE)
+    fig.savefig(os.path.join(out, "pi_vs_sibling_direction.png"), dpi=160, facecolor=SURFACE)
     plt.close(fig)
 
 
@@ -222,7 +192,7 @@ def dot_panel(ax, groups, keys, labels, rows, tag, note="ctrl_ok tokens"):
             continue
         ms, err = [], []
         for key in keys:
-            vals = [r[key][r["ctrl_ok"] > 0] for r in rs]
+            vals = [r[key][(r["ctrl_ok"] > 0) & (r["n_parallel"] > 1)] for r in rs]  # paired subset, |C_t| >= 2
             m, lo, hi = cluster_boot([v for v in vals if v.size], np.mean)
             ms.append(m), err.append((m - lo, hi - m))
             rows.append([tag, key, name, len(rs), note, "mean", m, lo, hi])
@@ -237,16 +207,16 @@ def dot_panel(ax, groups, keys, labels, rows, tag, note="ctrl_ok tokens"):
 def fig6(groups, out, rows):
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.4), gridspec_kw={"width_ratios": [2, 1]})
     dot_panel(axes[0], groups, ["D_S", "D_T", "D_S_ctrl", "D_T_ctrl"],
-              ["D_S\nsiblings", "D_T\nsiblings", "D_S\ncontrol", "D_T\ncontrol"], rows, "fig6")
+              ["D_S\nsiblings", "D_T\nsiblings", "D_S\ncontrol", "D_T\ncontrol"], rows, "B_coordination_gap")
     style(axes[0], "", "mean change in log p(y_i)  (nats)")
     axes[0].set_title("What revealed tokens add: student (D_S) vs PI teacher (D_T)", color=INK, fontsize=10, loc="left")
-    dot_panel(axes[1], groups, ["coord", "coord_ctrl"], ["siblings", "control"], rows, "fig6")
+    dot_panel(axes[1], groups, ["coord", "coord_ctrl"], ["siblings", "control"], rows, "B_coordination_gap")
     style(axes[1], "", "coord = D_S - D_T  (nats)")
     axes[1].set_title("Gap PI already fills", color=INK, fontsize=10, loc="left")
     fig.suptitle("B. Coordination gap (paired subset with a matched control)", color=INK, fontsize=11,
                  x=0.01, ha="left")
     fig.tight_layout()
-    fig.savefig(os.path.join(out, "fig6_coord_gap.png"), dpi=160, facecolor=SURFACE)
+    fig.savefig(os.path.join(out, "B_coordination_gap.png"), dpi=160, facecolor=SURFACE)
     plt.close(fig)
 
 
@@ -256,9 +226,9 @@ def fig7(groups, out, rows):
     for ax, (sib, ctrl, label) in zip(axes, pairs):
         names = [n for n in ("correct", "wrong") if groups[n]]
         for k, name in enumerate(names):
-            diffs = [(r[sib] - r[ctrl])[r["ctrl_ok"] > 0] for r in groups[name]]
+            diffs = [(r[sib] - r[ctrl])[(r["ctrl_ok"] > 0) & (r["n_parallel"] > 1)] for r in groups[name]]
             m, lo, hi = cluster_boot([d for d in diffs if d.size], np.mean)
-            rows.append(["fig7", f"{sib} - {ctrl} (paired)", name, len(groups[name]), "ctrl_ok tokens", "mean", m, lo, hi])
+            rows.append(["C_sibling_vs_control", f"{sib} - {ctrl} (paired)", name, len(groups[name]), "ctrl_ok tokens", "mean", m, lo, hi])
             ax.bar(k, m, width=0.5, color=COLORS[name])
             ax.errorbar(k, m, yerr=[[m - lo], [hi - m]], color=INK, capsize=4, linewidth=1)
             ax.annotate(f"{m:+.4f}", (k, hi), xytext=(0, 4), textcoords="offset points",
@@ -270,27 +240,8 @@ def fig7(groups, out, rows):
     fig.suptitle("C. Same-step siblings vs matched non-sibling future tokens, paired  (> 0: siblings special)",
                  color=INK, fontsize=11, x=0.01, ha="left")
     fig.tight_layout()
-    fig.savefig(os.path.join(out, "fig7_sibling_vs_control.png"), dpi=160, facecolor=SURFACE)
+    fig.savefig(os.path.join(out, "C_sibling_vs_control.png"), dpi=160, facecolor=SURFACE)
     plt.close(fig)
-
-
-def all_up_rate(rolls, shuffle_rng=None):
-    """P(every token of a co-decoded group has g > 0); optionally regroup within (rollout, block)."""
-    hits = total = 0
-    for r in rolls:
-        up = r["g"] > 0
-        for b in np.unique(r["block"]):
-            sel = np.where(r["block"] == b)[0]
-            vals = up[sel]
-            if shuffle_rng is not None:
-                vals = vals[shuffle_rng.permutation(vals.size)]
-            steps = r["step"][sel]  # group sizes are preserved; membership is shuffled
-            for t in np.unique(steps):
-                grp = vals[steps == t]
-                if grp.size > 1:
-                    hits += bool(grp.all())
-                    total += 1
-    return hits / total if total else float("nan")
 
 
 def pair_table(r):
@@ -314,59 +265,69 @@ def pair_table(r):
     return out
 
 
+def cogain_stats(rs, rng):
+    """Pairwise co-gain of co-decoded pairs vs distance-matched pairs (see pair_table).
+
+    Returns dict(real, expect, diff, diff_lo, diff_hi, null_mean, null_lo, null_hi, p, n_pairs) or None.
+    real/expect: P(both g>0) for co-decoded pairs / its distance-matched expectation; p: one-sided
+    permutation p-value (one random matched pair per co-decoded pair); diff CI: rollout bootstrap.
+    """
+    tabs = [pair_table(r) for r in rs]
+    pairs = [p for t in tabs for p in t]
+    if not pairs:
+        return None
+    real_v = np.array([p[0] for p in pairs], dtype=float)
+    counts = np.array([p[1].size for p in pairs])
+    offs = np.concatenate([[0], np.cumsum(counts)[:-1]])
+    cand = np.concatenate([p[1] for p in pairs]).astype(float)
+    cmean = np.add.reduceat(cand, offs) / counts
+    real, expect = float(real_v.mean()), float(cmean.mean())
+    null = np.array([cand[offs + (rng.random(counts.size) * counts).astype(int)].mean() for _ in range(N_PERM)])
+    rid = np.repeat(np.arange(len(tabs)), [len(t) for t in tabs])
+    s_real = np.bincount(rid, real_v, minlength=len(tabs))
+    s_cm = np.bincount(rid, cmean, minlength=len(tabs))
+    n_pr = np.bincount(rid, minlength=len(tabs))
+    diffs = []
+    for _ in range(N_BOOT):
+        i = rng.integers(0, len(tabs), len(tabs))
+        if n_pr[i].sum():
+            diffs.append((s_real[i].sum() - s_cm[i].sum()) / n_pr[i].sum())
+    dlo, dhi = np.percentile(diffs, [2.5, 97.5])
+    nlo, nhi = np.percentile(null, [2.5, 97.5])
+    return dict(real=real, expect=expect, diff=real - expect, diff_lo=float(dlo), diff_hi=float(dhi),
+                null_mean=float(null.mean()), null_lo=float(nlo), null_hi=float(nhi),
+                p=float((1 + np.sum(null >= real)) / (1 + null.size)), n_pairs=len(pairs))
+
+
 def fig8(groups, out, rows):
     fig, ax = plt.subplots(figsize=(6.4, 4.2))
     names = [n for n in ("correct", "wrong") if groups[n]]
     rng = np.random.default_rng(0)
     for k, name in enumerate(names):
         rs = groups[name]
-        tabs = [pair_table(r) for r in rs]
-        pairs = [p for t in tabs for p in t]
-        if not pairs:
+        c = cogain_stats(rs, rng)
+        if c is None:
             continue
-        # Vectorised: candidates of all pairs flattened with offsets (threshold runs give 1e5+ pairs).
-        real_v = np.array([p[0] for p in pairs], dtype=float)
-        counts = np.array([p[1].size for p in pairs])
-        offs = np.concatenate([[0], np.cumsum(counts)[:-1]])
-        cand = np.concatenate([p[1] for p in pairs]).astype(float)
-        cmean = np.add.reduceat(cand, offs) / counts
-        real, expect = float(real_v.mean()), float(cmean.mean())
-        null = np.array([cand[offs + (rng.random(counts.size) * counts).astype(int)].mean() for _ in range(N_PERM)])
-        pval = (1 + np.sum(null >= real)) / (1 + null.size)
-        rid = np.repeat(np.arange(len(tabs)), [len(t) for t in tabs])  # rollout of each pair
-        s_real = np.bincount(rid, real_v, minlength=len(tabs))
-        s_cm = np.bincount(rid, cmean, minlength=len(tabs))
-        n_pr = np.bincount(rid, minlength=len(tabs))
-        diffs = []
-        for _ in range(N_BOOT):
-            i = rng.integers(0, len(tabs), len(tabs))
-            if n_pr[i].sum():
-                diffs.append((s_real[i].sum() - s_cm[i].sum()) / n_pr[i].sum())
-        dlo, dhi = np.percentile(diffs, [2.5, 97.5])
-        nlo, nhi = np.percentile(null, [2.5, 97.5])
-        note = f"{len(pairs)} co-decoded pairs with a distance match"
-        rows.append(["fig8", "pair co-gain P(both g>0) co-decoded", name, len(rs), note, "fraction", real, np.nan, np.nan])
-        rows.append(["fig8", "pair co-gain distance-matched null", name, len(rs), f"perm p={pval:.4f}", "fraction",
-                     float(null.mean()), nlo, nhi])
-        rows.append(["fig8", "pair co-gain real - matched expectation", name, len(rs), "rollout bootstrap CI",
-                     "difference", real - expect, dlo, dhi])
-        # Reference only: the earlier within-block shuffle of the all-up rate (not distance-matched).
-        ref_null = np.array([all_up_rate(rs, np.random.default_rng(sd)) for sd in range(100)])
-        rows.append(["fig8", "REF all-up rate (within-block shuffle, adjacency-confounded)", name, len(rs),
-                     f"real={all_up_rate(rs):.4f}", "fraction", float(ref_null.mean()), *np.percentile(ref_null, [2.5, 97.5])])
+        note = f"{c['n_pairs']} co-decoded pairs with a distance match"
+        rows.append(["A_cogain", "pair co-gain P(both g>0) co-decoded", name, len(rs), note, "fraction", c["real"], np.nan, np.nan])
+        rows.append(["A_cogain", "pair co-gain distance-matched null", name, len(rs), f"perm p={c['p']:.4f}", "fraction",
+                     c["null_mean"], c["null_lo"], c["null_hi"]])
+        rows.append(["A_cogain", "pair co-gain real - matched expectation", name, len(rs), "rollout bootstrap CI",
+                     "difference", c["diff"], c["diff_lo"], c["diff_hi"]])
+        real, nm, nlo, nhi = c["real"], c["null_mean"], c["null_lo"], c["null_hi"]
         ax.bar(k - 0.14, real, width=0.26, color=COLORS[name], label=f"{name}: co-decoded pairs")
-        ax.bar(k + 0.14, null.mean(), width=0.26, color=COLORS[name], alpha=0.35, label=f"{name}: distance-matched")
-        ax.errorbar(k + 0.14, null.mean(), yerr=[[null.mean() - nlo], [nhi - null.mean()]], color=INK,
-                    capsize=4, linewidth=1)
-        ax.annotate(f"diff {real - expect:+.3f} [{dlo:+.3f}, {dhi:+.3f}]\nperm p={pval:.3f}", (k, max(real, nhi)),
-                    xytext=(0, 4), textcoords="offset points", ha="center", va="bottom", color=INK, fontsize=8)
+        ax.bar(k + 0.14, nm, width=0.26, color=COLORS[name], alpha=0.35, label=f"{name}: distance-matched")
+        ax.errorbar(k + 0.14, nm, yerr=[[nm - nlo], [nhi - nm]], color=INK, capsize=4, linewidth=1)
+        ax.annotate(f"diff {c['diff']:+.3f} [{c['diff_lo']:+.3f}, {c['diff_hi']:+.3f}]\nperm p={c['p']:.3f}",
+                    (k, max(real, nhi)), xytext=(0, 4), textcoords="offset points", ha="center", va="bottom",
+                    color=INK, fontsize=8)
     ax.set_xticks(range(len(names)), names)
     style(ax, "", "P(both tokens of a pair have g > 0)")
     ax.set_title("A. Pairwise co-gain: co-decoded vs distance-matched pairs", color=INK, fontsize=11, loc="left")
     ax.set_ylim(0, 1.25)
     ax.legend(frameon=False, fontsize=8, labelcolor=INK, ncol=2, loc="upper center", bbox_to_anchor=(0.5, 1.0))
     fig.tight_layout()
-    fig.savefig(os.path.join(out, "fig8_cogain.png"), dpi=160, facecolor=SURFACE)
+    fig.savefig(os.path.join(out, "A_cogain.png"), dpi=160, facecolor=SURFACE)
     plt.close(fig)
 
 
@@ -403,16 +364,16 @@ def fig10(groups, out, rows):
         ("sharpen", lambda r: (pi_type(r) == 0).astype(float)),
         ("defer", lambda r: (pi_type(r) == 1).astype(float)),
         ("redirect", lambda r: (pi_type(r) == 2).astype(float)),
-    ], rows, "fig10", "fraction of tokens")
+    ], rows, "pi_effect_types", "fraction of tokens")
     axes[0].set_title("What PI does to each revealed token", color=INK, fontsize=10, loc="left")
     multi = lambda r: r["n_parallel"] > 1
     bar_groups(axes[1], groups, [
         ("defer|redirect\nD_S<0 (conflict)", lambda r: (pi_type(r) > 0)[multi(r) & (r["D_S"] < 0)].astype(float)),
         ("defer|redirect\nD_S>=0", lambda r: (pi_type(r) > 0)[multi(r) & (r["D_S"] >= 0)].astype(float)),
-    ], rows, "fig10", "fraction of tokens")
+    ], rows, "pi_effect_types", "fraction of tokens")
     axes[1].set_title("Does PI hold back tokens whose siblings conflict?", color=INK, fontsize=10, loc="left")
     fig.tight_layout()
-    fig.savefig(os.path.join(out, "fig10_pi_effect_types.png"), dpi=160, facecolor=SURFACE)
+    fig.savefig(os.path.join(out, "pi_effect_types.png"), dpi=160, facecolor=SURFACE)
     plt.close(fig)
 
 
@@ -425,20 +386,20 @@ def step_level(r, key):
 
 def fig11(groups, out, rows):
     fig, axes = plt.subplots(1, 3, figsize=(13, 4.2))
-    bar_groups(axes[0], groups, [("overlap", lambda r: step_level(r, "order_overlap"))], rows, "fig11",
+    bar_groups(axes[0], groups, [("overlap", lambda r: step_level(r, "order_overlap"))], rows, "decoding_order",
                "|C_t & teacher top-|C_t|| / |C_t|")
     axes[0].set_title("Would the teacher reveal the same slots?", color=INK, fontsize=10, loc="left")
     bar_groups(axes[1], groups, [
         ("all", lambda r: (r["rank_T_norm"] > 0.5).astype(float)),
         ("D_S<0", lambda r: (r["rank_T_norm"] > 0.5)[(r["n_parallel"] > 1) & (r["D_S"] < 0)].astype(float)),
         ("D_S>=0", lambda r: (r["rank_T_norm"] > 0.5)[(r["n_parallel"] > 1) & (r["D_S"] >= 0)].astype(float)),
-    ], rows, "fig11", "premature commits (teacher rank in lower half)")
+    ], rows, "decoding_order", "premature commits (teacher rank in lower half)")
     axes[1].set_title("Premature commits", color=INK, fontsize=10, loc="left")
-    bar_groups(axes[2], groups, [("spearman", lambda r: step_level(r, "order_spearman"))], rows, "fig11",
+    bar_groups(axes[2], groups, [("spearman", lambda r: step_level(r, "order_spearman"))], rows, "decoding_order",
                "Spearman(conf_S, conf_T) over block")
     axes[2].set_title("Order agreement", color=INK, fontsize=10, loc="left")
     fig.tight_layout()
-    fig.savefig(os.path.join(out, "fig11_decoding_order.png"), dpi=160, facecolor=SURFACE)
+    fig.savefig(os.path.join(out, "decoding_order.png"), dpi=160, facecolor=SURFACE)
     plt.close(fig)
 
 
@@ -457,7 +418,7 @@ def fig9(tag, groups, out, rows):
                     continue
                 m, lo, hi = cluster_boot(sub, np.mean)
                 xs.append(b), ms.append(m), err.append((m - lo, hi - m))
-                rows.append(["fig9", f"{key} | |C_t| in {lab}", name, len(sub), tag, "mean", m, lo, hi])
+                rows.append(["threshold_sibling_vs_parallel", f"{key} | |C_t| in {lab}", name, len(sub), tag, "mean", m, lo, hi])
             if xs:
                 ax.errorbar(np.array(xs) + (k - 0.5) * 0.08, ms, yerr=np.array(err).T, color=COLORS[name],
                             linewidth=2, marker="o", markersize=6, capsize=3, label=name)
@@ -467,7 +428,7 @@ def fig9(tag, groups, out, rows):
     axes[0].set_title(f"Threshold decoding ({tag}): sibling gap vs natural |C_t| (95% CI)", color=INK,
                       fontsize=11, loc="left")
     fig.tight_layout()
-    fig.savefig(os.path.join(out, "fig9_threshold_parallel.png"), dpi=160, facecolor=SURFACE)
+    fig.savefig(os.path.join(out, "threshold_sibling_vs_parallel.png"), dpi=160, facecolor=SURFACE)
     plt.close(fig)
 
 
@@ -477,14 +438,12 @@ def main():
     ap.add_argument("--thr_records", default="", help="name=records_dir of a threshold-decoded run (fig9)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--include_special", action="store_true")
-    ap.add_argument("--note", default="", help="One-line context written at the top of report.md.")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
-    sets, dirs = {}, {}
+    sets = {}
     for spec in args.records:
         name, d = spec.split("=", 1)
-        dirs[name] = d
         sets[name] = load(d, args.include_special)
         print(f"[plot] {name}: {len(sets[name])} rollouts from {d}")
     primary = split(next(iter(sets.values())))
@@ -492,7 +451,6 @@ def main():
     fig1(primary, args.out, rows)
     fig2(primary, args.out, rows)
     fig3(primary, args.out, rows)
-    fig4(sets, args.out, rows)
     fig5(primary, args.out, rows)
     fig6(primary, args.out, rows)
     fig7(primary, args.out, rows)
@@ -506,15 +464,8 @@ def main():
         w = csv.writer(f)
         w.writerow(["figure", "quantity", "group", "n_rollouts", "n_tokens/note", "stat", "value", "ci_lo", "ci_hi"])
         w.writerows([[str(c).replace("\n", " ") if isinstance(c, str) else c for c in r] for r in rows])
-    from report_pi_sibling import export_tables, write_report
-
-    if args.thr_records:
-        tname, td = args.thr_records.split("=", 1)
-        dirs[tname] = td
-    runs = export_tables(dirs, args.out)
-    write_report(args.out, runs, rows, next(iter(dirs)), note=args.note)
-    n_fig = len(glob.glob(os.path.join(args.out, "fig*.png")))
-    print(f"[plot] wrote {n_fig} figures, summary.csv, report.md, tokens/steps/rollouts tables to {args.out}")
+    n_fig = len(glob.glob(os.path.join(args.out, "*.png")))
+    print(f"[plot] wrote {n_fig} figures + summary.csv to {args.out}  (reports/tables: analysis/make_summary.py)")
 
 
 if __name__ == "__main__":

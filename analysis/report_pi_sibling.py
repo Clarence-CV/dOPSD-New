@@ -1,18 +1,14 @@
-"""Machine-readable results for pi_sibling_analysis runs (for humans and for AI-assisted analysis).
+"""Raw-table export for pi_sibling_analysis runs (used by make_summary.py).
 
-Called by plot_pi_sibling.py; writes into the figure directory:
-  report.md        run metadata, metric definitions, every summary number as markdown tables
   tokens.csv.gz    one row per revealed token (all scalar per-token fields, incl. excluded ones)
   steps.csv.gz     one row per (run, rollout, step)
   rollouts.csv     one row per rollout: correctness, question, gold, prediction, completion, means
 """
 
 import csv
-import datetime
 import glob
 import gzip
 import os
-import subprocess
 
 import numpy as np
 import torch
@@ -21,38 +17,6 @@ SKIP = ("topk_S_ids", "topk_S_p", "topk_T_ids", "topk_T_p", "topk_sib_ids", "top
 STEP_KEYS = ("block", "step_in_block", "n_parallel", "n_block_masked", "order_overlap", "order_spearman")
 MEAN_KEYS = ("g", "D_S", "D_T", "coord", "D_S_ctrl", "D_T_ctrl", "coord_ctrl", "js_sib", "js_pi",
              "cos_pi_sib", "rank_T_norm", "logp_S")
-
-DEFINITIONS = """\
-All quantities are computed per revealed token i at the step t where it was committed (C_t = tokens
-revealed at step t, y_i = its value in the final rollout). Tokens of the last block (no future, so no
-PI) are not analysed. Unless stated otherwise, summaries exclude special tokens (EOS/EOT) and tokens
-after the answer end. CIs are 95% cluster bootstrap over rollouts.
-
-| name | definition | reading |
-|---|---|---|
-| g | log p_T(y_i \\| S_t, PI) - log p_S(y_i \\| S_t) | PI alignment with the rollout's own token; a gain only on correct rollouts |
-| D_S | log p_S(y_i \\| S_t, y[C_t\\\\i]) - log p_S(y_i \\| S_t) | what the co-decoded siblings add for the student |
-| D_T | log p_T(y_i \\| S_t, PI, y[C_t\\\\i]) - log p_T(y_i \\| S_t, PI) | what siblings still add once PI is known |
-| coord | D_S - D_T | part of the sibling information PI already provides (hypothesis: > 0 on correct rollouts) |
-| *_ctrl | same with a matched non-sibling control (same block, revealed later, matched on distance, student confidence and reveal delay) | sibling - control > 0 means same-step siblings are special |
-| js_sib / js_pi | JS(p_S, p_sib) / JS(p_S, p_T), full vocabulary, nats | size of the distribution shift |
-| cos_pi_sib | cos(p_T - p_S, p_sib - p_S) over the vocabulary | do the PI shift and the sibling shift agree |
-| pair co-gain | P(g_i > 0 and g_j > 0) for co-decoded pairs vs distance-matched pairs revealed at different steps | PI lifts co-decoded tokens together beyond position effects |
-| sharpen / defer / redirect | teacher top-1 = y_i and g > 0 / teacher top-1 = y_i and g <= 0 / teacher top-1 != y_i | what PI does to the token; defer can be useful (hold the slot back) |
-| rank_S / rank_T | rank of i among all masked slots of the block by top-1 prob (1 = most confident) | decoding-order preference |
-| rank_T_norm | (rank_T - 1) / (#masked in block - 1) | > 0.5: teacher would commit it late (premature commit) |
-| order_overlap | \\|C_t & teacher's top-\\|C_t\\|\\| / \\|C_t\\| | would the teacher reveal the same slots now |
-| order_spearman | Spearman(conf_S, conf_T) over the block's masked slots | overall order agreement |
-"""
-
-
-def _git_rev():
-    try:
-        return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True,
-                                       cwd=os.path.dirname(os.path.abspath(__file__))).strip()
-    except Exception:
-        return "unknown"
-
 
 def _num(v):
     if isinstance(v, (float, np.floating)):
@@ -128,35 +92,3 @@ def export_tables(sets, out):
         })
     tok_f.close(), step_f.close(), roll_f.close()
     return runs
-
-
-def write_report(out, runs, rows, primary, note=""):
-    L = [f"# PI / intra-step coordination analysis report", "",
-         f"generated {datetime.datetime.now().isoformat(timespec='seconds')}, code {_git_rev()}", ""]
-    if note:
-        L += [note, ""]
-    L += ["## Runs", "", "| " + " | ".join(runs[0].keys()) + " |", "|" + "---|" * len(runs[0])]
-    L += ["| " + " | ".join(str(v) for v in r.values()) + " |" for r in runs]
-    L += ["", f"Figures 1-3 and 5-8, 10, 11 use the primary run `{primary}`; figure 4 uses every fixed-budget run; "
-          "figure 9 uses the threshold run.", "", "## Definitions", "", DEFINITIONS, "## Results", ""]
-    titles = {"fig1": "PI gain", "fig2": "Sibling gap", "fig3": "Sibling gap vs step", "fig4": "Sibling gap vs |C_t| (fixed budgets)",
-              "fig5": "PI shift vs sibling shift", "fig6": "B. Coordination gap", "fig7": "C. Sibling vs matched control (paired)",
-              "fig8": "A. Pairwise co-gain (distance-matched)", "fig9": "Sibling gap vs natural |C_t| (threshold)",
-              "fig10": "PI effect types", "fig11": "Decoding order"}
-    for fig in titles:
-        sub = [r for r in rows if r[0] == fig]
-        if not sub:
-            continue
-        L += [f"### {titles[fig]} ({fig})", "", "| quantity | group | n_rollouts | note | stat | value | 95% CI |",
-              "|---|---|---|---|---|---|---|"]
-        for _, q, g, n, note_, stat, v, lo, hi in sub:
-            # one table row per entry: no newlines, and escape "|" (a markdown column separator)
-            q, note_ = (str(x).replace("\n", " ").replace("|", "\\|") for x in (q, note_))
-            ci = f"[{_num(lo)}, {_num(hi)}]" if _num(lo) != "" else ""
-            L.append(f"| {q} | {g} | {n} | {note_} | {stat} | {_num(v)} | {ci} |")
-        L.append("")
-    L += ["## Files", "", "- `summary.csv`: every number above", "- `tokens.csv.gz`: one row per revealed token (all runs)",
-          "- `steps.csv.gz`: one row per decoding step", "- `rollouts.csv`: one row per rollout with question/gold/prediction/completion",
-          "- `fig*.png`: figures", ""]
-    with open(os.path.join(out, "report.md"), "w") as f:
-        f.write("\n".join(L))
