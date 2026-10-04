@@ -41,6 +41,45 @@ checkpoint 扫描（greedy，固定预算 128 步，300 题）：
 - greedy 扫描：step-448 最好（+4.4 pt），与论文“第 425 次更新最佳”一致；超过约 600 步后准确率崩溃（step-1344 只剩 18%），很可能是论文只评到第 500 步的原因。
 - T=0.9：固定预算下训练提升 +7.0 pt（75.0 → 82.0）；阈值 0.9 下几乎无提升（79.3 → 79.7），且阈值解码本身就让 base 从 75.0 升到 79.3。
 
+## T. THU 训练 GSM8K 时到底用了哪些题
+
+**结论**：如果 THU 论文实验用的是公开代码的默认设置（种子 42、4 卡、中途没有续训），那么到 GSM8K 最好的 checkpoint（第 425 步）为止，模型只见过训练集里按固定顺序排好的**前 216 道题（BATCH_DIVIDE=8）或前 428 道题（BATCH_DIVIDE=4）**，而不是全部 7473 道。具体是哪些题见 `results/gsm8k_train_order.csv`。
+
+**训练设置**
+
+| 项目 | 值 | 出处 |
+|---|---|---|
+| GPU | 4 张 | 论文 D.1；`accelerate.yaml` 中 `num_processes: 4` |
+| 每卡每步 | 1 道题、1 条 rollout（答错就重新采样，最多 8 次） | `opsd.yaml`：`per_device_train_batch_size: 1`、`num_generations: 1`；脚本 `PASSK=8` |
+| 梯度累积 | 1 | 论文 D.1；`opsd.yaml` |
+| 种子 | 42 | `opsd.yaml` 中 `seed: 42`（论文没写） |
+| BATCH_DIVIDE | 4（脚本默认，README 说适用于 B200）或 8（README 建议 A100/H100） | `run/gsm/opsd.sh` 用它同时设置 `--num_iterations` 和 `--batch_divide`；论文没写 |
+| 最佳步数 | 425（每 25 步评测一次） | 论文 Table 2 |
+| 库版本 | trl@0f88c17、transformers 4.49.0、accelerate 1.4.0、datasets 3.3.2、torch 2.9.0 | `env.yml`、`used-env.txt` |
+
+**发题过程**（每一步都是确定的）
+
+1. **打乱**：按固定顺序加载 `openai/gsm8k` 的 train（7473 道），再执行 `dataset.shuffle(seed=42)`（`d_opsd_train.py`；datasets 内部用的是 `np.random.default_rng(42).permutation`）。
+2. **排队**：trl 的 `RepeatRandomSampler` 用自己的随机数发生器（种子 42）对 7473 道题做一次 `torch.randperm`，每 4 道切成一组（4 卡 × 每卡 1 道），**每组连续发 BATCH_DIVIDE 次**（trl `grpo_trainer.py` 中的 `RepeatRandomSampler`、`_get_train_sampler`）。
+3. **分卡与训练**：accelerate 把发出来的题按顺序轮流分给 4 张卡，第 t 步第 k 张卡拿到顺序中的第 4·⌊t/BD⌋ + k 道。d-OPSD 的 trainer 只在每组的第一步生成 rollout，之后连续 BD 步，每步训练这条去噪轨迹的 1/BD（`d_opsd_trainer.py` 中的 `_prepare_inputs`、`compute_loss`）。
+
+因此，**每 BD 步换一组 4 道新题，训练到第 S 步一共见过 4 × ⌈S/BD⌉ 道题**。第 425 步时，BD=4 是 428 道，BD=8 是 216 道。两种情况下最后一组都只训了第一段。
+
+**为什么可信**
+
+- **源码核对**：上述版本的三个库逐行核对过，行为和上面描述的一致。accelerate 不会替换这个采样器，也不会重设它的种子；4 卡时 7473 不能被 4 整除，最后 1 道题会被丢掉，不影响前面的顺序。
+- **实测验证**：我们用同一套代码和相同的库版本训练（3 卡），训练日志里记录的 21 条 trace 和 102 道题，全部按"第 r 轮第 k 张卡 = 顺序中的第 3r + k 道"精确对上。
+- **独立重算**：在另一个干净环境里从零重新计算，和表格的 600 行完全一致。
+
+**不能确定的**
+
+- 论文没写种子、GPU 型号和 BATCH_DIVIDE，所以只能给出 216 和 428 两种可能。如果他们当时改过种子或卡数，顺序就会不同。
+- 如果训练中途从 checkpoint 续训过，trainer 内部的计数器不会被保存，生成和发题会错开一步，上面的对应关系就不再精确。
+- "见过"不等于"产生了梯度"：8 次都答错的题，loss 会乘 0。THU 每道题当时答没答对，我们无从得知。表中 `train_*` 三列只是**我们自己**训练时记录的 102 道题。
+- `openai/gsm8k` 没有固定版本号，如果 HF 上的数据被改动过，结果可能不同。
+
+**表格怎么看**：`gsm8k_train_order.csv` 列出了按顺序的前 600 道题，第 2 行是每一列的说明。`thu_bd8_step425` 或 `thu_bd4_step425` 等于 1 的行，就是 THU 到第 425 步用过的题；`thu_steps_if_bd4/bd8` 是每道题对应的训练步范围。`ours_*` 和 `train_*` 两组列是我们自己的复现，可以不看。
+
 ## 1. PI 如何改变 student 的分布（讨论文档 13.2、§8）
 
 | 指标 | 定义 / 读法 |

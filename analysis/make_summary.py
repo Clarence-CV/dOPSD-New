@@ -16,8 +16,8 @@ Writes
 Statistics: special tokens and tokens after the answer end are excluded. Sibling, control and
 coordination metrics use only tokens whose step revealed >= 2 tokens (|C_t| = 1 has no sibling and
 would contribute exact zeros). CIs: 95% cluster bootstrap over rollouts.
---notes: a markdown file with "@@ <section_id>" blocks (overview, accuracy, one per section id, cogain,
-threshold, discussion, caveats, files); each block is inserted at that place.
+--notes: a markdown file with "@@ <section_id>" blocks (overview, accuracy, thu_train_data, one per
+section id, cogain, threshold, discussion, caveats, files); each block is inserted at that place.
 """
 
 import argparse
@@ -206,6 +206,8 @@ def main():
     L.append("")
     if "accuracy" in notes:
         L += [notes["accuracy"], ""]
+    if "thu_train_data" in notes:  # standalone chapter, placed before the per-question sections
+        L += [notes["thu_train_data"], ""]
 
     fig_links = {"pi_effect": ["pi_gain", "pi_effect_types"], "sibling_gap": ["sibling_gap", "sibling_vs_step"],
                  "teacher_gap": ["B_coordination_gap"], "control": ["C_sibling_vs_control"],
