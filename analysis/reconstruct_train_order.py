@@ -1,5 +1,7 @@
 """Reconstruct which GSM8K training problems d-OPSD consumed, in order.
 
+Output CSV: row 1 = header, row 2 = a description of every column (not data; skip it when parsing).
+
 The order is deterministic given the released code:
   d_opsd_train.py   dataset = get_gsm8k_questions("train").shuffle(seed=42)   (HF datasets, np PCG64)
   trl GRPOTrainer   RepeatRandomSampler(seed=42): torch.randperm(N, generator seeded 42), cut into
@@ -23,6 +25,24 @@ import os
 
 import torch
 from datasets import load_dataset
+
+
+# Row 2 of the CSV: what each column means (row 1 is the machine-readable header).
+DESC = [
+    "【说明行，不是数据】取题顺序：第几道被用到的训练题（0 起）。THU 和我们按同一顺序取题",
+    "THU 设定（4 卡）下属于第几批；每批 4 道题，每张卡各 1 道",
+    "THU 若 BATCH_DIVIDE=4：这批题占用的优化步范围（含两端），如 0-3 表示第 0 到 3 步",
+    "THU 若 BATCH_DIVIDE=8：这批题占用的优化步范围（含两端）",
+    "我们的设定（3 卡）下属于第几批；每批 3 道题",
+    "我们（BATCH_DIVIDE=8）这批题占用的优化步范围（含两端）",
+    "1 = THU 若 BATCH_DIVIDE=4，训练到论文最佳的第 425 步时已用过这道题；0 = 尚未用到（共 428 个 1）",
+    "1 = THU 若 BATCH_DIVIDE=8，训练到第 425 步时已用过；0 = 尚未用到（共 216 个 1）",
+    "1 = 我们选出的最佳 checkpoint step-448 已用过这道题；0 = 尚未用到（共 168 个 1）",
+    "1 = 我们训练到最后（step-1344）已用过；0 = 尚未用到（共 504 个 1）",
+    "这道题在 HuggingFace openai/gsm8k（main）train 原始数据中的行号（0 起）",
+    "题目原文",
+    "标准答案（取自 #### 之后）",
+]
 
 
 def order(seed=42):
@@ -53,10 +73,11 @@ def main():
         "ours_step448": 3 * math.ceil(448 / 8),
         "ours_step1344": 3 * math.ceil(1344 / 8),
     }
-    with open(args.out, "w", newline="") as f:
+    with open(args.out, "w", newline="", encoding="utf-8-sig") as f:  # BOM: Excel shows Chinese correctly
         w = csv.writer(f)
         w.writerow(["order", "thu_chunk(4 prompts)", "thu_steps_if_bd4", "thu_steps_if_bd8", "ours_chunk(3 prompts)",
                     "ours_steps_bd8", *cutoffs, "gsm8k_train_idx", "question", "answer"])
+        w.writerow(DESC)  # skip this row when parsing, e.g. pandas.read_csv(..., skiprows=[1])
         for k in range(min(args.n, len(perm))):
             ex = data[perm[k]]
             c4, c3 = k // 4, k // 3
