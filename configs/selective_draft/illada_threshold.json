@@ -1,0 +1,12 @@
+{
+  "_comment": "iLLaDA recipe placeholder: module paths statically checked only (plan P6). mask id 5 per official usage; verify the chat template / stop tokens before any run.",
+  "model": {"path": "GSAI-ML/iLLaDA-8B-Instruct", "backend": "illada",
+            "revision": "5769f049224b2cff61106ebce0429ede5deeb434", "dtype": "bfloat16", "mask_token_id": 5},
+  "data": {"dataset_id": "openai/gsm8k", "dataset_config": "main", "split_manifest": null,
+           "split": "analysis", "prompt_recipe": "legacy_boxed_reasoning"},
+  "guidance": {"early_layer": 28, "readout_rank": 64, "injector_rank": 64, "message_threshold": 0.8, "mode": "off"},
+  "generation": {"mode": "threshold", "commit_threshold": 0.9, "max_new_tokens": 256, "block_length": 32,
+                 "temperature": 0.0, "window_mode": "growing", "stop_mode": "block_end"},
+  "teacher": {"mode": "realized"},
+  "evaluation": {"batch_size": 1, "commit_thresholds": [0.7, 0.8, 0.9, 0.95]}
+}

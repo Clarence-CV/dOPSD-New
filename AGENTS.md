@@ -33,6 +33,7 @@
 
 ## 当前代码与资料入口
 
+- `selective_draft/`（分支 `selective-draft`）：Selective Draft OPSD 的独立流水线（readout adapter → shared head → 单源 soft message → 阈值/固定预算解码 → 两阶段训练 → 评测/诊断），CPU 测试在 `tests/test_selective_draft_*.py`，用法见 `selective_draft/README.md`；`doc/Selective_Draft_OPSD_Review.md` 是训练数学审阅，解释为什么默认 teacher 目标改成 `realized` 而不是方案原文的 mixture。真实模型尚未跑过。
 - `GPTRecord.md`：2026-10-11 v3，最新研究判断、证据限定和下一步；优先于旧讨论稿。
 - `d-OPSD.md`：2026-10-03 的现象分析背景。
 - `results/pipeline_gsm_20261002/SUMMARY.md`、`metrics.csv`、`sweep.csv`：历史复现结果与指标；`results/EXPERIMENTS.md`：TACC 作业、实际耗时与 SU 账本。
