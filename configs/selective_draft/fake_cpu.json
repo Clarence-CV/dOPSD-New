@@ -2,7 +2,7 @@
   "_comment": "CPU dry run of the whole pipeline with the tiny fake LLaDA-shaped model (no pretrained weights).",
   "model": {"path": "fake", "backend": "fake_llada", "dtype": "float32",
             "fake_kwargs": {"n_layers": 4, "d_model": 32, "vocab_size": 64, "logit_scale": 6.0}},
-  "data": {"dataset_id": "fake", "split": "train", "prompt_recipe": "fake"},
+  "data": {"task": "fake", "dataset_id": "fake", "split": "train", "prompt_recipe": "fake"},
   "guidance": {"early_layer": 3, "readout_rank": 8, "injector_rank": 8, "message_threshold": 0.8, "mode": "off",
                "readout_position_chunk": 3},
   "generation": {"mode": "threshold", "commit_threshold": 0.9, "steps": 8, "max_new_tokens": 16, "block_length": 8,

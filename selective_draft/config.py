@@ -24,8 +24,9 @@ class ModelConfig:
 
 @dataclass
 class DataConfig:
-    dataset_id: str = "openai/gsm8k"  # "fake" -> built-in toy problems (CPU tests)
-    dataset_config: str = "main"
+    task: str = "gsm8k"  # gsm8k | math | fake  (answer extraction + equivalence)
+    dataset_id: str = "openai/gsm8k"  # "fake" -> built-in toy problems (CPU tests); math: "ankner/math-500"
+    dataset_config: Optional[str] = "main"  # null for ankner/math-500
     dataset_revision: Optional[str] = None
     split_manifest: Optional[str] = None  # JSON written by `prepare-data`
     split: str = "dev"  # train | dev | analysis | test
@@ -63,7 +64,7 @@ class GenerationConfig:
     remasking: str = "low_confidence"
     autocast: str = "none"  # none | bfloat16 | float16
     skip_empty_budget_steps: bool = True
-    forbid_mask_candidate: bool = True  # drop the MASK id from the candidate softmax (base and guided alike)
+    forbid_mask_candidate: bool = True  # forbid selecting MASK; confidence uses the original softmax
 
 
 @dataclass
@@ -184,7 +185,10 @@ class Config:
         _choice("model.dtype", m.dtype, {"bfloat16", "float16", "float32"})
         _choice("model.quantization", m.quantization, {"none"})
         _choice("data.split", d.split, {"train", "dev", "analysis", "test"})
-        _choice("data.prompt_recipe", d.prompt_recipe, {"legacy_boxed_reasoning", "fake"})
+        _choice("data.task", d.task, {"gsm8k", "math", "fake"})
+        _choice("data.prompt_recipe", d.prompt_recipe, {"legacy_boxed_reasoning", "legacy_math_boxed_reasoning", "fake"})
+        if (d.dataset_id == "fake") != (d.task == "fake"):
+            raise ValueError("data.task=fake goes with data.dataset_id=fake and vice versa")
         _choice("guidance.mode", g.mode, {"off", "readout_only", "single_soft"})
         if g.early_layer < 1:
             raise ValueError("guidance.early_layer must be >= 1 (1-based count of completed blocks)")

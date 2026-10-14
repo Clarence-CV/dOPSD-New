@@ -32,7 +32,7 @@ class StateRecorder:
                 "block_end": int(block_end),
                 "state": x[b, self.P:].to(torch.int32).cpu(),
                 "eligible_positions": el.to(torch.int16).cpu(),
-                "eligible_confidences": conf[b, el].to(torch.float16).cpu(),
+                "eligible_confidences": conf[b, el].float().cpu(),  # preserve threshold comparisons
                 "eligible_candidates": cand[b, el].to(torch.int32).cpu(),
                 "committed_positions": cm.to(torch.int16).cpu(),
                 "committed_tokens": cand[b, cm].to(torch.int32).cpu(),

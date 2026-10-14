@@ -36,9 +36,16 @@ def _cfg(args) -> Config:
 
 
 def _device(args) -> torch.device:
-    if args.device != "auto":
-        return torch.device(args.device)
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(args.device if args.device != "auto" else
+                          ("cuda" if torch.cuda.is_available() else "cpu"))
+    if device.type == "cuda":
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        if device.index is None:
+            device = torch.device("cuda", local_rank)
+        elif int(os.environ.get("WORLD_SIZE", "1")) > 1 and device.index != local_rank:
+            raise ValueError("distributed CUDA runs must use their LOCAL_RANK device")
+        torch.cuda.set_device(device)  # before loading weights or creating NCCL collectives
+    return device
 
 
 def _rollout_paths(items: List[str]) -> List[str]:
@@ -63,6 +70,8 @@ def _build(cfg, args, snapshot: Optional[str] = None):
 
 
 def _dump_resolved(cfg: Config, out_dir: str, extra: dict) -> None:
+    if int(os.environ.get("RANK", "0")) != 0:
+        return
     os.makedirs(out_dir, exist_ok=True)
     cfg.dump(os.path.join(out_dir, "resolved_config.json"))
     with open(os.path.join(out_dir, "run_manifest.json"), "w") as f:
@@ -112,14 +121,15 @@ def cmd_collect(args):
         ids, mask = tokenize_prompts(tok, [e.prompt_text for e in batch], device)
         metas = [{"example_id": e.example_id, "prompt_ids": ids[i].tolist(), "prompt_attention_mask": mask[i].tolist(),
                   "gold": e.answer_value, "guidance_mode": cfg.guidance.mode, "snapshot_id": snap_id,
-                  "generation": cfg.generation.__dict__, "split": cfg.data.split} for i, e in enumerate(batch)]
+                  "generation": cfg.generation.__dict__, "split": cfg.data.split,
+                  "confidence_policy": "raw_model_probability"} for i, e in enumerate(batch)]
         rec = StateRecorder(level, gm.backend.mask_token_id, gm.backend.eos_token_id, ids.shape[1], metas, topk=cfg.trace.topk)
         res = generate(gm, ids, mask, cfg.generation, guidance_mode=cfg.guidance.mode, recorder=rec, sample_rng=rng)
         extras = []
         for i, e in enumerate(batch):
             text = tok.decode(res.completion_ids(i), skip_special_tokens=True)
-            pred = parse_prediction(text)
-            extras.append({"generation": text, "parsed_answer": pred, "is_correct": is_correct(pred, e.answer_value),
+            pred = parse_prediction(text, e.task)
+            extras.append({"generation": text, "parsed_answer": pred, "is_correct": is_correct(pred, e.answer_value, e.task),
                            "stats": res.stats})
         rolls = rec.finalize(res, extras)
         for r in rolls:
@@ -227,7 +237,25 @@ def main(argv=None):
     _common(p); p.add_argument("--snapshot"); p.add_argument("--limit", type=int); p.set_defaults(fn=cmd_evaluate)
 
     args = ap.parse_args(argv)
-    args.fn(args)
+    import time as _time
+    t0 = _time.time()
+    status = "ok"
+    try:
+        args.fn(args)
+    except BaseException as exc:
+        status = f"{type(exc).__name__}: {exc}"[:500]
+        raise
+    finally:
+        out_dir = getattr(args, "output_dir", None)
+        if out_dir and int(os.environ.get("RANK", "0")) == 0:
+            os.makedirs(out_dir, exist_ok=True)
+            stats = {"command": args.cmd, "status": status, "wall_s": round(_time.time() - t0, 2),
+                     "argv": sys.argv, "code_revision": code_revision(), "host": os.uname().nodename}
+            if torch.cuda.is_available():
+                stats["peak_gpu_mem_gb"] = round(torch.cuda.max_memory_allocated() / 2 ** 30, 3)
+                stats["gpu"] = torch.cuda.get_device_name()
+            with open(os.path.join(out_dir, "run_stats.jsonl"), "a") as f:
+                f.write(json.dumps(stats) + "\n")
 
 
 if __name__ == "__main__":

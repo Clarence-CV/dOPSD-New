@@ -7,6 +7,7 @@ Single process by default; with WORLD_SIZE > 1 the loop uses manual gradient all
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import time
 from dataclasses import dataclass
@@ -28,14 +29,24 @@ from .trace import StateRecorder, load_rollouts, save_rollouts
 
 # ----------------------------------------------------------------------------- distributed
 class DistCtx:
-    def __init__(self):
+    def __init__(self, device=None):
         self.world_size = int(os.environ.get("WORLD_SIZE", "1"))
         self.rank = int(os.environ.get("RANK", "0"))
         self.local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         self.enabled = self.world_size > 1
+        if device is not None and device.type == "cuda":
+            torch.cuda.set_device(device)
         if self.enabled and not dist.is_initialized():
-            backend = "nccl" if torch.cuda.is_available() else "gloo"
+            backend = "nccl" if device is not None and device.type == "cuda" else "gloo"
             dist.init_process_group(backend)
+        if dist.is_initialized():
+            self.world_size, self.rank = dist.get_world_size(), dist.get_rank()
+            self.enabled = self.world_size > 1
+
+    def sync_modules(self, gm):
+        if self.enabled:
+            for value in gm.module_state_dict().values():
+                dist.broadcast(value, src=0)
 
     def sum_scalar(self, value: float, device) -> float:
         if not self.enabled:
@@ -103,8 +114,9 @@ class BaseTrainer:
 
     def __init__(self, gm: GuidedModel, cfg: Config, out_dir: str, dist_ctx: Optional[DistCtx] = None):
         self.gm, self.cfg, self.out_dir = gm, cfg, out_dir
-        self.dist = dist_ctx or DistCtx()
         self.device = gm.device
+        self.dist = dist_ctx or DistCtx(self.device)
+        self.dist.sync_modules(gm)  # manual all-reduce also needs identical initial parameters
         self.params = gm.set_stage(self.stage)
         gm.assert_base_frozen()
         if not self.params:
@@ -141,7 +153,8 @@ class BaseTrainer:
         path = os.path.join(self.out_dir, name)
         self.dist.barrier()
         save_checkpoint(path, self.gm, self.cfg, self.stage, self.optimizer, dict(self.state),
-                        self.generators, rank=self.dist.rank, metrics=metrics)
+                        self.generators, rank=self.dist.rank, metrics=metrics,
+                        sampler_state={"order": list(self.order), "data_signature": self.data_signature})
         if self.dist.rank == 0:
             save_snapshot(os.path.join(self.out_dir, "snapshot"), self.gm, self.cfg, self.stage, metrics)
         self.dist.barrier()
@@ -151,6 +164,15 @@ class BaseTrainer:
         st = load_checkpoint(path, self.gm, self.cfg, self.optimizer, self.generators, rank=self.dist.rank)
         if st.get("stage") != self.stage:
             raise ValueError(f"checkpoint stage {st.get('stage')} != {self.stage}")
+        sampler = st.pop("_sampler_state")
+        if not sampler or sampler.get("data_signature") != self.data_signature:
+            raise ValueError("checkpoint sampler dataset does not match the current rank's data")
+        order = sampler["order"]
+        if sorted(order) != list(range(len(self.order))):
+            raise ValueError("invalid checkpoint sampler permutation")
+        if not 0 <= int(st["data_cursor"]) <= len(order):
+            raise ValueError("invalid checkpoint data cursor")
+        self.order = list(order)
         self.state.update(st)
         self.params = self.gm.set_stage(self.stage)
 
@@ -193,11 +215,19 @@ class ReadoutTrainer(BaseTrainer):
             raise RuntimeError("no training states (check filter_correct_only and the rollout files)")
         # each rank takes an interleaved slice so ranks see disjoint states
         self.refs = self.refs[self.dist.rank::self.dist.world_size]
+        signature = hashlib.sha256()
+        for ref in self.refs:
+            signature.update(json.dumps(ref.roll["meta"]["prompt_ids"]).encode())
+            signature.update(ref.step["state"].numpy().tobytes())
+            signature.update(ref.step["eligible_positions"].numpy().tobytes())
+        self.data_signature = signature.hexdigest()
         self.order = torch.randperm(len(self.refs), generator=self.gen_data).tolist()
         if self.dist.rank == 0:
             print(f"[readout] {len(rollouts)} rollouts -> {len(self.refs)} states on rank 0")
 
     def _next_refs(self, n: int) -> List[StateRef]:
+        if not self.refs:
+            return []  # another rank can still contribute to the global update
         out = []
         for _ in range(n):
             c = int(self.state["data_cursor"])
@@ -245,7 +275,7 @@ class ReadoutTrainer(BaseTrainer):
             for k, v in st.items():
                 agg[k] = agg.get(k, 0.0) + v / len(refs)
         rec = self._apply_update(local_sum, len(refs), global_n)
-        rec.update({"loss": local_sum / len(refs), **agg})
+        rec.update({"loss": local_sum / max(1, len(refs)), **agg})
         self.log(rec)
         return rec
 
@@ -257,8 +287,10 @@ class GuidanceTrainer(BaseTrainer):
     def __init__(self, gm, cfg, out_dir, examples: List[Example], tokenizer, dist_ctx=None):
         super().__init__(gm, cfg, out_dir, dist_ctx)
         self.examples = examples[self.dist.rank::self.dist.world_size]
-        if not self.examples:
-            raise RuntimeError("no examples on this rank")
+        if self.dist.sum_scalar(len(self.examples), self.device) == 0:
+            raise RuntimeError("no training examples on any rank")
+        self.data_signature = hashlib.sha256(json.dumps(
+            [(e.example_id, e.prompt_text, e.answer_value) for e in self.examples]).encode()).hexdigest()
         self.tokenizer = tokenizer
         self.order = torch.randperm(len(self.examples), generator=self.gen_data).tolist()
         self.buffer: List[StateRef] = []
@@ -278,20 +310,21 @@ class GuidanceTrainer(BaseTrainer):
         ids, mask = tokenize_prompts(self.tokenizer, [ex.prompt_text], self.device)
         meta = {"example_id": ex.example_id, "prompt_ids": ids[0].tolist(), "prompt_attention_mask": mask[0].tolist(),
                 "policy_version": int(self.state["optimizer_step"]), "guidance_mode": "single_soft",
-                "generation": self.cfg.generation.__dict__, "gold": ex.answer_value}
+                "generation": self.cfg.generation.__dict__, "gold": ex.answer_value,
+                "confidence_policy": "raw_model_probability"}
         rec = StateRecorder("state_only", self.gm.backend.mask_token_id, self.gm.backend.eos_token_id, ids.shape[1], [meta])
         res = generate(self.gm, ids, mask, self.cfg.generation, guidance_mode="single_soft", recorder=rec,
                        sample_rng=self.gen_sample)
         text = self.tokenizer.decode(res.completion_ids(0), skip_special_tokens=True)
-        pred = parse_prediction(text)
+        pred = parse_prediction(text, ex.task)
         roll = rec.finalize(res, [{"generation": text, "parsed_answer": pred,
-                                   "is_correct": is_correct(pred, ex.answer_value), "stats": res.stats}])[0]
+                                   "is_correct": is_correct(pred, ex.answer_value, ex.task), "stats": res.stats}])[0]
         return roll
 
     def refresh(self) -> Dict[str, float]:
         self.buffer = []
         rolls, kept = [], 0
-        for _ in range(self.cfg.training.rollouts_per_update):
+        for _ in range(self.cfg.training.rollouts_per_update if self.examples else 0):
             ex = self._next_example()
             chosen = None
             for _attempt in range(self.cfg.training.max_rollout_attempts):
@@ -322,13 +355,29 @@ class GuidanceTrainer(BaseTrainer):
         x, attn, ctx, elig_pos = state_tensors(roll, step, self.device)
         P = roll["meta"]["prompt_len"]
         with torch.no_grad():
-            cap = self.gm(x[None], attn[None], context=ctx, mode="readout_only")
+            cap = self.gm(x[None], attn[None], context=ctx, mode="readout_only", capture_hidden=True)
         gi = cap.guidance
+        cap_hidden_norm = None
         A = int(gi.source_pos[0])
+        self.state["reselect_checked"] = int(self.state.get("reselect_checked", 0)) + 1
         if A != int(step["source_pos"]) or not bool(gi.gate_open[0]):
-            raise RuntimeError(f"source re-selection mismatch: recorded A={step['source_pos']} gate={step['gate_open']}, "
-                               f"now A={A} gate={bool(gi.gate_open[0])} (readout must be frozen and deterministic)")
+            # bf16 kernels can flip a near-tie / a confidence right at the gate between the batched rollout and
+            # this re-forward. Skip such states (never train on a different A than the rollout used), count them,
+            # and stop only if it is frequent, which would mean the readout is not frozen or not deterministic.
+            n_bad = int(self.state.get("reselect_mismatch", 0)) + 1
+            self.state["reselect_mismatch"] = n_bad
+            with open(os.path.join(self.out_dir, f"reselect_mismatch_rank{self.dist.rank}.jsonl"), "a") as f:
+                f.write(json.dumps({"optimizer_step": int(self.state["optimizer_step"]),
+                                    "example_id": roll["meta"].get("example_id"), "step_id": step["step_id"],
+                                    "recorded_A": int(step["source_pos"]), "recorded_conf": step["source_confidence"],
+                                    "now_A": A, "now_conf": float(gi.source_confidence[0]),
+                                    "now_gate": bool(gi.gate_open[0])}) + "\n")
+            checked = int(self.state["reselect_checked"])
+            if checked >= 20 and n_bad / checked > 0.2:
+                raise RuntimeError(f"source re-selection mismatch in {n_bad}/{checked} states")
+            return None, {}
         r_A = gi.source_probs[0]
+        cap_hidden_norm = float(cap.hidden_early[0, A].float().norm())  # scale reference for delta_norm
         receivers = elig_pos[elig_pos != A]
         realized = int(roll["final_state"][A - P])
         tgt = teacher_targets(self.gm, x, attn, A, receivers, r_A, realized, self.cfg.teacher, self.gen_teacher)
@@ -343,7 +392,8 @@ class GuidanceTrainer(BaseTrainer):
                      "source_conf_on": float(p_on.max()), "source_argmax_changed": float(p_on.argmax() != p_off.argmax()),
                      "readout_argmax_eq_realized": float(int(r_A.argmax()) == realized),
                      "final_argmax_eq_realized": float(int(p_off.argmax()) == realized),
-                     "policy_lag": float(int(self.state["optimizer_step"]) - ref.policy_version)}
+                     "policy_lag": float(int(self.state["optimizer_step"]) - ref.policy_version),
+                     "source_hidden_norm": float(cap_hidden_norm) if cap_hidden_norm is not None else float("nan")}
         return kl.mean(), stats
 
     def update(self) -> Dict[str, float]:
@@ -359,15 +409,32 @@ class GuidanceTrainer(BaseTrainer):
             self.log(rec)
             return rec
         self.state["consecutive_empty"] = 0
-        local_sum, agg = 0.0, {}
+        # Backward each state immediately (one tail graph alive at a time); states skipped by the re-selection
+        # check do not count, so gradients are rescaled by the global number of states actually used.
+        local_sum, agg, used = 0.0, {}, 0
         for ref in refs:
             loss, st = self.state_loss(ref)
-            (loss / global_n).backward()
+            if loss is None:
+                continue
+            loss.backward()
             local_sum += float(loss.detach())
+            used += 1
             for k, v in st.items():
-                agg[k] = agg.get(k, 0.0) + v / len(refs)
-        rec.update(self._apply_update(local_sum, len(refs), global_n))
-        rec.update({"loss": local_sum / max(1, len(refs)), "local_states": len(refs), **agg})
+                agg[k] = agg.get(k, 0.0) + v
+        agg = {k: v / max(1, used) for k, v in agg.items()}
+        global_n = self.dist.sum_scalar(used, self.device)
+        if global_n == 0:
+            self._skip_update()
+            rec["skipped"] = 1
+            self.log(rec)
+            return rec
+        for p in self.params:
+            if p.grad is not None:
+                p.grad.div_(global_n)
+        losses = [None] * used
+        rec.update(self._apply_update(local_sum, len(losses), global_n))
+        rec.update({"loss": local_sum / max(1, len(losses)), "local_states": len(losses),
+                    "reselect_mismatch_total": int(self.state.get("reselect_mismatch", 0)), **agg})
         self.log(rec)
         return rec
 

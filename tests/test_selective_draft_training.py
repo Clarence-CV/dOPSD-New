@@ -33,6 +33,20 @@ def _collect(gm, tok, cfg, path, guidance_mode="off", limit=4):
     return rolls
 
 
+def test_math_task_parsing_matches_legacy_helpers():
+    import ast
+    from selective_draft.data import MATH_SYSTEM_PROMPT, math_gold
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "eval", "math500.py")).read()
+    legacy = [n for n in ast.parse(src).body if isinstance(n, ast.Assign)
+              and getattr(n.targets[0], "id", None) == "MATH500_SYSTEM_PROMPT"][0].value.value
+    assert legacy == MATH_SYSTEM_PROMPT
+    text = "x <answer>\\boxed{\\frac{1}{2}}</answer>"
+    assert parse_prediction(text, "math") == "\\frac{1}{2}"
+    assert is_correct("\\frac12", "\\frac{1}{2}", "math") and not is_correct("3", "\\frac{1}{2}", "math")
+    assert parse_prediction("no answer", "math") is None and not is_correct(None, "1", "math")
+    assert math_gold(None, "so $\\boxed{3\\sqrt{2}}$.") == "3\\sqrt{2}" and math_gold(" 7 ", "") == "7"
+
+
 def test_parse_and_manifest_helpers():
     assert parse_prediction("so <answer>\\boxed{1,234}</answer>") == 1234.0
     assert parse_prediction("<answer> the result is 7 dollars </answer>") == 7.0

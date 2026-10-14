@@ -46,7 +46,13 @@ def soft_message(probs: torch.Tensor, embedding_weight: torch.Tensor, vocab_chun
     if probs.shape[-1] != V:
         raise ValueError(f"probs vocab {probs.shape[-1]} != embedding rows {V}")
     out = torch.zeros(probs.shape[:-1] + (d,), dtype=torch.float32, device=probs.device)
+    wdt = embedding_weight.dtype
     for s in range(0, V, vocab_chunk):
         e = min(V, s + vocab_chunk)
-        out = out + probs[..., s:e].float() @ embedding_weight[s:e].float()
+        if wdt == torch.float32:
+            out = out + probs[..., s:e].float() @ embedding_weight[s:e]
+        else:
+            # bf16/fp16 table: matmul in the table dtype (fp32 accumulation inside the kernel), sum chunks in
+            # fp32. Avoids materialising a [V, d] fp32 copy every denoising step (plan §4.2).
+            out = out + (probs[..., s:e].to(wdt) @ embedding_weight[s:e]).float()
     return out

@@ -4,7 +4,7 @@
 #   bash tacc/selective_draft_smoke.sh env       # python/torch/CUDA, offline caches, import check
 #   bash tacc/selective_draft_smoke.sh data      # split manifest (needs the GSM8K cache; login node if missing)
 #   bash tacc/selective_draft_smoke.sh backend   # inspect: module paths, token ids, trainable names
-#   bash tacc/selective_draft_smoke.sh decode    # base collect on N_COLLECT analysis problems (threshold 0.9) + replay check
+#   bash tacc/selective_draft_smoke.sh decode    # separate train / analysis states (threshold 0.9) + replay check
 #   bash tacc/selective_draft_smoke.sh parity    # readout_only / zero-injection vs off on the same problems
 #   bash tacc/selective_draft_smoke.sh readout   # stage 1, MAX_STEPS updates, then the readout report
 #   bash tacc/selective_draft_smoke.sh teacher   # target-collapse + oracle-ceiling report on the collected states
@@ -36,7 +36,10 @@ stage_env() {
 }
 stage_data()     { $CLI prepare-data --config "$CONFIG" --output-dir "$OUT/data"; }
 stage_backend()  { $CLI inspect --config "$CONFIG" "${SET[@]}" | head -80; }
-stage_decode()   { $CLI collect --config "$CONFIG" "${SET[@]}" --set guidance.mode='"off"' --limit "$N_COLLECT" --output-dir "$OUT/base_states"; }
+stage_decode() {
+    $CLI collect --config "$CONFIG" "${SET[@]}" --set guidance.mode='"off"' --set data.split='"train"' --limit "$N_COLLECT" --output-dir "$OUT/train_states"
+    $CLI collect --config "$CONFIG" "${SET[@]}" --set guidance.mode='"off"' --set data.split='"analysis"' --limit "$N_COLLECT" --output-dir "$OUT/analysis_states"
+}
 stage_parity() {
     $CLI evaluate --config "$CONFIG" "${SET[@]}" --set guidance.mode='"off"'          --set 'evaluation.commit_thresholds=[0.9]' --limit "$N_COLLECT" --output-dir "$OUT/parity_off"
     $CLI evaluate --config "$CONFIG" "${SET[@]}" --set guidance.mode='"readout_only"' --set 'evaluation.commit_thresholds=[0.9]' --limit "$N_COLLECT" --output-dir "$OUT/parity_readout"
@@ -52,17 +55,17 @@ for k in ("parity_readout", "parity_zero_inject"):
 PY
 }
 stage_readout() {
-    $CLI train-readout --config "$CONFIG" "${SET[@]}" --states "$OUT/base_states" --max-steps "$MAX_STEPS" --output-dir "$OUT/readout"
-    $CLI diagnose --kind readout --config "$CONFIG" "${SET[@]}" --snapshot "$OUT/readout/snapshot" --states "$OUT/base_states" --max-states 64 --output-dir "$OUT/readout_diag"
+    $CLI train-readout --config "$CONFIG" "${SET[@]}" --set data.split='"train"' --states "$OUT/train_states" --max-steps "$MAX_STEPS" --output-dir "$OUT/readout"
+    $CLI diagnose --kind readout --config "$CONFIG" "${SET[@]}" --set data.split='"analysis"' --snapshot "$OUT/readout/snapshot" --states "$OUT/analysis_states" --max-states 64 --output-dir "$OUT/readout_diag"
 }
-stage_teacher()  { $CLI diagnose --kind teacher --config "$CONFIG" "${SET[@]}" --snapshot "$OUT/readout/snapshot" --states "$OUT/base_states" --max-states 32 --output-dir "$OUT/teacher_diag"; }
+stage_teacher()  { $CLI diagnose --kind teacher --config "$CONFIG" "${SET[@]}" --snapshot "$OUT/readout/snapshot" --states "$OUT/analysis_states" --max-states 32 --output-dir "$OUT/teacher_diag"; }
 stage_guidance() { $CLI train-guidance --config "$CONFIG" "${SET[@]}" --set data.split='"train"' --readout-snapshot "$OUT/readout/snapshot" --max-steps "$MAX_STEPS" --output-dir "$OUT/guidance"; }
 stage_resume()   { $CLI train-guidance --config "$CONFIG" "${SET[@]}" --set data.split='"train"' --resume "$OUT/guidance/checkpoint-step-$MAX_STEPS" --max-steps $((2 * MAX_STEPS)) --output-dir "$OUT/guidance"; }
 stage_eval() {
     $CLI evaluate --config "$CONFIG" "${SET[@]}" --set data.split='"dev"' --set guidance.mode='"off"' --limit "$N_EVAL" --output-dir "$OUT/eval_base"
     $CLI evaluate --config "$CONFIG" "${SET[@]}" --set data.split='"dev"' --set guidance.mode='"single_soft"' --snapshot "$OUT/guidance/snapshot" --limit "$N_EVAL" --output-dir "$OUT/eval_guided"
 }
-stage_consistency() { $CLI diagnose --kind consistency --config "$CONFIG" "${SET[@]}" --states "$OUT/base_states" --max-states 200 --output-dir "$OUT/consistency_base"; }
+stage_consistency() { $CLI diagnose --kind consistency --config "$CONFIG" "${SET[@]}" --states "$OUT/analysis_states" --max-states 200 --output-dir "$OUT/consistency_base"; }
 
 case "${1:-}" in
     env) stage_env ;; data) stage_data ;; backend) stage_backend ;; decode) stage_decode ;; parity) stage_parity ;;

@@ -12,6 +12,7 @@ DTYPES = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch
 
 
 def build_model_and_tokenizer(cfg: Config, device: torch.device):
+    torch.manual_seed(cfg.training.seed)
     m = cfg.model
     if m.backend == "fake_llada":
         from .testing import make_fake

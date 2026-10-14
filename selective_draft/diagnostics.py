@@ -9,12 +9,14 @@ See doc/Selective_Draft_OPSD_Review.md §3–§4 for definitions."""
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import replace
 from typing import Dict, List, Optional
 
 import torch
 import torch.nn.functional as F
 
 from .config import Config
+from .generation import _autocast, baseline_block_commitments, choose_tokens, select_commits
 from .losses import kl_between_logprobs
 from .model import GuidedModel
 from .teacher import log_probs_at, oracle_patch_log_probs, reveal_view, teacher_targets
@@ -129,26 +131,35 @@ def teacher_report(gm: GuidedModel, rollouts: List[dict], cfg: Config, max_state
 @torch.no_grad()
 def consistency_report(gm: GuidedModel, rollouts: List[dict], cfg: Config, max_steps: Optional[int] = None,
                        commit_threshold: Optional[float] = None) -> Dict[str, object]:
-    """Needs rollouts recorded by the decoder (committed sets + confidences). Conditionals come from the
-    native base path (guidance off), which by parity is also the student with its message switched off."""
+    """Teacher reveal response and stability, plus an actual guidance-off counterfactual.
+
+    Induced-commit fidelity is supported for greedy threshold traces only. It compares against
+    the token eventually committed by an independent off continuation of the same pre-step state,
+    even if that takes multiple steps. It is agreement with a baseline, not token correctness.
+    """
     device = gm.device
     MASK = gm.backend.mask_token_id
-    tau = cfg.generation.commit_threshold if commit_threshold is None else commit_threshold
     acc = defaultdict(list)
+    fidelity_status = defaultdict(int)
     n = 0
+    pair_steps = 0
     for _, _, roll, step in iter_states(rollouts):
         cpos = step["committed_positions"].long()
-        if cpos.numel() < 2:
+        if cpos.numel() == 0:
             continue
         if max_steps is not None and n >= max_steps:
             break
         n += 1
-        x, attn, _, _ = state_tensors(roll, step, device)
-        P = roll["meta"]["prompt_len"]
+        x, attn, ctx, _ = state_tensors(roll, step, device)
         ctoks = step["committed_tokens"].long()
         econf = step["eligible_confidences"].float()
         epos = step["eligible_positions"].long()
         conf_at = {int(p): float(c) for p, c in zip(epos, econf)}
+        status = _induced_commit_fidelity(gm, roll, step, x, attn, ctx, cfg, acc, commit_threshold)
+        fidelity_status[status] += 1
+        if cpos.numel() < 2:
+            continue
+        pair_steps += 1
         if step["gate_open"] and step.get("source_was_committed", False):
             A = int(step["source_pos"])
         else:
@@ -172,13 +183,44 @@ def consistency_report(gm: GuidedModel, rollouts: List[dict], cfg: Config, max_s
             view = nxt.clone(); view[bp] = MASK
             lp = log_probs_at(gm, view[None], attn[None], torch.tensor([bp], device=device))[0, 0]
             regret.append(float(int(lp.argmax()) != bt))
-            off_conf = float(log_q0[B_pos.tolist().index(bp)].exp().max())
-            induced = conf_at.get(bp, 0.0) > tau >= off_conf  # committed with the message, not without
-            if induced:
-                acc["induced_fidelity"].append(1.0 - regret[-1])
         acc["regret"].extend(regret)
         acc["committed_per_step"].append(float(cpos.numel()))
-    rep = {"steps": n, "receiver_tokens": len(acc["psa"])}
+    rep = {"steps": pair_steps, "states_examined": n, "receiver_tokens": len(acc["psa"]),
+           "induced_fidelity_status": dict(fidelity_status),
+           "induced_fidelity_reference": "guidance-off continuation until B actually commits"}
     rep.update({k: _mean(v) for k, v in acc.items()})
     rep["induced_commits"] = len(acc["induced_fidelity"])
     return rep
+
+
+def _induced_commit_fidelity(gm, roll, step, x, attn, ctx, cfg, acc, threshold_override):
+    meta = roll["meta"]
+    if meta.get("guidance_mode") != "single_soft" or not step["gate_open"]:
+        return "no_guidance"
+    if "generation" not in meta or meta.get("confidence_policy") != "raw_model_probability":
+        return "missing_protocol_metadata"  # old traces may use renormalised/rounded confidence
+    gen = replace(cfg.generation, **meta["generation"])
+    if gen.mode != "threshold":
+        return "unsupported_fixed_budget"
+    if gen.temperature != 0:
+        return "unsupported_sampling"  # no unrecorded RNG coupling is invented
+    tau = gen.commit_threshold
+    if threshold_override is not None and threshold_override != tau:
+        raise ValueError("fidelity threshold must match the recorded commit protocol")
+    with _autocast(gen, x.device):
+        off_logits = gm(x[None], attn[None], mode="off").logits
+    _, off_conf = choose_tokens(off_logits, 0.0, None,
+                                gm.backend.mask_token_id if gen.forbid_mask_candidate else None)
+    off_commit = select_commits(ctx.eligible_mask, off_conf, "threshold", tau)[0]
+    guided_conf = {int(p): float(c) for p, c in zip(step["eligible_positions"], step["eligible_confidences"])}
+    induced = [(int(p), int(t)) for p, t in zip(step["committed_positions"], step["committed_tokens"])
+               if int(p) != int(step["source_pos"]) and guided_conf[int(p)] > tau and not bool(off_commit[int(p)])]
+    if induced:
+        commits = baseline_block_commitments(
+            gm, x[None], attn[None], ctx, gen,
+            torch.tensor([p for p, _ in induced], device=x.device), tau, initial_logits=off_logits)
+        for pos, token in induced:
+            off_token, wait = commits[pos]
+            acc["induced_fidelity"].append(float(token == off_token))
+            acc["induced_baseline_wait_steps"].append(float(wait))
+    return "supported"

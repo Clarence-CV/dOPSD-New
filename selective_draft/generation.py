@@ -46,8 +46,10 @@ def choose_tokens(logits: torch.Tensor, temperature: float, rng: Optional[torch.
                   forbidden_token: Optional[int] = None):
     """Candidate per position and its raw probability under the un-noised distribution.
     temperature>0: Gumbel-max on logits + T*g (same argmax law as the legacy exp(logits)/(-log u)^T).
-    forbidden_token (the MASK id when generation.forbid_mask_candidate) is removed before the softmax."""
+    forbidden_token (usually MASK) cannot be selected, but confidence is always measured
+    in the original model distribution, without renormalising away forbidden probability."""
     lf = logits.float()
+    probs = F.softmax(lf, dim=-1)
     if forbidden_token is not None:
         lf = lf.clone()
         lf[..., forbidden_token] = -math.inf
@@ -58,9 +60,69 @@ def choose_tokens(logits: torch.Tensor, temperature: float, rng: Optional[torch.
         cand = torch.argmax(lf + temperature * g, dim=-1)
     else:
         cand = torch.argmax(lf, dim=-1)
-    probs = F.softmax(lf, dim=-1)
     conf = probs.gather(-1, cand.unsqueeze(-1)).squeeze(-1)
     return cand, conf
+
+
+def select_commits(eligible: torch.Tensor, conf: torch.Tensor, mode: str, threshold: float,
+                   k_t: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """Shared commit rule for generation and same-state counterfactual diagnostics."""
+    scores = conf.masked_fill(~eligible, -math.inf)
+    live = eligible.any(dim=1)
+    commit = torch.zeros_like(eligible)
+    if mode == "threshold":
+        commit = eligible & (scores > threshold)
+        for b in (live & ~commit.any(dim=1)).nonzero(as_tuple=False).flatten().tolist():
+            commit[b, int(scores[b].argmax())] = True
+    elif mode == "fixed_budget":
+        if k_t is None:
+            raise ValueError("fixed_budget requires k_t")
+        for b in live.nonzero(as_tuple=False).flatten().tolist():
+            k = min(int(k_t[b]), int(eligible[b].sum()))
+            if k > 0:
+                commit[b, torch.topk(scores[b], k=k).indices] = True
+    else:
+        raise ValueError(f"unknown commit mode {mode}")
+    return commit
+
+
+@torch.no_grad()
+def baseline_block_commitments(gm: GuidedModel, x: torch.Tensor, attention_mask: torch.Tensor,
+                               context: StepContext, cfg: GenerationConfig, positions: torch.Tensor,
+                               threshold: float, initial_logits: Optional[torch.Tensor] = None) -> dict:
+    """Continue a single recorded state with guidance off until the requested positions commit.
+
+    Only the current block is needed: EOS stopping happens after it is fully decoded. This
+    diagnostic is deterministic; sampled continuations need an explicit coupling of RNG states.
+    Returns absolute position -> (committed token, number of steps after the recorded step).
+    """
+    if cfg.mode != "threshold" or cfg.temperature != 0:
+        raise ValueError("baseline_block_commitments requires greedy threshold decoding")
+    if x.shape[0] != 1:
+        raise ValueError("counterfactual continuation expects one state")
+    x = x.clone()
+    remaining = set(positions.tolist())
+    result = {}
+    for step in range(int(context.eligible_mask.sum())):
+        eligible = context.eligible_mask & (x == gm.backend.mask_token_id)
+        if step == 0 and initial_logits is not None:
+            logits = initial_logits
+        else:
+            with _autocast(cfg, x.device):
+                logits = gm(x, attention_mask, mode="off").logits
+        cand, conf = choose_tokens(logits, 0.0, None,
+                                   gm.backend.mask_token_id if cfg.forbid_mask_candidate else None)
+        commit = select_commits(eligible, conf, "threshold", threshold)
+        if bool((cand[commit] == gm.backend.mask_token_id).any()) or not bool(torch.isfinite(conf[commit]).all()):
+            raise RuntimeError("invalid candidate in baseline continuation")
+        for pos in commit[0].nonzero(as_tuple=False).flatten().tolist():
+            if pos in remaining:
+                result[pos] = (int(cand[0, pos]), step)
+                remaining.remove(pos)
+        x = torch.where(commit, cand, x)
+        if not remaining:
+            return result
+    raise RuntimeError("baseline continuation did not commit all requested positions")
 
 
 def _autocast(cfg: GenerationConfig, device: torch.device):
@@ -156,18 +218,7 @@ def generate(gm: GuidedModel, prompt_ids: torch.Tensor, prompt_attention_mask: t
             cand, conf = choose_tokens(out.logits, cfg.temperature, sample_rng,
                                        MASK if cfg.forbid_mask_candidate else None)
             conf = torch.where(eligible, conf, torch.full_like(conf, -math.inf))
-            commit = torch.zeros_like(eligible)
-            if cfg.mode == "threshold":
-                commit = eligible & (conf > tau)
-                fallback = rows_with_masks & ~commit.any(dim=1)
-                for b in fallback.nonzero(as_tuple=False).flatten().tolist():
-                    commit[b, int(conf[b].argmax())] = True
-            else:
-                for b in rows_with_masks.nonzero(as_tuple=False).flatten().tolist():
-                    k = min(int(k_t[b]), int(eligible[b].sum()))
-                    if k > 0:
-                        _, idx = torch.topk(conf[b], k=k)
-                        commit[b, idx] = True
+            commit = select_commits(eligible, conf, cfg.mode, tau, k_t)
             if bool((cand[commit] == MASK).any()):
                 raise RuntimeError("sampler produced MASK as a committed candidate")
             if not bool(torch.isfinite(conf[commit]).all()):
