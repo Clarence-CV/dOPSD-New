@@ -7,7 +7,8 @@
 | RUN | job | 状态 | 说明 |
 |---|---|---|---|
 | math_prelim_v1 | 3510902 | 2026-10-14 排队中取消，未运行，0 SU | 512 tokens、阈值解码为主、dev 评测。用户要求对齐 THU d-OPSD 的训练与评测协议后作废 |
-| math_prelim_v2 | 3511305 | 排队中 | THU 协议，见下 |
+| math_prelim_v2 | 3511305 | 2026-10-14 排队中取消，未运行，0 SU | 误用了 THU 的固定预算解码；用户要求固定阈值 |
+| math_prelim_v3 | 见 §7 | 当前 | 固定阈值解码 + THU 的其余训练/评测设置 |
 
 ## 1. 目的
 
@@ -25,12 +26,13 @@
 | 项 | THU | 本次 |
 |---|---|---|
 | 训练题池 | `ankner/math-500` train（7500） | 同，按 seed 42 划出 train / dev / analysis（6000/500/500） |
-| 生成长度 / 步数 / block | 256 / 128 固定预算 / 32 | 同 |
+| 生成长度 / block | 256 / 32 | 同 |
+| 解码 | 固定预算 128 步（每步 2 token） | **不同：固定阈值**（末层概率 > 阈值的位置同步提交，至少 1 个，步数自适应）。这是方法设计，用户明确要求；THU 的准确率数字因此不能直接对比 |
 | 训练 rollout | 温度 0.9（`temperature` 默认值），答错用 0.9 重采，每题最多 8 次，答对即停 | 同 |
 | 8 次全错 | loss × 0，不产生信号 | 丢弃该题 |
 | 每题 rollout 数 | 1 条有效 | 同 |
 | 训练 gold | 解答中最后一个 `\boxed{}`，`is_equiv` 判等 | 同 |
-| 评测 | MATH-500 test（HuggingFaceH4），greedy，256 / 128 / 32 | 同（取前 200 题）；另加阈值 0.9 作为第二协议 |
+| 评测 | MATH-500 test（HuggingFaceH4），greedy，256 tokens，固定预算 128 步 | MATH-500 test 前 200 题，greedy，256 tokens，固定阈值 0.7 / 0.8 / 0.9 |
 | 学习率与优化器 | LoRA r=128：lr 5e-6、weight decay 0.1、梯度裁剪 0.2、beta2 0.99、constant_with_warmup | **不照搬**：本方法训练的是两个零初始化的新小模块，5e-6 在 100 步内几乎不会让注入消息离开 0。用 AdamW lr 3e-4、weight decay 0、裁剪 1.0；靠 `delta_norm / source_hidden_norm` 判断是否合适 |
 | 主干 | 4-bit + LoRA | bf16 冻结主干，不加 LoRA（方法设计） |
 | 混合精度 | bf16 权重 + fp16 autocast | bf16，不开 autocast（阶段二要反传，fp16 无 loss scaling 有溢出风险） |
@@ -50,7 +52,8 @@
 | 阶段一 | 80 道 train 题的 greedy base 状态（batch 4 采集），800 次更新 × 4 状态，lr 3e-4 |
 | 阶段二 | 100 次更新；每次 2 道题，每题按 THU 规则最多采 8 条直到答对；每条有效 rollout 最多取 4 个门控状态；Teacher = realized；每 25 步 checkpoint |
 | 诊断 | analysis 64 题（batch 1 采集）；readout（原生 vs 训练后）、teacher（L28 训练后 / L28 原生 / L24 原生，各 150 状态）、consistency（base vs guided） |
-| 评测 | MATH-500 test 前 200 题，batch 1 计时；base 与 guided × {固定预算 128 步, 阈值 0.9}；readout_only 固定预算前 64 题测早期读出开销 |
+| 解码 | 固定阈值：采集与训练 rollout 用 0.9；评测扫 0.7 / 0.8 / 0.9 |
+| 评测 | MATH-500 test 前 200 题，batch 1 计时；base 与 guided 各扫 3 个阈值；readout_only 在阈值 0.9 下跑前 64 题测早期读出开销 |
 
 ## 4. 预算
 
@@ -59,21 +62,21 @@
 | 阶段 | 估计（分钟） |
 |---|---|
 | 元数据、数据划分、inspect、parity smoke | 8 |
-| 采集 train 80 + analysis 64 | 20 |
+| 采集 train 80 + analysis 64 | 15 |
 | 阶段一 + readout 诊断 | 12 |
 | teacher 三组 + consistency base | 12 |
-| 阶段二 100 次更新（每题平均约 3 条 rollout） | 105 |
+| 阶段二 100 次更新（每题平均约 3 条 rollout） | 65 |
 | guided 采集 + consistency | 13 |
-| 评测：固定预算 2 × 200、阈值 2 × 200、readout_only 64 | 110 |
-| 约 19 次模型加载 | 25 |
-| **合计** | **约 5.1 小时** |
+| 评测：base / guided 各 3 个阈值 × 200 题、readout_only 64 题 | 110 |
+| 约 18 次模型加载 | 25 |
+| **合计** | **约 4.3 小时** |
 
-估计基于每次前向约 0.07 秒（约 500 tokens），每条 256-token 固定预算解码 128 步约 9 秒，MATH 上 greedy 正确率按三到四成估。申请 6:45（约 1.3 倍），**最多约 10.1 SU**。阶段二的耗时取决于温度 0.9 下的正确率，是最大的不确定项；超时则用同一个 RUN 重新提交续跑。
+估计基于每次前向约 0.07 秒（约 500 tokens），每条 256-token 阈值解码约 80 步、约 6 秒，MATH 上正确率按三到四成估。申请 5:45（约 1.3 倍），**最多约 8.6 SU**。阶段二的耗时取决于温度 0.9 下的正确率，是最大的不确定项；超时则用同一个 RUN 重新提交续跑。
 
 ## 5. 运行方式
 
 ```bash
-RUN=math_prelim_v2 bash tacc/sync_and_submit_math.sh   # 本地；DRY=1 只同步不提交
+RUN=math_prelim_v3 bash tacc/sync_and_submit_math.sh   # 本地；DRY=1 只同步不提交
 ```
 
 ## 6. 拿到结果后先看什么
@@ -84,16 +87,9 @@ RUN=math_prelim_v2 bash tacc/sync_and_submit_math.sh   # 本地；DRY=1 只同�
 4. Readout 表：原生 lens 与训练后适配器的 top-1 一致率、门控覆盖率、`source_agree_given_gate_0.8`。
 5. Teacher 表：三种目标 `kl_*_vs_q0` 的量级与差距；`vstar_eq_realized`（A 最终改变的频率）；oracle 恢复率 L24 vs L28。
 6. 阶段二：loss 走势、`delta_norm / source_hidden_norm`、`attempts_per_problem` 与有效题比例、`reselect_mismatch_total`（应接近 0）。
-7. 评测：两种协议下 guided vs base 的配对对比（各自独有的答对题数）、steps/row 与时延；readout_only vs base 的时延差即早期读出开销。
-8. Consistency：base 与 guided 的 psa、pmi、regret（固定预算下不计算 induced_fidelity，它只支持 greedy 阈值轨迹），按 doc/Selective_Draft_OPSD_Review.md §7 的收紧口径解读。
+7. 评测：每个阈值下 guided vs base 的配对对比（各自独有的答对题数）、steps/row 与时延，以及准确率随阈值的变化；readout_only vs base 的时延差即早期读出开销。
+8. Consistency：base 与 guided 的 psa、pmi、regret、induced_fidelity，按 doc/Selective_Draft_OPSD_Review.md §7 的收紧口径解读。
 
 ## 7. 提交记录与结果
 
-| 项 | 值 |
-|---|---|
-| job | 3511305，gpu-a100-small，申请 6:45:00 |
-| 提交 | 2026-10-14 23:10 CDT左右，代码 commit 20bb158（`$WORK/inf385t/dOPSD-sd/.code_revision`） |
-| 输出 | `$SCRATCH/dopsd/selective_draft/math_prelim_v2/` |
-| 实际运行 / 计费 | （结束后用 sacct 填写） |
-
-结论与问题：（结束后填写）
+（提交后填写。）

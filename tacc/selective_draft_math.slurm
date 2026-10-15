@@ -1,7 +1,8 @@
 #!/bin/bash
 # Selective Draft OPSD — MATH preliminary run, ONE job on one A100 (gpu-a100-small, 1.5 SU/node-h).
-# Protocol follows THU d-OPSD: 256 tokens, fixed budget 128 steps, block 32; stage-2 rollouts T=0.9 with retry until
-# correct (max 8, all-wrong problems dropped); evaluation greedy on MATH-500 test. Threshold 0.9 = secondary eval.
+# Decoding: fixed confidence threshold (0.9 for collection/training; eval sweeps EVAL_THRESHOLDS). Otherwise THU d-OPSD:
+# 256 tokens, block 32; stage-2 rollouts T=0.9 with retry until correct (max 8, all-wrong problems dropped);
+# evaluation greedy on MATH-500 test.
 # Order = priority, so a walltime overrun still leaves the most useful outputs:
 #   meta -> data -> smoke(inspect + parity) -> collect(train, analysis) -> stage 1 -> readout/teacher/consistency
 #   diagnostics (training-free checks) -> stage 2 -> guided analysis states + consistency -> timed eval -> REPORT.md
@@ -12,9 +13,9 @@
 #
 # Submit from the repo root on a login node (logs/ must exist before sbatch):
 #   mkdir -p logs && RUN=math_prelim_v2 sbatch tacc/selective_draft_math.slurm
-# Budget (results/selective_draft/math_prelim.md): expected ~5.1 h; request 6:45 -> at most 10.1 SU.
+# Budget (results/selective_draft/math_prelim.md): expected ~4.3 h; request 5:45 -> at most 8.6 SU.
 # Knobs: RUN, CONFIG, N_TRAIN (80), N_ANALYSIS (64), N_EVAL (200, MATH-500 test), N_SMOKE (3), READOUT_STEPS (800),
-#        GUIDE_STEPS (100), COLLECT_BS (4), EVAL_THRESHOLDS ("[0.9]"), DIAG_STATES (150).
+#        GUIDE_STEPS (100), COLLECT_BS (4), EVAL_THRESHOLDS ("[0.7,0.8,0.9]"), DIAG_STATES (150).
 #SBATCH --job-name=sd-math
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
@@ -22,17 +23,17 @@
 #SBATCH --partition=gpu-a100-small
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --time=06:45:00
+#SBATCH --time=05:45:00
 set -euo pipefail
 cd "$SLURM_SUBMIT_DIR"
 source tacc/env.sh
 
-RUN="${RUN:-math_prelim_v2}"
+RUN="${RUN:-math_prelim_v3}"
 OUT="${OUT:-$SCRATCH/dopsd/selective_draft/$RUN}"
 CONFIG="${CONFIG:-configs/selective_draft/llada_math_threshold.json}"
 N_TRAIN="${N_TRAIN:-80}"; N_ANALYSIS="${N_ANALYSIS:-64}"; N_EVAL="${N_EVAL:-200}"; N_SMOKE="${N_SMOKE:-3}"
 READOUT_STEPS="${READOUT_STEPS:-800}"; GUIDE_STEPS="${GUIDE_STEPS:-100}"; COLLECT_BS="${COLLECT_BS:-4}"
-EVAL_THRESHOLDS="${EVAL_THRESHOLDS:-[0.9]}"; DIAG_STATES="${DIAG_STATES:-150}"
+EVAL_THRESHOLDS="${EVAL_THRESHOLDS:-[0.7,0.8,0.9]}"; DIAG_STATES="${DIAG_STATES:-150}"
 mkdir -p "$OUT"/{meta,logs,.done,states,diag,eval,smoke}
 CLI="python -m selective_draft.cli"
 export PYTHONUNBUFFERED=1
@@ -155,17 +156,14 @@ run_stage diag_consistency_guided soft $CLI diagnose --kind consistency "${S[@]}
 python -m selective_draft.report "$OUT" > /dev/null || true
 
 # ---------------------------------------------------------------- 7. timed evaluation (MATH-500 test, batch 1, greedy)
-# primary = fixed budget (config: 256 tokens / 128 steps, THU protocol); secondary = threshold decoding.
-E=(--set data.split='"test"' --limit "$N_EVAL")
-T=(--set generation.mode='"threshold"' --set "evaluation.commit_thresholds=$EVAL_THRESHOLDS")
+# fixed-threshold decoding at each of EVAL_THRESHOLDS (accuracy vs steps/latency curve); no fixed-budget runs.
+E=(--set data.split='"test"' --limit "$N_EVAL" --set generation.mode='"threshold"' --set "evaluation.commit_thresholds=$EVAL_THRESHOLDS")
 G=(--set guidance.mode='"single_soft"' --snapshot "$OUT/guidance/snapshot")
-run_stage eval_base_fixed soft $CLI evaluate "${S[@]}" "${E[@]}" --set guidance.mode='"off"' --output-dir "$OUT/eval/base_fixed"
-run_stage eval_guided_fixed soft $CLI evaluate "${S[@]}" "${E[@]}" "${G[@]}" --output-dir "$OUT/eval/guided_fixed"
-run_stage eval_base_threshold soft $CLI evaluate "${S[@]}" "${E[@]}" "${T[@]}" --set guidance.mode='"off"' --output-dir "$OUT/eval/base_threshold"
-run_stage eval_guided_threshold soft $CLI evaluate "${S[@]}" "${E[@]}" "${T[@]}" "${G[@]}" --output-dir "$OUT/eval/guided_threshold"
+run_stage eval_base_threshold soft $CLI evaluate "${S[@]}" "${E[@]}" --set guidance.mode='"off"' --output-dir "$OUT/eval/base_threshold"
+run_stage eval_guided_threshold soft $CLI evaluate "${S[@]}" "${E[@]}" "${G[@]}" --output-dir "$OUT/eval/guided_threshold"
 run_stage eval_readout_only soft $CLI evaluate "${S[@]}" --set data.split='"test"' --limit "$N_ANALYSIS" \
-    --set guidance.mode='"readout_only"' --snapshot "$OUT/readout/snapshot" --output-dir "$OUT/eval/readout_only_fixed"   # overhead vs the same first problems of base_fixed
-
+    --set generation.mode='"threshold"' --set 'evaluation.commit_thresholds=[0.9]' \
+    --set guidance.mode='"readout_only"' --snapshot "$OUT/readout/snapshot" --output-dir "$OUT/eval/readout_only_threshold"   # overhead vs base_threshold thr0.9
 
 # ---------------------------------------------------------------- 8. report + backup of the small artefacts to $WORK
 python -m selective_draft.report "$OUT" > /dev/null
