@@ -28,6 +28,7 @@ class DataConfig:
     dataset_id: str = "openai/gsm8k"  # "fake" -> built-in toy problems (CPU tests); math: "ankner/math-500"
     dataset_config: Optional[str] = "main"  # null for ankner/math-500
     dataset_revision: Optional[str] = None
+    test_dataset_id: Optional[str] = None  # separate source for the test split (math: "HuggingFaceH4/MATH-500", as THU eval)
     split_manifest: Optional[str] = None  # JSON written by `prepare-data`
     split: str = "dev"  # train | dev | analysis | test
     prompt_recipe: str = "legacy_boxed_reasoning"
@@ -96,7 +97,8 @@ class TrainingConfig:
     save_every: int = 0
     log_every: int = 1
     seed: int = 0
-    max_rollout_attempts: int = 1  # >1 only meaningful with temperature > 0
+    max_rollout_attempts: int = 1  # stage-2 retries per problem until correct (THU d-OPSD: pass@8); needs T > 0
+    rollout_temperature: Optional[float] = None  # stage-2 training rollouts only; None -> generation.temperature
     max_consecutive_empty_updates: int = 20  # stage 2 diagnostic exit: gate never opens / nothing survives filtering
 
 
@@ -177,6 +179,10 @@ class Config:
             setattr(getattr(self, section), fname, value)
         return self
 
+    def rollout_temperature(self) -> float:
+        t = self.training.rollout_temperature
+        return float(self.generation.temperature if t is None else t)
+
     # ---------- validation ----------
     def validate(self) -> "Config":
         m, d, g, gen, t, tr, ev, tc = (self.model, self.data, self.guidance, self.generation,
@@ -227,8 +233,10 @@ class Config:
             raise ValueError("training.refresh_updates must be >= 1")
         if tr.max_rollout_attempts < 1:
             raise ValueError("training.max_rollout_attempts must be >= 1")
-        if tr.max_rollout_attempts > 1 and gen.temperature == 0.0:
-            raise ValueError("max_rollout_attempts > 1 needs temperature > 0 (greedy retries are identical)")
+        if tr.rollout_temperature is not None and tr.rollout_temperature < 0:
+            raise ValueError("training.rollout_temperature must be >= 0")
+        if tr.max_rollout_attempts > 1 and self.rollout_temperature() == 0.0:
+            raise ValueError("max_rollout_attempts > 1 needs a rollout temperature > 0 (greedy retries are identical)")
         if tr.activation_checkpointing:
             raise ValueError("activation checkpointing is disabled in this version (see plan §3.2)")
         if ev.batch_size < 1 or ev.warmup < 0 or ev.repeats < 1:

@@ -10,7 +10,7 @@ import json
 import hashlib
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -306,14 +306,18 @@ class GuidanceTrainer(BaseTrainer):
         return self.examples[self.order[c]]
 
     @torch.no_grad()
-    def rollout(self, ex: Example) -> dict:
+    def rollout(self, ex: Example, attempt: int = 0) -> dict:
         ids, mask = tokenize_prompts(self.tokenizer, [ex.prompt_text], self.device)
+        # Training rollouts may sample (training.rollout_temperature, e.g. 0.9 as in THU d-OPSD) while collection,
+        # diagnostics and evaluation stay on generation.temperature. Source selection, gate and injection are the
+        # same code path either way; only the token choice is sampled.
+        gen_cfg = replace(self.cfg.generation, temperature=self.cfg.rollout_temperature())
         meta = {"example_id": ex.example_id, "prompt_ids": ids[0].tolist(), "prompt_attention_mask": mask[0].tolist(),
                 "policy_version": int(self.state["optimizer_step"]), "guidance_mode": "single_soft",
-                "generation": self.cfg.generation.__dict__, "gold": ex.answer_value,
+                "generation": dict(gen_cfg.__dict__), "gold": ex.answer_value, "attempt": attempt,
                 "confidence_policy": "raw_model_probability"}
         rec = StateRecorder("state_only", self.gm.backend.mask_token_id, self.gm.backend.eos_token_id, ids.shape[1], [meta])
-        res = generate(self.gm, ids, mask, self.cfg.generation, guidance_mode="single_soft", recorder=rec,
+        res = generate(self.gm, ids, mask, gen_cfg, guidance_mode="single_soft", recorder=rec,
                        sample_rng=self.gen_sample)
         text = self.tokenizer.decode(res.completion_ids(0), skip_special_tokens=True)
         pred = parse_prediction(text, ex.task)
@@ -327,8 +331,8 @@ class GuidanceTrainer(BaseTrainer):
         for _ in range(self.cfg.training.rollouts_per_update if self.examples else 0):
             ex = self._next_example()
             chosen = None
-            for _attempt in range(self.cfg.training.max_rollout_attempts):
-                roll = self.rollout(ex)
+            for attempt in range(self.cfg.training.max_rollout_attempts):
+                roll = self.rollout(ex, attempt)
                 rolls.append(roll)
                 if roll["is_correct"] or not self.cfg.training.filter_correct_only:
                     chosen = roll
@@ -346,7 +350,10 @@ class GuidanceTrainer(BaseTrainer):
         save_rollouts(os.path.join(self.rollout_dir, f"round-{rnd:05d}_rank{self.dist.rank}.pt"), rolls)
         self.state["rollout_round"] = rnd + 1
         n_steps = sum(len(r["steps"]) for r in rolls)
-        return {"rollouts": len(rolls), "kept": kept, "correct": sum(r["is_correct"] for r in rolls),
+        n_problems = self.cfg.training.rollouts_per_update if self.examples else 0
+        return {"problems": n_problems, "rollouts": len(rolls), "kept": kept,
+                "correct": sum(r["is_correct"] for r in rolls),
+                "attempts_per_problem": len(rolls) / max(1, n_problems),
                 "gate_open_steps": sum(s["gate_open"] for r in rolls for s in r["steps"]),
                 "rollout_steps": n_steps, "buffer_states": len(self.buffer)}
 

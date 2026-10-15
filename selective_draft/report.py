@@ -176,7 +176,9 @@ def section_guidance(run: str) -> str:
 
 
 def section_eval(run: str) -> str:
-    summ = {n: _load(os.path.join(run, "eval", n, "summary.json")) for n in ("base", "guided", "readout_only")}
+    root = os.path.join(run, "eval")
+    names = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))) if os.path.isdir(root) else []
+    summ = {n: _load(os.path.join(root, n, "summary.json")) for n in names}
     if not any(summ.values()):
         return "## Evaluation\n\nnot run.\n"
     rows = []
@@ -186,31 +188,41 @@ def section_eval(run: str) -> str:
                          v.get("tokens_per_step"), v.get("latency_median_s"), v.get("latency_p90_s"),
                          v.get("mean_effective_tokens"), v.get("truncation_rate"), v.get("gate_coverage_receiver_steps"),
                          v.get("gate_source_committed_frac")])
-    txt = ("## Evaluation (dev split, batch 1, timed; guided = stage-2 snapshot)\n\n"
-           + _table(["model", "protocol", "n", "acc", "acc SE", "steps/row", "tokens/step", "latency med (s)",
+    txt = ("## Evaluation (MATH-500 test, batch 1, greedy, timed; guided = stage-2 snapshot)\n\n"
+           + _table(["run", "protocol", "n", "acc", "acc SE", "steps/row", "tokens/step", "latency med (s)",
                      "latency p90 (s)", "eff. tokens", "truncated", "gate cov.", "source committed"], rows) + "\n")
-    # paired comparison
+
+    def paired(a_dir, b_dir):
+        out = []
+        for fn in sorted(os.listdir(os.path.join(root, b_dir))):
+            if not fn.startswith("rows_") or not os.path.exists(os.path.join(root, a_dir, fn)):
+                continue
+            a = {r["example_id"]: r for r in _jsonl(os.path.join(root, a_dir, fn))}
+            b = {r["example_id"]: r for r in _jsonl(os.path.join(root, b_dir, fn))}
+            ids = sorted(set(a) & set(b))
+            if not ids:
+                continue
+            both = sum(a[i]["is_correct"] and b[i]["is_correct"] for i in ids)
+            ao = sum(a[i]["is_correct"] and not b[i]["is_correct"] for i in ids)
+            bo = sum(b[i]["is_correct"] and not a[i]["is_correct"] for i in ids)
+            same = sum(a[i]["generation"] == b[i]["generation"] for i in ids)
+            dsteps = sum(b[i]["row_steps"] - a[i]["row_steps"] for i in ids) / len(ids)
+            dlat = sum(b[i]["latency_s"] - a[i]["latency_s"] for i in ids) / len(ids)
+            out.append([f"{b_dir} vs {a_dir}", fn[5:-6], len(ids), both, ao, bo, len(ids) - both - ao - bo, same,
+                        dsteps, dlat])
+        return out
+
     prow = []
-    base_dir, g_dir = os.path.join(run, "eval", "base"), os.path.join(run, "eval", "guided")
-    for fn in sorted(os.listdir(g_dir)) if os.path.isdir(g_dir) else []:
-        if not fn.startswith("rows_"):
-            continue
-        b = {r["example_id"]: r for r in _jsonl(os.path.join(base_dir, fn))}
-        g = {r["example_id"]: r for r in _jsonl(os.path.join(g_dir, fn))}
-        ids = sorted(set(b) & set(g))
-        if not ids:
-            continue
-        both = sum(b[i]["is_correct"] and g[i]["is_correct"] for i in ids)
-        bo = sum(b[i]["is_correct"] and not g[i]["is_correct"] for i in ids)
-        go = sum(g[i]["is_correct"] and not b[i]["is_correct"] for i in ids)
-        same = sum(b[i]["generation"] == g[i]["generation"] for i in ids)
-        dsteps = sum(g[i]["row_steps"] - b[i]["row_steps"] for i in ids) / len(ids)
-        dlat = sum(g[i]["latency_s"] - b[i]["latency_s"] for i in ids) / len(ids)
-        prow.append([fn[5:-6], len(ids), both, bo, go, len(ids) - both - bo - go, same, dsteps, dlat])
+    for n in names:
+        if n.startswith("guided_") and ("base_" + n[len("guided_"):]) in names:
+            prow += paired("base_" + n[len("guided_"):], n)
+        if n.startswith("readout_only_") and ("base_" + n[len("readout_only_"):]) in names:
+            prow += paired("base_" + n[len("readout_only_"):], n)
     if prow:
-        txt += ("\nPaired base vs guided on the same problems:\n\n"
-                + _table(["protocol", "n", "both right", "base only", "guided only", "both wrong", "identical text",
-                          "Δ steps/row (g−b)", "Δ latency s (g−b)"], prow) + "\n")
+        txt += ("\nPaired comparison on the same problems (second run vs first; readout_only must match base exactly, "
+                "its latency difference is the early-readout overhead):\n\n"
+                + _table(["pair", "protocol", "n", "both right", "first only", "second only", "both wrong",
+                          "identical text", "Δ steps/row", "Δ latency s"], prow) + "\n")
     return txt
 
 

@@ -208,3 +208,50 @@ def test_stage2_skips_states_whose_source_reselection_differs():
         rec = t.update()
         assert rec["local_states"] == 1 and rec["reselect_mismatch_total"] == 1
         assert os.path.exists(os.path.join(d, "reselect_mismatch_rank0.jsonl"))
+
+
+def test_training_rollouts_sample_and_retry_until_correct_like_thu():
+    # fake answers are never correct -> every problem uses all attempts and is dropped (THU: loss * 0)
+    cfg = fake_config(**{"training.rollout_temperature": 0.9, "training.max_rollout_attempts": 8,
+                         "training.filter_correct_only": True, "training.rollouts_per_update": 2,
+                         "guidance.message_threshold": 0.0})
+    with tempfile.TemporaryDirectory() as d:
+        gm, tok, _ = build(cfg)
+        t = GuidanceTrainer(gm, cfg, d, load_split(cfg, tok), tok)
+        stats = t.refresh()
+        assert stats["rollouts"] == 16 and stats["attempts_per_problem"] == 8 and stats["kept"] == 0
+        assert t.buffer == []
+        rolls = load_rollouts(os.path.join(d, "rollouts", "round-00000_rank0.pt"))
+        assert [r["meta"]["attempt"] for r in rolls[:8]] == list(range(8))
+        assert all(r["meta"]["generation"]["temperature"] == 0.9 for r in rolls)
+        assert cfg.generation.temperature == 0.0  # evaluation / collection stay greedy
+        texts = {r["generation"] for r in rolls[:8]}
+        assert len(texts) > 1, "sampled retries must differ"
+    # a correct first attempt stops the retries
+    cfg.training.filter_correct_only = False
+    with tempfile.TemporaryDirectory() as d:
+        gm, tok, _ = build(cfg)
+        t = GuidanceTrainer(gm, cfg, d, load_split(cfg, tok), tok)
+        assert t.refresh()["attempts_per_problem"] == 1
+
+
+def test_retry_validation_uses_the_rollout_temperature():
+    for over, ok in (({"training.max_rollout_attempts": 8}, False),
+                     ({"training.max_rollout_attempts": 8, "training.rollout_temperature": 0.9}, True),
+                     ({"training.rollout_temperature": -1.0}, False)):
+        try:
+            fake_config(**over)
+            assert ok, over
+        except ValueError:
+            assert not ok, over
+
+
+def test_stage2_trains_under_fixed_budget_decoding():
+    cfg = fake_config(**{"generation.mode": "fixed_budget", "generation.steps": 8, "guidance.message_threshold": 0.0,
+                         "training.rollout_temperature": 0.9, "training.max_rollout_attempts": 2})
+    with tempfile.TemporaryDirectory() as d:
+        gm, tok, _ = build(cfg)
+        t = GuidanceTrainer(gm, cfg, d, load_split(cfg, tok), tok)
+        rec = t.update()
+        assert rec.get("local_states", 0) > 0 and rec["grad_norm"] > 0
+        assert float(gm.injector.up.weight.abs().sum()) > 0

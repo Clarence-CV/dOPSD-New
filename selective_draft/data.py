@@ -171,7 +171,10 @@ def load_raw(cfg: DataConfig) -> Dict[str, List[Tuple[str, str, str]]]:
     from datasets import load_dataset
     out = {}
     for split in ("train", "test"):
-        ds = load_dataset(cfg.dataset_id, cfg.dataset_config, split=split, revision=cfg.dataset_revision)
+        if split == "test" and cfg.test_dataset_id:
+            ds = load_dataset(cfg.test_dataset_id, split="test")
+        else:
+            ds = load_dataset(cfg.dataset_id, cfg.dataset_config, split=split, revision=cfg.dataset_revision)
         if cfg.task == "math":
             out[split] = [(f"{split}-{i}", r["problem"], math_gold(r.get("answer"), r["solution"]) or "")
                           for i, r in enumerate(ds)]
@@ -200,6 +203,7 @@ def prepare_manifest(cfg: DataConfig, path: str, force: bool = False) -> dict:
     splits["test"] = [r[0] for r in raw["test"]]
     manifest = {
         "task": cfg.task, "dataset_id": cfg.dataset_id, "dataset_config": cfg.dataset_config,
+        "test_dataset_id": cfg.test_dataset_id,
         "dataset_revision": cfg.dataset_revision, "seed": cfg.seed,
         "sizes": {k: len(v) for k, v in splits.items()}, "splits": splits,
         "note": "train/dev/analysis are disjoint subsets of the official train split; test = official test",
@@ -223,6 +227,8 @@ def load_split(cfg: Config, tokenizer) -> List[Example]:
             manifest = json.load(f)
         if manifest["dataset_id"] != d.dataset_id or manifest["dataset_config"] != d.dataset_config:
             raise ValueError("manifest dataset does not match config")
+        if manifest.get("test_dataset_id") != d.test_dataset_id:
+            raise ValueError(f"manifest test_dataset_id {manifest.get('test_dataset_id')} != config {d.test_dataset_id}")
         if manifest.get("task", "gsm8k") != d.task:
             raise ValueError(f"manifest task {manifest.get('task', 'gsm8k')} != data.task {d.task}")
     ids = manifest["splits"][d.split]

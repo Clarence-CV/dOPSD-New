@@ -99,5 +99,5 @@ value. Its superiority to the other targets remains an experimental question.
 
 `tacc/selective_draft_math.slurm` runs data → parity smoke → collection → stage 1 → training-free diagnostics →
 stage 2 → guided states → timed eval → `REPORT.md` (`python -m selective_draft.report RUN_DIR`). Submit from WSL with
-`bash tacc/sync_and_submit_math.sh`. Design and budget: `results/selective_draft/math_prelim_v1.md`.
+`bash tacc/sync_and_submit_math.sh`. Design and budget: `results/selective_draft/math_prelim.md`.
 `data.task=math` uses `ankner/math-500`, the legacy MATH prompt, and `eval/parser_helper.is_equiv`.
