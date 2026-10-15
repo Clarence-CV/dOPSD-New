@@ -1,6 +1,6 @@
 # math_prelim_v1 — Selective Draft OPSD 首轮真机运行（MATH）
 
-**状态：已设计，待提交（2026-10-14）。** 本文件是这次运行的唯一记录：设计、预算、提交信息、检查清单、结果与问题都写在这里。自动生成的数字报告在 `$SCRATCH/dopsd/selective_draft/math_prelim_v1/REPORT.md`（备份 `$WORK/inf385t/results/selective_draft/math_prelim_v1/`）。
+**状态：已提交，job 3510902，排队中（2026-10-14 19:01 CDT）。** 本文件是这次运行的唯一记录：设计、预算、提交信息、检查清单、结果与问题都写在这里。自动生成的数字报告在 `$SCRATCH/dopsd/selective_draft/math_prelim_v1/REPORT.md`（备份 `$WORK/inf385t/results/selective_draft/math_prelim_v1/`）。
 
 ## 1. 目的
 
@@ -76,4 +76,13 @@ bash tacc/sync_and_submit_math.sh            # DRY=1 只同步不提交
 
 ## 7. 提交记录与结果
 
-（提交后填写：job ID、实际开始/结束、`sacct` 计费、结论与问题。）
+| 项 | 值 |
+|---|---|
+| job | 3510902，gpu-a100-small，申请 7:15:00 |
+| 提交 | 2026-10-14 19:01 CDT，代码 commit 见 `$WORK/inf385t/dOPSD-sd/.code_revision` |
+| 代码位置 | `$WORK/inf385t/dOPSD-sd`（rsync 副本，独立于 THUdOPSD 工作树） |
+| 输出 | `$SCRATCH/dopsd/selective_draft/math_prelim_v1/` |
+| 提交前核对 | qlimits：gpu-a100-small 1 节点、48 h 上限；pinned LLaDA revision 在缓存中；ankner/math-500 离线可读；allocation 余额 1846 SU（全班共享） |
+| 实际运行 / 计费 | （结束后用 sacct 填写） |
+
+结论与问题：（结束后填写）
