@@ -8,7 +8,7 @@
 |---|---|---|---|
 | math_prelim_v1 | 3510902 | 2026-10-14 排队中取消，未运行，0 SU | 512 tokens、阈值解码为主、dev 评测。用户要求对齐 THU d-OPSD 的训练与评测协议后作废 |
 | math_prelim_v2 | 3511305 | 2026-10-14 排队中取消，未运行，0 SU | 误用了 THU 的固定预算解码；用户要求固定阈值 |
-| math_prelim_v3 | 见 §7 | 当前 | 固定阈值解码 + THU 的其余训练/评测设置 |
+| math_prelim_v3 | 3511314 | 排队中 | 固定阈值解码 + THU 的其余训练/评测设置 |
 
 ## 1. 目的
 
@@ -92,4 +92,11 @@ RUN=math_prelim_v3 bash tacc/sync_and_submit_math.sh   # 本地；DRY=1 只同�
 
 ## 7. 提交记录与结果
 
-（提交后填写。）
+| 项 | 值 |
+|---|---|
+| job | 3511314，gpu-a100-small，申请 5:45:00 |
+| 提交 | 2026-10-14 23:12 CDT 左右，代码见 `$WORK/inf385t/dOPSD-sd/.code_revision` |
+| 输出 | `$SCRATCH/dopsd/selective_draft/math_prelim_v3/` |
+| 实际运行 / 计费 | （结束后用 sacct 填写） |
+
+结论与问题：（结束后填写）
