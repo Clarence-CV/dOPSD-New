@@ -16,7 +16,7 @@
 | 项 | 值 |
 |---|---|
 | 模型 | GSAI-ML/LLaDA-8B-Instruct，bf16，冻结；新增模块约 131 万参数 |
-| 数据 | `ankner/math-500` 的 train split，按 seed 42 划出互不重叠的 train / dev / analysis（6000/500/500）；其 test split（即 MATH-500）不碰 |
+| 数据 | `ankner/math-500` 的 train split（7500 行，字段 problem/level/type/solution，无 answer 字段），按 seed 42 划出互不重叠的 train / dev / analysis（6000/500/500）；gold = 解答中最后一个 `\boxed{}`；test split（500 行）不碰 |
 | Prompt | `eval/math500.py` 的系统提示逐字复制 + `<reasoning>` |
 | 判分 | 最后一个 `\boxed{}`，否则 `<answer>`；`eval/parser_helper.is_equiv`。与旧评测的差别：无 `\boxed` 时不再把整段文本当作预测 |
 | 解码 | 512 tokens，block 32，固定窗口，block_end 停止，greedy，阈值 0.9 为主协议 |
