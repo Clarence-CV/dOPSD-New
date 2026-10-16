@@ -52,7 +52,7 @@ fi
 S+=(--set "data.split_manifest=$SPLIT_MANIFEST")
 cp "$CONFIG" "$OUT/meta/config.json"
 cp "$SPLIT_MANIFEST" "$OUT/meta/split_manifest.json"
-git rev-parse HEAD > "$OUT/meta/git.txt" 2>/dev/null || true
+cp .code_revision "$OUT/meta/git.txt" 2>/dev/null || true  # rsync copy has no .git; written by the sync step
 git diff --stat >> "$OUT/meta/git.txt" 2>/dev/null || true
 python -m selective_draft.cli inspect "${S[@]}" --snapshot "$META_SNAPSHOT" > "$OUT/meta/inspect.json"
 
