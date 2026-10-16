@@ -59,6 +59,12 @@ class StateRecorder:
                     rec["source_entropy"] = float(-(p * (p.clamp_min(1e-30)).log()).sum())
                 if guidance.delta_norm is not None:
                     rec["delta_norm"] = float(guidance.delta_norm[b])
+                if guidance.group_pos is not None:
+                    valid = guidance.group_pos[b] >= 0
+                    rec["group_positions"] = guidance.group_pos[b, valid].to(torch.int16).cpu()
+                    gp = guidance.group_probs[b, valid]
+                    rec["group_confidences"] = gp.max(-1).values.float().cpu()
+                    rec["group_argmax"] = gp.argmax(-1).to(torch.int32).cpu()
             self.steps[b].append(rec)
 
     def finalize(self, result, extras: Optional[List[dict]] = None) -> List[dict]:

@@ -1,6 +1,6 @@
 """python -m selective_draft.cli <command> --config CONFIG [--set section.field=value ...]
 
-commands: prepare-data | inspect | collect | train-readout | diagnose | train-guidance | evaluate
+commands: prepare-data | inspect | collect | train-readout | diagnose | train-guidance | train-joint | evaluate
 Real-model commands run on a TACC compute node; the fake backend runs everything on CPU."""
 
 from __future__ import annotations
@@ -159,6 +159,8 @@ def cmd_train_readout(args):
 def cmd_train_guidance(args):
     from .training import GuidanceTrainer, run_training
     cfg = _cfg(args)
+    if cfg.teacher.mode == "joint":
+        raise SystemExit("use train-joint for the joint-reference objective")
     gm, tok, snap_id = _build(cfg, args, args.readout_snapshot)
     if not args.readout_snapshot and not args.resume:
         raise SystemExit("train-guidance needs --readout-snapshot (stage 1 output) or --resume")
@@ -166,6 +168,33 @@ def cmd_train_guidance(args):
     _dump_resolved(cfg, args.output_dir, {"command": "train-guidance", "readout_snapshot": snap_id, "n_examples": len(examples)})
     trainer = GuidanceTrainer(gm, cfg, args.output_dir, examples, tok)
     last = run_training(trainer, args.max_steps or cfg.training.max_steps, args.save_every or cfg.training.save_every, args.resume)
+    print(json.dumps({"final": last, "snapshot": os.path.join(args.output_dir, "snapshot")}, default=float))
+
+
+def cmd_train_joint(args):
+    from .joint import JointTrainer
+    from .training import run_training
+    cfg = _cfg(args)
+    if not args.readout_snapshot and not args.resume:
+        raise SystemExit("train-joint needs --readout-snapshot or --resume")
+    if args.readout_snapshot and args.resume:
+        raise SystemExit("choose either a readout snapshot for a fresh run or a joint checkpoint to resume")
+    if cfg.data.split != "train":
+        raise SystemExit("train-joint requires data.split=train")
+    if args.max_steps is not None:
+        cfg.training.max_steps = args.max_steps
+    if args.save_every is not None:
+        cfg.training.save_every = args.save_every
+    if args.readout_snapshot:
+        with open(os.path.join(args.readout_snapshot, "manifest.json")) as f:
+            if json.load(f).get("stage") != "readout":
+                raise SystemExit("--readout-snapshot must be a stage-readout snapshot (fresh zero injector)")
+    gm, tok, snap_id = _build(cfg, args, args.readout_snapshot)
+    examples = load_split(cfg, tok)
+    _dump_resolved(cfg, args.output_dir, {"command": "train-joint", "readout_snapshot": snap_id,
+                                        "n_examples": len(examples)})
+    trainer = JointTrainer(gm, cfg, args.output_dir, examples, tok)
+    last = run_training(trainer, cfg.training.max_steps, cfg.training.save_every, args.resume)
     print(json.dumps({"final": last, "snapshot": os.path.join(args.output_dir, "snapshot")}, default=float))
 
 
@@ -222,6 +251,10 @@ def main(argv=None):
     _common(p); p.add_argument("--states", nargs="+", required=True); p.add_argument("--snapshot")
     p.add_argument("--max-steps", type=int); p.add_argument("--save-every", type=int); p.add_argument("--resume")
     p.set_defaults(fn=cmd_train_readout)
+
+    p = sub.add_parser("train-joint", help="joint-reference sibling PI: pass@K continuations + fixed-point certification")
+    _common(p); p.add_argument("--readout-snapshot"); p.add_argument("--max-steps", type=int)
+    p.add_argument("--save-every", type=int); p.add_argument("--resume"); p.set_defaults(fn=cmd_train_joint)
 
     p = sub.add_parser("diagnose", help="readout | teacher | consistency reports on recorded states")
     _common(p); p.add_argument("--kind", required=True, choices=["readout", "teacher", "consistency"])

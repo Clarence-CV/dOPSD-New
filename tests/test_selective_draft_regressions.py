@@ -188,10 +188,6 @@ def test_distributed_sync_empty_rank_and_checkpoint_resume():
         mp.spawn(_distributed_worker, args=(os.path.join(d, "store"), os.path.join(d, "training")), nprocs=2, join=True)
 
 
-if __name__ == "__main__":
-    run_all(globals())
-
-
 def test_stage2_skips_states_whose_source_reselection_differs():
     cfg = fake_config(**{"guidance.message_threshold": 0.0, "training.rollouts_per_update": 1,
                          "training.states_per_rollout": 2, "training.max_consecutive_empty_updates": 5})
@@ -255,3 +251,7 @@ def test_stage2_trains_under_fixed_budget_decoding():
         rec = t.update()
         assert rec.get("local_states", 0) > 0 and rec["grad_norm"] > 0
         assert float(gm.injector.up.weight.abs().sum()) > 0
+
+
+if __name__ == "__main__":
+    run_all(globals())

@@ -101,3 +101,7 @@ value. Its superiority to the other targets remains an experimental question.
 stage 2 → guided states → timed eval → `REPORT.md` (`python -m selective_draft.report RUN_DIR`). Submit from WSL with
 `bash tacc/sync_and_submit_math.sh`. Design and budget: `results/selective_draft/math_prelim.md`.
 `data.task=math` uses `ankner/math-500`, the legacy MATH prompt, and `eval/parser_helper.is_equiv`.
+
+## Joint-reference OPSD（分支 `joint`）
+
+多位置同步 soft 消息、pass@8 同状态续写、leave-one-out Teacher 认证与共同参考蒸馏，见 [JOINT.md](JOINT.md)。入口是 `train-joint`，默认配置为 `configs/selective_draft/llada_joint_math.json`；原单 Anchor 流程保持可用。

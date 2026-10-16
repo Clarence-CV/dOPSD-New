@@ -97,6 +97,9 @@ def evaluate(gm: GuidedModel, tokenizer, examples: List[Example], cfg: Config, g
                     "gate_open_steps": res.stats["gate_open_steps"], "receiver_steps": res.stats["receiver_steps"],
                     "gate_source_committed": res.stats["gate_source_committed"],
                     "gate_source_identity_changed": res.stats["gate_source_identity_changed"],
+                    "group_tokens": res.stats["group_tokens"], "group_committed": res.stats["group_committed"],
+                    "group_identity_changed": res.stats["group_identity_changed"],
+                    "fallback_rows": res.stats["fallback_rows"],
                     "threshold": thr, "guidance_mode": guidance_mode, "snapshot_id": snapshot_id,
                 })
                 extras.append({"generation": text, "parsed_answer": pred, "is_correct": ok, "stats": res.stats})
@@ -136,6 +139,7 @@ def summarize_rows(rows: List[dict]) -> Dict[str, float]:
     toks = [r["effective_tokens"] for r in rows]
     recv = sum(r["receiver_steps"] for r in batch_rows)
     gates = sum(r["gate_open_steps"] for r in batch_rows)
+    group_tokens = sum(r.get("group_tokens", 0) for r in batch_rows)
     return {
         "n": n, "batches": nb, "accuracy": acc, "accuracy_se": (acc * (1 - acc) / n) ** 0.5,
         "latency_median_s": statistics.median(lat), "latency_p90_s": lat[min(nb - 1, int(0.9 * nb))],
@@ -147,4 +151,7 @@ def summarize_rows(rows: List[dict]) -> Dict[str, float]:
         "gate_coverage_receiver_steps": gates / max(1, recv),
         "gate_source_committed_frac": sum(r["gate_source_committed"] for r in batch_rows) / max(1, gates),
         "gate_source_identity_changed_frac": sum(r["gate_source_identity_changed"] for r in batch_rows) / max(1, gates),
+        "group_committed_frac": sum(r.get("group_committed", 0) for r in batch_rows) / max(1, group_tokens),
+        "group_identity_changed_frac": sum(r.get("group_identity_changed", 0) for r in batch_rows) / max(1, group_tokens),
+        "fallback_per_row": sum(r.get("fallback_rows", 0) for r in batch_rows) / n,
     }

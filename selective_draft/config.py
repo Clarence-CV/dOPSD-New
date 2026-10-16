@@ -46,7 +46,8 @@ class GuidanceConfig:
     injector_rank: int = 64
     message_threshold: float = 0.8
     scale: float = 1.0
-    mode: str = "off"  # off | readout_only | single_soft
+    mode: str = "off"  # off | readout_only | single_soft | group_readout | group_soft
+    group_size: int = 4  # group modes: highest-confidence MASK positions, no single-source gate
     readout_position_chunk: int = 8
     message_vocab_chunk: int = 16384
 
@@ -86,6 +87,9 @@ class TrainingConfig:
     learning_rate_guidance: float = 1e-4
     weight_decay: float = 0.0
     grad_clip: float = 1.0
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.999
+    warmup_ratio: float = 0.0  # linear warmup, then constant learning rate
     microbatch_states: int = 1
     states_per_rollout: int = 4
     rollouts_per_update: int = 1
@@ -97,7 +101,7 @@ class TrainingConfig:
     save_every: int = 0
     log_every: int = 1
     seed: int = 0
-    max_rollout_attempts: int = 1  # stage-2 retries per problem until correct (THU d-OPSD: pass@8); needs T > 0
+    max_rollout_attempts: int = 1  # legacy: retries until correct; joint: all K same-state continuations; needs T > 0
     rollout_temperature: Optional[float] = None  # stage-2 training rollouts only; None -> generation.temperature
     max_consecutive_empty_updates: int = 20  # stage 2 diagnostic exit: gate never opens / nothing survives filtering
 
@@ -195,7 +199,9 @@ class Config:
         _choice("data.prompt_recipe", d.prompt_recipe, {"legacy_boxed_reasoning", "legacy_math_boxed_reasoning", "fake"})
         if (d.dataset_id == "fake") != (d.task == "fake"):
             raise ValueError("data.task=fake goes with data.dataset_id=fake and vice versa")
-        _choice("guidance.mode", g.mode, {"off", "readout_only", "single_soft"})
+        _choice("guidance.mode", g.mode, {"off", "readout_only", "single_soft", "group_readout", "group_soft"})
+        if g.group_size < 2:
+            raise ValueError("guidance.group_size must be >= 2")
         if g.early_layer < 1:
             raise ValueError("guidance.early_layer must be >= 1 (1-based count of completed blocks)")
         if not (0.0 <= g.message_threshold <= 1.0):
@@ -224,13 +230,17 @@ class Config:
         if gen.remasking != "low_confidence":
             raise ValueError("only low_confidence remasking is supported")
         _choice("generation.autocast", gen.autocast, {"none", "bfloat16", "float16"})
-        _choice("teacher.mode", t.mode, {"realized", "argmax", "mc", "topk"})
+        _choice("teacher.mode", t.mode, {"realized", "argmax", "mc", "topk", "joint"})
+        if t.mode == "joint" and gen.mode != "threshold":
+            raise ValueError("teacher.mode=joint requires threshold decoding")
         if t.mc_samples < 1 or t.topk < 1 or t.candidate_batch_size < 1:
             raise ValueError("teacher.mc_samples / topk / candidate_batch_size must be >= 1")
         if tr.microbatch_states < 1 or tr.states_per_rollout < 1 or tr.rollouts_per_update < 1:
             raise ValueError("training batch sizes must be >= 1")
         if tr.refresh_updates < 1:
             raise ValueError("training.refresh_updates must be >= 1")
+        if not (0 <= tr.adam_beta1 < 1 and 0 <= tr.adam_beta2 < 1 and 0 <= tr.warmup_ratio <= 1):
+            raise ValueError("invalid Adam betas or warmup_ratio")
         if tr.max_rollout_attempts < 1:
             raise ValueError("training.max_rollout_attempts must be >= 1")
         if tr.rollout_temperature is not None and tr.rollout_temperature < 0:

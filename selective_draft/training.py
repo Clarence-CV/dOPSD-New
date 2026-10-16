@@ -10,6 +10,8 @@ import json
 import hashlib
 import os
 import time
+import math
+from datetime import timedelta
 from dataclasses import dataclass, replace
 from typing import Dict, List, Optional, Tuple
 
@@ -38,7 +40,9 @@ class DistCtx:
             torch.cuda.set_device(device)
         if self.enabled and not dist.is_initialized():
             backend = "nccl" if device is not None and device.type == "cuda" else "gloo"
-            dist.init_process_group(backend)
+            # Ranks only meet at update boundaries; joint updates (K continuations per state) can differ by
+            # more than the 10-minute default before the first collective.
+            dist.init_process_group(backend, timeout=timedelta(hours=2))
         if dist.is_initialized():
             self.world_size, self.rank = dist.get_world_size(), dist.get_rank()
             self.enabled = self.world_size > 1
@@ -122,7 +126,9 @@ class BaseTrainer:
         if not self.params:
             raise RuntimeError("no trainable parameters for this stage")
         lr = cfg.training.learning_rate_readout if self.stage == "readout" else cfg.training.learning_rate_guidance
-        self.optimizer = torch.optim.AdamW(self.params, lr=lr, weight_decay=cfg.training.weight_decay, betas=(0.9, 0.999))
+        self.learning_rate = lr
+        self.optimizer = torch.optim.AdamW(self.params, lr=lr, weight_decay=cfg.training.weight_decay,
+                                          betas=(cfg.training.adam_beta1, cfg.training.adam_beta2))
         seed = cfg.training.seed + 1000 * self.dist.rank
         self.gen_data = torch.Generator().manual_seed(seed)
         self.gen_teacher = torch.Generator().manual_seed(cfg.teacher.seed + 1000 * self.dist.rank)
@@ -184,6 +190,10 @@ class BaseTrainer:
             zero.backward()
         self.dist.all_reduce_grads(self.params)
         gnorm = torch.nn.utils.clip_grad_norm_(self.params, self.cfg.training.grad_clip)
+        warmup = math.ceil(self.cfg.training.max_steps * self.cfg.training.warmup_ratio)
+        lr = self.learning_rate * (min(1.0, int(self.state["optimizer_step"]) / warmup) if warmup else 1.0)
+        for group in self.optimizer.param_groups:
+            group["lr"] = lr
         self.optimizer.step()
         self.optimizer.zero_grad(set_to_none=True)
         self.state["optimizer_step"] = int(self.state["optimizer_step"]) + 1
@@ -191,7 +201,7 @@ class BaseTrainer:
         cur = self.gm.base_checksum()
         if any(abs(a - b) > 1e-3 * max(1.0, abs(a)) for a, b in zip(cur, self.base_checksum)):
             raise RuntimeError("frozen base parameters changed during training")
-        return {"grad_norm": float(gnorm), "global_states": global_n,
+        return {"grad_norm": float(gnorm), "global_states": global_n, "learning_rate": lr,
                 "local_loss_mean": local_sum_loss / max(1, local_n)}
 
     def _skip_update(self) -> None:
@@ -283,6 +293,7 @@ class ReadoutTrainer(BaseTrainer):
 # ----------------------------------------------------------------------------- stage 2
 class GuidanceTrainer(BaseTrainer):
     stage = "guidance"
+    guidance_mode = "single_soft"
 
     def __init__(self, gm, cfg, out_dir, examples: List[Example], tokenizer, dist_ctx=None):
         super().__init__(gm, cfg, out_dir, dist_ctx)
@@ -313,11 +324,11 @@ class GuidanceTrainer(BaseTrainer):
         # same code path either way; only the token choice is sampled.
         gen_cfg = replace(self.cfg.generation, temperature=self.cfg.rollout_temperature())
         meta = {"example_id": ex.example_id, "prompt_ids": ids[0].tolist(), "prompt_attention_mask": mask[0].tolist(),
-                "policy_version": int(self.state["optimizer_step"]), "guidance_mode": "single_soft",
+                "policy_version": int(self.state["optimizer_step"]), "guidance_mode": self.guidance_mode,
                 "generation": dict(gen_cfg.__dict__), "gold": ex.answer_value, "attempt": attempt,
                 "confidence_policy": "raw_model_probability"}
         rec = StateRecorder("state_only", self.gm.backend.mask_token_id, self.gm.backend.eos_token_id, ids.shape[1], [meta])
-        res = generate(self.gm, ids, mask, gen_cfg, guidance_mode="single_soft", recorder=rec,
+        res = generate(self.gm, ids, mask, gen_cfg, guidance_mode=self.guidance_mode, recorder=rec,
                        sample_rng=self.gen_sample)
         text = self.tokenizer.decode(res.completion_ids(0), skip_special_tokens=True)
         pred = parse_prediction(text, ex.task)
@@ -415,7 +426,6 @@ class GuidanceTrainer(BaseTrainer):
             rec["skipped"] = 1
             self.log(rec)
             return rec
-        self.state["consecutive_empty"] = 0
         # Backward each state immediately (one tail graph alive at a time); states skipped by the re-selection
         # check do not count, so gradients are rescaled by the global number of states actually used.
         local_sum, agg, used = 0.0, {}, 0
@@ -435,6 +445,7 @@ class GuidanceTrainer(BaseTrainer):
             rec["skipped"] = 1
             self.log(rec)
             return rec
+        self.state["consecutive_empty"] = 0
         for p in self.params:
             if p.grad is not None:
                 p.grad.div_(global_n)

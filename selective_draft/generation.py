@@ -144,7 +144,9 @@ class _NullCtx:
 def generate(gm: GuidedModel, prompt_ids: torch.Tensor, prompt_attention_mask: torch.Tensor,
              cfg: GenerationConfig, guidance_mode: Optional[str] = None, recorder=None,
              sample_rng: Optional[torch.Generator] = None, commit_threshold: Optional[float] = None,
-             steps: Optional[int] = None) -> GenerationResult:
+             steps: Optional[int] = None, initial_state: Optional[torch.Tensor] = None,
+             start_block: int = 0, initial_step: int = 0) -> GenerationResult:
+    """Decode from a prompt, or continue an actual threshold-decoding state without remasking known tokens."""
     backend = gm.backend
     device = prompt_ids.device
     MASK, EOS = backend.mask_token_id, backend.eos_token_id
@@ -160,8 +162,23 @@ def generate(gm: GuidedModel, prompt_ids: torch.Tensor, prompt_attention_mask: t
     if prompt_attention_mask.shape != prompt_ids.shape:
         raise ValueError("prompt_attention_mask must match prompt_ids")
 
-    init_len = G if cfg.window_mode == "fixed" else BL
-    x = torch.cat([prompt_ids, torch.full((B, init_len), MASK, dtype=torch.long, device=device)], dim=1)
+    if not 0 <= start_block < num_blocks:
+        raise ValueError("start_block outside generation window")
+    init_len = G if cfg.window_mode == "fixed" else (start_block + 1) * BL
+    if initial_state is None:
+        if start_block != 0 or initial_step != 0:
+            raise ValueError("resumed block/step requires initial_state")
+        x = torch.cat([prompt_ids, torch.full((B, init_len), MASK, dtype=torch.long, device=device)], dim=1)
+    else:
+        if cfg.mode != "threshold":
+            raise ValueError("state continuation currently requires threshold decoding")
+        if initial_state.shape != (B, P + init_len) or not torch.equal(initial_state[:, :P], prompt_ids):
+            raise ValueError("initial_state must preserve prompt and match the configured window")
+        if bool((initial_state[:, P:P + start_block * BL] == MASK).any()):
+            raise ValueError("completed blocks in initial_state must not contain MASK")
+        if cfg.stop_mode == "block_end" and bool((initial_state[:, P:P + start_block * BL] == EOS).any()):
+            raise ValueError("cannot continue beyond an already completed EOS block")
+        x = initial_state.to(device=device, dtype=torch.long).clone()
     attn = torch.cat([prompt_attention_mask.to(torch.long),
                       torch.ones(B, init_len, dtype=torch.long, device=device)], dim=1)
     active = torch.ones(B, dtype=torch.bool, device=device)
@@ -176,11 +193,12 @@ def generate(gm: GuidedModel, prompt_ids: torch.Tensor, prompt_attention_mask: t
     empty_budget_steps = 0
     gate_source_committed = 0
     gate_source_changed = 0
-    step_counter = torch.zeros(B, dtype=torch.long, device=device)
+    group_tokens = group_committed = group_changed = fallback_rows = 0
+    step_counter = torch.full((B,), initial_step, dtype=torch.long, device=device)
 
-    for blk in range(num_blocks):
+    for blk in range(start_block, num_blocks):
         bs, be = P + blk * BL, P + (blk + 1) * BL
-        if cfg.window_mode == "growing" and blk > 0:
+        if cfg.window_mode == "growing" and blk > start_block:
             x = torch.cat([x, torch.full((B, BL), MASK, dtype=torch.long, device=device)], dim=1)
             attn = torch.cat([attn, torch.ones(B, BL, dtype=torch.long, device=device)], dim=1)
         if cfg.mode == "fixed_budget":
@@ -219,6 +237,8 @@ def generate(gm: GuidedModel, prompt_ids: torch.Tensor, prompt_attention_mask: t
                                        MASK if cfg.forbid_mask_candidate else None)
             conf = torch.where(eligible, conf, torch.full_like(conf, -math.inf))
             commit = select_commits(eligible, conf, cfg.mode, tau, k_t)
+            if cfg.mode == "threshold":
+                fallback_rows += int((rows_with_masks & ~(eligible & (conf > tau)).any(1)).sum())
             if bool((cand[commit] == MASK).any()):
                 raise RuntimeError("sampler produced MASK as a committed candidate")
             if not bool(torch.isfinite(conf[commit]).all()):
@@ -230,6 +250,12 @@ def generate(gm: GuidedModel, prompt_ids: torch.Tensor, prompt_attention_mask: t
                 receiver_steps += int(((gi.n_eligible >= 2) & ctx.active_rows).sum())
                 n_open = int(gi.gate_open.sum())
                 gate_open_steps += n_open
+                if gi.group_pos is not None:
+                    rr, ss = ((gi.group_pos >= 0) & gi.gate_open[:, None]).nonzero(as_tuple=True)
+                    pp = gi.group_pos[rr, ss]
+                    group_tokens += len(pp)
+                    group_committed += int(commit[rr, pp].sum())
+                    group_changed += int((cand[rr, pp] != gi.group_probs[rr, ss].argmax(-1)).sum())
                 if n_open:
                     rows = gi.gate_open.nonzero(as_tuple=False).flatten()
                     pos = gi.source_pos[rows]
@@ -269,5 +295,7 @@ def generate(gm: GuidedModel, prompt_ids: torch.Tensor, prompt_attention_mask: t
         "gate_source_identity_changed": gate_source_changed, "mode": cfg.mode,
         "commit_threshold": tau if cfg.mode == "threshold" else None,
         "steps": total_steps if cfg.mode == "fixed_budget" else None,
+        "group_tokens": group_tokens, "group_committed": group_committed,
+        "group_identity_changed": group_changed, "fallback_rows": fallback_rows,
     }
     return GenerationResult(x, P, computed, effective, stop_reasons, row_steps, stats)

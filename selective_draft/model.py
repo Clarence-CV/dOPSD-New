@@ -3,6 +3,8 @@ scoped forward hook on the early-layer block. Modes:
   off           native forward, no hook (exact base output);
   readout_only  hook computes the early readout and picks the source, but does not touch hidden;
   single_soft   additionally adds the message at the source position when the gate is open.
+  group_readout selects the top-m communication group without changing hidden states;
+  group_soft    injects all group members' natural soft drafts simultaneously.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from .backends.base import Backend
 from .config import GuidanceConfig
 from .modules import EarlyReadoutAdapter, MessageInjector, soft_message
 
-MODES = ("off", "readout_only", "single_soft")
+MODES = ("off", "readout_only", "single_soft", "group_readout", "group_soft")
 
 
 @dataclass
@@ -38,6 +40,8 @@ class GuidanceSpec:
     gate_open: torch.Tensor  # [B] bool
     source_probs: Optional[torch.Tensor] = None  # [B, V] fp32 (rows with closed gate ignored)
     override_delta: Optional[torch.Tensor] = None  # [B, d]: replaces the injector output (oracle patch)
+    group_pos: Optional[torch.Tensor] = None  # [B, K], -1 padding
+    group_probs: Optional[torch.Tensor] = None  # [B, K, V], frozen natural drafts
 
 
 @dataclass
@@ -48,8 +52,10 @@ class GuidanceInfo:
     skip_reason: List[str]  # open / below_threshold / no_receiver / no_eligible / inactive / disabled
     n_eligible: torch.Tensor  # [B] long
     source_probs: Optional[torch.Tensor] = None  # [B, V] fp32, detached; only rows with gate open are filled
-    delta_norm: Optional[torch.Tensor] = None  # [B] fp32 (single_soft only)
+    delta_norm: Optional[torch.Tensor] = None  # [B] fp32; mean over group positions in group_soft
     source_argmax: Optional[torch.Tensor] = None  # [B] long, argmax r_A (-1 when no source)
+    group_pos: Optional[torch.Tensor] = None
+    group_probs: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -101,7 +107,7 @@ class GuidedModel(nn.Module):
         for p in self.readout.parameters():
             p.requires_grad_(stage == "readout")
         for p in self.injector.parameters():
-            p.requires_grad_(stage == "guidance")
+            p.requires_grad_(stage in ("guidance", "joint"))
         return [p for p in self.parameters() if p.requires_grad]
 
     def trainable_parameter_names(self) -> List[str]:
@@ -192,6 +198,21 @@ class GuidedModel(nn.Module):
             sc.hidden = h.detach()
         if sc.mode == "off":
             return None
+        if sc.mode in ("group_readout", "group_soft"):
+            info = self._select_group(h, sc.context) if sc.spec is None else self._group_info_from_spec(sc.spec, sc.context)
+            sc.info = info
+            if sc.mode == "group_readout" or not bool(info.gate_open.any()):
+                return None
+            valid = (info.group_pos >= 0) & info.gate_open[:, None]
+            rows, slots = valid.nonzero(as_tuple=True)
+            pos = info.group_pos[rows, slots]
+            msg = soft_message(info.group_probs[rows, slots], self.backend.embedding_weight(), self.cfg.message_vocab_chunk)
+            delta = (self.injector(h[rows, pos].detach(), msg) * self.cfg.scale).to(h.dtype)
+            add = torch.zeros_like(h).index_put((rows, pos), delta)
+            norms = torch.zeros(h.shape[0], dtype=torch.float32, device=h.device)
+            norms.index_add_(0, rows, delta.detach().float().norm(dim=-1))
+            info.delta_norm = norms / valid.sum(1).clamp_min(1)
+            return self.backend.with_block_hidden(output, h + add)
         info = self._select_source(h, sc.context) if sc.spec is None else self._info_from_spec(sc.spec, sc.context)
         sc.info = info
         if sc.mode == "readout_only":
@@ -254,6 +275,54 @@ class GuidedModel(nn.Module):
             else:
                 reasons.append("below_threshold")
         return GuidanceInfo(source_pos, source_conf, gate, reasons, n_elig, probs_out, None, source_argmax)
+
+    @torch.no_grad()
+    def _select_group(self, h: torch.Tensor, ctx: StepContext) -> GuidanceInfo:
+        """Top-m raw draft confidence; ties use ascending position. All messages precede injection."""
+        B, K, V = h.shape[0], self.cfg.group_size, self.backend.vocab_size
+        positions = torch.full((B, K), -1, dtype=torch.long, device=h.device)
+        probs = torch.zeros(B, K, V, dtype=torch.float32, device=h.device)
+        eligible = ctx.eligible_mask & ctx.active_rows[:, None]
+        for b in range(B):
+            idx = eligible[b].nonzero(as_tuple=False).flatten()
+            if idx.numel() < 2:
+                continue
+            # Keep only the best K rows across chunks rather than materialising all MASK vocabulary rows.
+            best_pos, best_probs = idx[:0], probs[b, :0]
+            for chunk in idx.split(self.cfg.readout_position_chunk):
+                rp = self.readout_log_probs(h[b, chunk]).exp()
+                best_pos = torch.cat([best_pos, chunk])
+                best_probs = torch.cat([best_probs, rp])
+                keep = best_probs.max(-1).values.argsort(descending=True, stable=True)[:K]
+                best_pos, best_probs = best_pos[keep], best_probs[keep]
+            positions[b, :len(best_pos)] = best_pos
+            probs[b, :len(best_pos)] = best_probs
+        spec = GuidanceSpec(positions[:, 0], (positions >= 0).sum(1) >= 2,
+                            probs[:, 0], group_pos=positions, group_probs=probs)
+        return self._group_info_from_spec(spec, ctx)
+
+    @staticmethod
+    def _group_info_from_spec(spec: GuidanceSpec, ctx: StepContext) -> GuidanceInfo:
+        if spec.group_pos is None or spec.group_probs is None:
+            raise ValueError("group guidance requires group_pos and group_probs")
+        pos, probs = spec.group_pos, spec.group_probs
+        if pos.ndim != 2 or probs.shape[:2] != pos.shape:
+            raise ValueError("invalid group guidance shape")
+        valid = pos >= 0
+        for b in range(pos.shape[0]):
+            pp = pos[b, valid[b]]
+            if len(pp) != len(pp.unique()) or bool((pp >= ctx.eligible_mask.shape[1]).any()):
+                raise ValueError("group positions must be unique and in range")
+            if len(pp) and (not bool(ctx.active_rows[b]) or not bool(ctx.eligible_mask[b, pp].all())):
+                raise ValueError("group positions must be active eligible MASK positions")
+        gate = valid.sum(1) >= 2
+        if not torch.equal(gate, spec.gate_open):
+            raise ValueError("group gate must agree with group size")
+        n = (ctx.eligible_mask & ctx.active_rows[:, None]).sum(1)
+        conf = probs[:, 0].max(-1).values
+        argmax = probs[:, 0].argmax(-1).masked_fill(~gate, -1)
+        reasons = ["open" if bool(g) else "no_group" for g in gate]
+        return GuidanceInfo(pos[:, 0], conf, gate, reasons, n, probs[:, 0], None, argmax, pos, probs)
 
     @staticmethod
     def _info_from_spec(spec: GuidanceSpec, ctx: Optional[StepContext]) -> GuidanceInfo:
