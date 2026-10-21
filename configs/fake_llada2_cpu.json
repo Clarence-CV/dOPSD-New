@@ -1,0 +1,11 @@
+{
+  "_comment": "CPU dry run with a tiny randomly initialised LLaDA2MoeModelLM built from the vendored official remote code (block-causal mask, MoE). Needs transformers 4.57.",
+  "model": {"backend": "fake_llada2", "dtype": "float32", "fake_kwargs": {}},
+  "data": {"task": "fake", "dataset_id": "fake", "test_dataset_id": null, "split": "train", "prompt_recipe": "fake"},
+  "guidance": {"early_layer": 2, "readout_rank": 8, "injector_rank": 8, "mode": "off", "readout_position_chunk": 3},
+  "generation": {"commit_threshold": 0.95, "max_new_tokens": 20, "block_length": 8},
+  "training": {"max_steps": 2, "warmup_updates": 2, "learning_rate_guidance": 0.01, "max_rollout_attempts": 3,
+               "max_positions_per_state": 6, "max_consecutive_empty_updates": 50},
+  "evaluation": {"warmup": 0},
+  "trace": {"level": "state_only"}
+}

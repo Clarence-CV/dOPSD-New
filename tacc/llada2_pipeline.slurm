@@ -36,10 +36,10 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 STAGES="${STAGES:-baseline}"
 SMOKE="${SMOKE:-0}"
-RUN="${RUN:-llada2_math_v1}"
+RUN="${RUN:-llada2_math_v2}"
 [[ "$SMOKE" == "1" ]] && RUN="${RUN}_smoke"
 OUT="${OUT:-$SCRATCH/dopsd/llada2/$RUN}"
-CONFIG="${CONFIG:-configs/selective_draft/llada2_mini_math.json}"
+CONFIG="${CONFIG:-configs/llada2_mini_math.json}"
 EVAL_SPLIT="${EVAL_SPLIT:-test}"
 EVAL_SUBSPLIT="${EVAL_SUBSPLIT:-}"
 N_EVAL="${N_EVAL:-}"
@@ -84,7 +84,7 @@ par_eval() { local name=$1; shift
     local bad=0; for p in "${pids[@]}"; do wait "$p" || bad=1; done   # let surviving shards finish before failing
     (( bad == 0 )) || { echo "eval $name: a shard failed; see $OUT/logs/eval_${name}_*.log (rerun resumes)"; exit 1; }
     (( NG > 1 )) && python -m selective_draft.cli merge-eval --output-dir "$OUT/eval/$name" > "$OUT/logs/merge_$name.log"
-    stamp "eval $name: $(python -c "import json;s=json.load(open('$OUT/eval/$name/summary.json'))['summaries'];print({k:{m:round(v[m],4) for m in ('n','accuracy','accuracy_legacy','mean_row_steps','mean_effective_tokens','truncation_rate','latency_median_s')} for k,v in s.items()})")"
+    stamp "eval $name: $(python -c "import json;s=json.load(open('$OUT/eval/$name/summary.json'))['summaries'];print({k:{m:round(v[m],4) for m in ('n','accuracy','mean_row_steps','mean_output_tokens','truncation_rate','tpf_dinfer_mean','latency_median_s')} for k,v in s.items()})")"
 }
 
 # collect NAME SPLIT SUBSPLIT: greedy base rollouts with full state traces, sharded over the GPUs (resumable)
@@ -261,8 +261,10 @@ m = lambda d, k: sum(d[i][k] for i in ids) / n
 out = {"n": n, "base_acc": m(b, "is_correct"), "joint_acc": m(j, "is_correct"), "fixed": fix, "broken": brk,
        "base_mean_steps": m(b, "row_steps"), "joint_mean_steps": m(j, "row_steps"),
        "base_mean_latency_s": m(b, "latency_s"), "joint_mean_latency_s": m(j, "latency_s"),
-       "base_tokens_per_step": sum(b[i]["effective_tokens"] for i in ids) / sum(b[i]["row_steps"] for i in ids),
-       "joint_tokens_per_step": sum(j[i]["effective_tokens"] for i in ids) / sum(j[i]["row_steps"] for i in ids)}
+       "base_tpf_dinfer_mean": m(b, "tpf_dinfer"), "joint_tpf_dinfer_mean": m(j, "tpf_dinfer"),
+       "base_mean_nfe_dinfer": m(b, "nfe_dinfer"), "joint_mean_nfe_dinfer": m(j, "nfe_dinfer"),
+       "base_truncation": sum(b[i]["stop_reason"] == "length" for i in ids) / n,
+       "joint_truncation": sum(j[i]["stop_reason"] == "length" for i in ids) / n}
 json.dump(out, open(sys.argv[3], "w"), indent=1)
 print("paired", json.dumps(out))
 PY

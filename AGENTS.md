@@ -1,6 +1,6 @@
 # dOPSD 项目记忆
 
-更新：2026-10-18。这是简短常驻上下文；研究文档已合并，细节按下面的来源核对，用户最新指令优先。
+更新：2026-10-21。这是简短常驻上下文；研究文档已合并，细节按下面的来源核对，用户最新指令优先。
 
 ## 沟通偏好（2026-10-17）
 
@@ -9,7 +9,7 @@
 ## 研究目标与当前状态
 
 - 本 repo 基于清华的 d-OPSD（Learning from the Self-future），研究用 on-policy self-distillation / privileged information（PI）改善 dLLM 步内并行 token 决策的协调性，争取更好的准确率—实际时延权衡。
-- 已运行模型是 LLaDA-8B-Instruct；近期 Joint 主任务为 MATH，GSM8K 是历史实验与后续迁移任务。下一版计划迁移 LLaDA2.0-mini，mini-CAP 为后续参照；尚未运行 mini。
+- 已运行模型是 LLaDA-8B-Instruct；近期 Joint 主任务为 MATH，GSM8K 是历史实验与后续迁移任务。当前工作是迁移到 LLaDA2.0-mini（mini-CAP 为后续参照）；mini 的 baseline 尚未跑完。
 - 核心缺口：双向 attention 已让位置共享上下文，但同一步 Receiver 的最终预测没有再条件于 Anchor 本次实际确定的 token identity。不要把问题表述为“token 之间没有 attention / 信息共享”。
 - THU self-future PI 与 sibling PI 不同：前者提供后续 block 的部分最终 rollout；后者在相同真实去噪状态 S_t 中只揭开同批 Anchor A=a，其他位置不变。
 - 当前主线是 Joint sibling PI：早层 soft draft 消息注入，冻结尾层传播，末层决定提交；不锁定硬 Anchor。Early Commitment / Partial Loop 是历史候选，尚无有效性结论，不自动恢复为主线。
@@ -32,22 +32,19 @@
 
 ## 最新下一步（记录计划，不自动执行）
 
-1. 先跑mini base MATH：block32、T0、confidence>.95、每block steps32。**2026-10-19用户定：max_new_tokens=2048（已试过不截断）**；官方MATH prompt/scorer未公开，暂用KLASS system prompt + KLASS判分（legacy判分并列核对），不再因官方recipe缺项阻塞后续阶段。
-2. 全层诊断决定readout层，不预设L16/L17；64题验证＋64题一次确认。G绑定官方.95，全部过阈位置入组，无固定4人预算；真实mini记录消息路径与MoE尾层梯度。
-3. 用户已接受root_success_v2：训练T=.9，每题从prompt最多8次、首次答对即停；成功轨迹均匀抽1个有组state，用自身最终tuple做LOO；失败跳过，无额外续写或重抽。6000训练池首遍不放回，按贡献题、SU与独立dev选checkpoint。
-4. 首轮一条主线；后续需要机制归因时做同数据LOO-KL/参考CE及同伴消息干预。相关工作与历史否定结论见研究概览；Partial Loop等不自动加入实验。
+1. 先跑mini base MATH-500，**设置完全对齐DMax对LLaDA2.0-mini的评测**（2026-10-21用户定）：普通阈值解码（不是DMax自己的软并行解码）、block 32从位置0起算、T=0、置信度>=min(0.95, 最高-1e-5)、argmax为MASK的位置不参与、block末遇EOS才停、总长度向下取整到32（max_new_tokens=2048）、输出=去掉所有EOS后的全部token、DMax prompt与判分、NFE/TPF按DMax评测脚本口径。参照数字：DMax 75.8%/TPF 2.58（长度2048、dInfer、2×H200），CForce 84.2%/TPF 2.99（长度4096、SGLang）。kernel层面（融合MoE、TP、compile）不追求一致：只有bf16舍入噪声，用户决定不装dInfer/sglang。
+2. baseline看过再决定后续；然后全层诊断决定readout层（不预设层号），64题验证＋64题一次确认，G绑定同一阈值，全部过阈位置入组。
+3. root_success_v2：训练T=.9，每题从prompt最多8次、首次答对即停；成功轨迹均匀抽1个有组state，用自身最终tuple做LOO；失败跳过，无额外续写或重抽。6000训练池首遍不放回，按贡献题、SU与独立dev选checkpoint。
+4. 首轮一条主线；后续需要机制归因时做同数据LOO-KL/参考CE及同伴消息干预。
 
 ## 当前代码与资料入口
 
-- `selective_draft/`：已实现单源与Joint-v1流水线；用法见 `selective_draft/README.md`、`selective_draft/JOINT.md`，CPU测试在 `tests/test_selective_draft_*.py`。mini（`backend=llada2_mini`）与root_success_v2已实现并有CPU测试（`tests/test_selective_draft_llada2.py`，用真实mini源码的小模型），作业 `tacc/llada2_pipeline.slurm`；**尚未在真实权重/GPU上运行**，用法见 `selective_draft/README.md` 末节。
-- `doc/Selective_Draft_OPSD.md`：合并后的研究概览，含方法演进、数学修正、实验与诊断；替代旧分散研究文档。
-- `doc/llada2-mini_handoff.md`：开工/同事交接短版；`doc/llada2-mini_engineering_plan.md`：详细规格与官方链接；`doc/decoding_protocol_audit_zh.md`：跨仓库参数核对。
-- `results/joint/` 保存Joint结果、逐题案例与续写审计；历史现象分析已并入研究概览，`doc/` 只保留上述四份文档。
-- `results/pipeline_gsm_20261002/SUMMARY.md`、`metrics.csv`、`sweep.csv`：历史复现结果与指标；`results/EXPERIMENTS.md`：TACC 作业、实际耗时与 SU 账本。
-- `d-opsd/d_opsd_train.py`、`d_opsd_trainer.py`、`d_opsd_config.py`：实际训练入口、trainer、配置；`d-opsd/run/*/opsd.sh`：任务启动脚本。
-- `eval/generate.py`：固定预算/阈值生成；`analysis/llada_trace.py`、`pi_sibling_analysis.py` 等：真实轨迹与反事实分析。
-- `tacc/`：环境与 Slurm 脚本；`env.yml`、`used-env.txt`、`tacc/setup_env.sh`：依赖/环境来源。
-- `CLAUDE.md`：已完整阅读，TACC 操作手册与工作约定可参考；A 部分代码地图、Dream/旧 trajectory 入口、environment.yaml 版本等属于旧背景，与当前 repo 不一致。其 steps==tokens 的旧要求不作为本并行研究的不变量。
+- 仓库已精简为LLaDA2.0-mini项目（分支 `llada2-mini`）。`selective_draft/`：backend.py（块因果attention、可微MoE、前缀KV cache）、generation.py（DMax评测语义的解码器，文件头写了每条规则）、model.py（hook与组规则）、training.py / root_joint.py（readout与Joint训练）、evaluation.py（分片可续跑评测）、layer_profile.py（选层与readout选点）、scoring.py + vendor/dmax_val_math.py（DMax判分原样）、cli.py。CPU测试 `tests/test_{decoder,guidance,training,data}.py`（需transformers 4.57，用真实mini源码的小模型），集群作业 `tacc/llada2_pipeline.slurm`。**真实权重/GPU上只跑过baseline的前几题**（job 3519705，OOM后失败），后续阶段从未在GPU上运行。
+- LLaDA-8B那一版（含KLASS适配、单source流程、same_state_v1 Joint、THU d-OPSD复现代码）在 tag `llada-joint-v1` / 分支 `joint`、`THUdOPSD`，需要时从那里取。
+- `doc/Selective_Draft_OPSD.md`：研究概览；`doc/llada2-mini_handoff.md`：交接短版；`doc/llada2-mini_engineering_plan.md`：详细规格与官方链接（其中EOS/长度/KLASS相关条目已被DMax对齐决定取代，以代码头注释为准）；`doc/decoding_protocol_audit_zh.md`：跨仓库参数核对。
+- `results/EXPERIMENTS.md`：TACC作业、实际耗时与SU账本；`results/joint/` 等：LLaDA-8B历史结果。
+- `README.md`：用法；`requirements-llada2.txt` / `env-llada2-freeze.txt`：环境；`tacc/qstatus.sh <JOBID>`：排队位置与粗估开始时间。
+- `CLAUDE.md`（不入库）：TACC 操作手册与工作约定；其 A 部分代码地图是旧背景，与当前 repo 不一致。
 
 ## 操作约定
 
@@ -55,4 +52,4 @@
 - 延续 CLAUDE.md 的 TACC 约定：默认单节点 gpu-a100（3×A100-40GB），单卡评测可用 gpu-a100-small；先小规模验证再批作业。提交前报告预算，单作业估算 >30 SU 或多节点/gpu-h100 时先询问用户，已有明确授权优先。
 - 费率是 2026-09-20 的历史值；使用前按官方文档/qlimits 复核。SU 按实际运行时间计算，至少计 15 分钟；结束后用 sacct 记账，47.38 SU 是截至 2026-10-02 的历史累计，不是当前余额。
 - TACC 缓存/环境在 WORK，作业/输出在 SCRATCH，重要产物备份到 WORK；计算节点设置 HF_HUB_OFFLINE=1、WANDB_MODE=offline 和显式 HF_HOME。沿用 `tacc/env.sh`。
-- 不在登录节点跑训练/推理；环境有 TRL 补丁和 TACC CUDA/GLIBC 适配，不随意升级依赖。脚本配置保持环境变量可覆盖的风格。
+- 不在登录节点跑训练/推理；不随意升级依赖（见 requirements-llada2.txt）。脚本配置保持环境变量可覆盖的风格。

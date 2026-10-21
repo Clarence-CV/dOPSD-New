@@ -4,12 +4,13 @@
 
 目标：先把mini基线跑对，再用更简单的采样训练，最后判断准确率、实际时延和训练成本。当前LLaDA Joint试验的主要信号是时延约减少11%、步数约减少18%；准确率34.4%→35.0%仅净增3/500题，尚不能认定稳定涨点。
 
-## 0. 2026-10-19 实施状态（代码已写，未上 GPU）
+## 0. 2026-10-21 实施状态（代码已精简，baseline尚未跑完）
 
-- 用户决定：`max_new_tokens=2048`（已试过不截断）；官方MATH prompt/scorer缺项不再阻塞，暂用KLASS system prompt + KLASS判分，legacy判分并列保存。下文“不默认2048”“先完成官方复现再训练”两条按此修订。
-- 已实现：mini backend（block-causal mask、MoE可微等价路径）、绝对block解码器（与官方HF generate在argmax修正下逐token一致）、`prefix_complete_eos`、阈值组规则、子划分、分片续跑评测、全层诊断与层规则、readout门槛/选点、root_success_v2训练；CPU测试与本地全流程模拟通过。
-- 入口：`configs/selective_draft/llada2_mini_math.json`、`tacc/setup_llada2_env.sh`（登录节点一次）、`tacc/llada2_pipeline.slurm`（`STAGES`/`SMOKE`）、`tacc/sync_and_submit_llada2.sh`。说明见 `selective_draft/README.md` 末节。
-- 未实现：prefix KV cache（W9）、真实mini消息路径干预审计（§11.3）、Math-Verify、mini-CAP/THU对照。
+- 评测设置**完全对齐DMax对LLaDA2.0-mini的评测**（普通阈值解码，不是其软并行解码）：block 32从位置0起算、T=0、置信度>=min(0.95, 最高-1e-5)、argmax为MASK的位置不参与、block末遇EOS才停、总长度向下取整到32（max_new_tokens=2048）、输出=去掉所有EOS后的全部token、DMax prompt与判分、NFE/TPF按其评测脚本口径。下文旧条目（“不默认2048”“只认EOS左侧无MASK才停”“先官方复现再训练”“KLASS prompt/判分”）已被此取代。kernel层面（融合MoE/TP/compile）不追求一致，不装dInfer。
+- 仓库已精简到LLaDA2-mini项目（分支`llada2-mini`）；LLaDA-8B一版见tag `llada-joint-v1`。入口、命令、测试见根目录`README.md`。
+- 已实现并有CPU测试：mini backend（块因果attention、可微MoE、前缀KV cache且与无cache逐token一致）、上述解码器、阈值组规则、子划分、分片续跑评测、全层诊断与层规则、readout门槛/选点、root_success_v2训练、单作业流水线。
+- 实测信息：job 3519705（2.81 SU）失败于GPU显存碎片（已加expandable_segments）；每次前向约0.5秒、与长度几乎无关（MoE逐专家循环开销，未profile）；KLASS prompt下约三成题写满2048，DMax prompt下的截断率待baseline确认。
+- 未实现：真实mini上的消息路径/干预审计（§11.3）、mini-CAP/THU对照。
 
 ## 1. 下一版要解决什么
 

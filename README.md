@@ -1,77 +1,51 @@
-<div align="center">
-    <h1>Learning from the Self-future: On-policy Self-distillation for dLLMs</h1>
-    <p>We introduce <strong>d-OPSD</strong>, the first OPSD framework tailored for dLLMs</p>
-</div>
+# Joint-reference OPSD on LLaDA2.0-mini
 
+On-policy self-distillation for block-diffusion LLMs: the frozen model drafts early (a readout of an intermediate
+layer), the confident drafts of one denoising step are fed back as soft messages to each other through a small
+trainable injector, and a leave-one-out Teacher (same frozen model, siblings revealed) supplies the training target.
+Goal: a better accuracy–latency trade-off of parallel decoding (more tokens per forward at equal accuracy).
+Method and evidence: [doc/Selective_Draft_OPSD.md](doc/Selective_Draft_OPSD.md); engineering plan:
+[doc/llada2-mini_engineering_plan.md](doc/llada2-mini_engineering_plan.md); handoff: [doc/llada2-mini_handoff.md](doc/llada2-mini_handoff.md).
 
-<div align="center">
-  <hr width="100%">
-</div>
+## Layout
 
-**Updates:**
+| path | what |
+|---|---|
+| `selective_draft/` | the package (about 2k lines): backend, decoder, guided model, trainers, evaluation, CLI |
+| `selective_draft/vendor/` | DMax's MATH scorer (Apache-2.0, unmodified) and the official LLaDA2.0-mini remote code used by the CPU tests |
+| `configs/` | `llada2_mini_math.json` (the real run), `fake_llada2_cpu.json` (CPU toy model), the question-level split manifest |
+| `tests/` | CPU contract tests on a tiny model built from the official LLaDA2.0-mini code |
+| `tacc/` | Lonestar6: environment, one resumable pipeline job, sync/submit, queue status |
+| `results/`, `doc/` | experiment records and the written plan |
 
-* 17-08-2026: **Very important**, fix the trl bug and the warning format bug.
-* 17-06-2026: We released [our paper](https://arxiv.org/abs/2606.18195)
-* 15-06-2026: We released d-OPSD code.
-<!-- * 04-11-2025: We released [our paper](https://dllm-reasoning.github.io/media/preprint.pdf) and [project page](https://dllm-reasoning.github.io). Additionally, the SFT code was open-sourced. -->
+## Decoding protocol (DMax's evaluation of LLaDA2.0-mini)
 
-<div align="center">
-  <hr width="100%">
-</div>
+Block 32 counted from position 0 (the prompt tail may share the first block), greedy, commit every position with
+confidence >= min(0.95, best - 1e-5) (positions whose argmax is MASK are not eligible), stop after the block that
+contains an EOS, total length floored to a multiple of 32 (`max_new_tokens` 2048), completion = every generated
+non-EOS token, DMax's prompt (`<problem>\nLet's think step by step, and put your final answer within \boxed{}.`) and
+DMax's scorer. NFE and TPF follow DMax's eval script (`nfe_dinfer`, `tpf_dinfer_mean`). Details and the reasons for
+each choice are in the header of `selective_draft/generation.py`. An optional dInfer-style prefix KV cache
+(`generation.cache_mode=prefix`) is token-identical to recomputing the prefix on the toy model (tested); it is off by
+default and only used with guidance off.
 
+## Use
 
-## d-OPSD Environment
+```bash
+# CPU tests (need transformers 4.57; plain scripts, no pytest)
+for t in decoder guidance training data; do python tests/test_$t.py; done
 
-The environment configuration of d-OPSD is almost the same as the RLVR baseline [diffu-GRPO](https://github.com/dllm-reasoning/d1). However, there are some minor but important differences.
-
-To set up the environment, first run (pay attention to the **trl version**):
-```
-cd d-opsd-code
-conda env create -f env.yml
-conda activate dOPSD
-```
-
-**Second, very important**, please go to your environment `/path/to/env/trl/trainer/grpo_trainer.py`, and modify line 424 to the followings:
-```
-# modify
-# possible_values = [n_gen for n_gen in range(2, global_batch_size + 1) if (global_batch_size) % n_gen == 0]
-possible_values = [n_gen for n_gen in range(1, global_batch_size + 1) if (global_batch_size) % n_gen == 0]
-```
-
-Or you can choose to simply replace the original `/path/to/env/trl/trainer/grpo_trainer.py` with what we offered in this repo.
-
-**Third, very important**, please replace the original `/path/to/env/trl/trainer/utils.py` with what we offered in this repo. This aligns the teacher-prompt-output via rewriting the function `print_prompt_completions_sample`. Alternatively, you can copy and paste from Line 1694-1757.
-
-Finally, we give the real environment configuration we used for all experiments in `used-env.txt`, for debugging convenience. This configuration works like an alarm for Python 3.10 and CUDA 12.9, with A100 / H100 / B200 GPUs.
-
-
-## d-OPSD Training
-
-All training code is inside the `d-opsd` directory. To reproduce the training, run:
-```
-cd d-opsd-code
-bash d-opsd/run/gsm/opsd.sh
-bash d-opsd/run/math/opsd.sh
-bash d-opsd/run/countdown/opsd.sh
-bash d-opsd/run/sudoku/opsd.sh
+# Lonestar6: once on a login node, then one resumable job per stage list
+bash tacc/setup_llada2_env.sh
+STAGES="baseline" SBATCH_ARGS="-t 10:00:00" bash tacc/sync_and_submit_llada2.sh
+STAGES="states profile readout joint jointeval" bash tacc/sync_and_submit_llada2.sh   # after the baseline looks right
+bash tacc/qstatus.sh <JOBID>                       # queue position and a rough start estimate
 ```
 
-Note: **Very important**, for A100 / H100 GPUs, the `BATCH_DIVIDE` in the script should be set to 8 to prevent OOM. For B200, the existing setting `BATCH_DIVIDE=4` works well.
+`tacc/llada2_pipeline.slurm` documents the stages (baseline, states, profile, readout, joint, jointeval), their
+stopping rules, and the knobs; resubmitting the same `RUN` resumes. CLI: `python -m selective_draft.cli --help`.
 
+## History
 
-## d-OPSD Evaluation
-
-All evaluation code is inside the `eval` directory. First replace the checkpoint path in the scripts with your own, and run:
-```
-cd d-opsd-code
-bash eval/run/gsm/opsd.sh
-bash eval/run/math/opsd.sh
-bash eval/run/countdown/opsd.sh
-bash eval/run/sudoku/opsd.sh
-```
-
-This evaluation saves the generations. Second, replace the generation directory in `eval/parse_and_get_acc.py` with your owns, and run the following to obtain the accuracy:
-```
-cd d-opsd-code/eval
-python parse_and_get_acc.py
-```
+LLaDA-8B Joint-reference OPSD (MATH v1: accuracy flat, steps -18%, latency -11%) is preserved at tag
+`llada-joint-v1` (branch `joint`); the THU d-OPSD reproduction lives on branch `THUdOPSD`.

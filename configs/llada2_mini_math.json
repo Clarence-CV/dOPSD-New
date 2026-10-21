@@ -1,0 +1,32 @@
+{
+  "_comment": "LLaDA2.0-mini on MATH with DMax's evaluation setup: block 32 from position 0, greedy, confidence >= 0.95 (else the best), block-end EOS stop, total length floored to a multiple of 32 (max_new_tokens 2048, fixed by the user 2026-10-19), DMax prompt and scorer. early_layer stays null until layer-profile writes layer_decision.json. root_success_v2 settings are used by train-joint only.",
+  "model": {
+    "path": "inclusionAI/LLaDA2.0-mini", "backend": "llada2_mini",
+    "revision": "dad945cac317da394b390f82c7b40691d8a881ed", "dtype": "bfloat16",
+    "attn_implementation": "sdpa", "mask_token_id": 156895, "eos_token_id": 156892
+  },
+  "data": {
+    "task": "math", "dataset_id": "ankner/math-500",
+    "dataset_revision": "412eb03a7193aed402c5e4009fc958c66e61b937",
+    "test_dataset_id": "HuggingFaceH4/MATH-500", "test_dataset_revision": "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be",
+    "split": "dev", "split_manifest": "configs/math_split_manifest_v1.json",
+    "prompt_recipe": "dmax_boxed", "manifest_sizes": {"train": 6000, "dev": 500, "analysis": 500}, "seed": 42
+  },
+  "guidance": {
+    "early_layer": null, "readout_rank": 64, "injector_rank": 64, "mode": "off", "scale": 1.0,
+    "readout_position_chunk": 8, "message_vocab_chunk": 16384
+  },
+  "generation": {
+    "commit_threshold": 0.95, "max_new_tokens": 2048, "block_length": 32, "temperature": 0.0,
+    "early_stop": true, "cache_mode": "none"
+  },
+  "training": {
+    "rollout_temperature": 0.9, "max_rollout_attempts": 8,
+    "learning_rate_guidance": 1e-4, "learning_rate_readout": 1e-4,
+    "adam_beta1": 0.9, "adam_beta2": 0.99, "weight_decay": 0.1, "grad_clip": 0.2,
+    "warmup_updates": 5, "max_positions_per_state": 32, "readout_states_per_rollout": 1,
+    "max_steps": 50, "save_every": 25, "max_consecutive_empty_updates": 200, "seed": 42
+  },
+  "evaluation": {"commit_thresholds": [0.95], "warmup": 1, "repeats": 1},
+  "trace": {"level": "none"}
+}

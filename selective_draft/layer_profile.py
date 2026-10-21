@@ -6,8 +6,9 @@ so every checkpoint and every layer is measured on exactly the same token states
 block's MASK positions of that state. Questions (= rollouts) are the bootstrap unit.
 
 layer_profile: native logit lens r_l = lm_head(norm(h_l)) at every layer, q0 = final distribution.
-  stable crossing of a final-confident position i (q0 candidate confidence > tau): first layer l such that for
-  every k >= l the layer-k candidate equals the q0 candidate with layer-k probability > tau.
+  stable crossing of a final-confident position i (q0 candidate confidence >= tau, the decoder's own comparison):
+  first layer l such that for every k >= l the layer-k candidate equals the q0 candidate with layer-k probability >= tau.
+  A position whose argmax is MASK is never a candidate (dInfer).
   C_l = per question, share of final-confident positions with crossing <= l (questions with none are reported
   separately); l_best = argmax_{l<L} C_l; l_star = earliest l < L with C_l >= C_best - SE_boot(C_best).
 readout_metrics / select_readout: §7.1.1 table and the §7.1.2 gates and one-standard-error choice.
@@ -58,7 +59,13 @@ def _mean(xs) -> float:
     return sum(xs) / len(xs) if xs else float("nan")
 
 
-def _capture_all_layers(gm: GuidedModel, x: torch.Tensor, attn: torch.Tensor, pos: torch.Tensor):
+def _cand_conf(log_probs: torch.Tensor, mask_id: int):
+    """Greedy candidate and raw confidence; positions whose argmax is MASK count as not confident."""
+    cand, conf = choose_tokens(log_probs, 0.0, None)
+    return cand, conf.masked_fill(cand == mask_id, 0.0)
+
+
+def _capture_all_layers(gm: GuidedModel, x: torch.Tensor, pos: torch.Tensor):
     hidden = {}
     handles = []
     for li, blk in enumerate(gm.backend.blocks, start=1):
@@ -66,7 +73,7 @@ def _capture_all_layers(gm: GuidedModel, x: torch.Tensor, attn: torch.Tensor, po
             hidden[li] = gm.backend.block_hidden(output)[0, pos].detach()
         handles.append(blk.register_forward_hook(hook))
     try:
-        logits = gm.base_forward(x[None], attn[None])
+        logits = gm.base_forward(x)
     finally:
         for h in handles:
             h.remove()
@@ -77,25 +84,24 @@ def _capture_all_layers(gm: GuidedModel, x: torch.Tensor, attn: torch.Tensor, po
 def layer_profile(gm: GuidedModel, picks: List[Tuple[dict, dict]], cfg: Config, tau: Optional[float] = None):
     be = gm.backend
     L, MASK, EOS = be.n_layers, be.mask_token_id, be.eos_token_id
-    role_end = getattr(be, "role_end_token_id", None)
     tau = float(cfg.generation.commit_threshold if tau is None else tau)
     logV = math.log(be.vocab_size)
     per_layer = {l: {"entropy": [], "maxprob": [], "above_tau": [], "kl": [], "agree": [], "group2": [],
-                     "precision": [], "recall": [], "mask_pred": [], "eos_pred": [], "role_end_pred": []}
+                     "precision": [], "recall": [], "mask_pred": [], "eos_pred": []}
                  for l in range(1, L + 1)}
     questions = []
     for roll, step in picks:
-        x, attn, _, pos = state_tensors(roll, step, gm.device)
-        logits, hidden = _capture_all_layers(gm, x, attn, pos)
+        x, _, pos = state_tensors(roll, step, gm.device)
+        logits, hidden = _capture_all_layers(gm, x, pos)
         log_q0 = F.log_softmax(logits.float(), -1)
-        cand0, conf0 = choose_tokens(log_q0, 0.0, None, MASK)
-        final_hi = conf0 > tau
+        cand0, conf0 = _cand_conf(log_q0, MASK)
+        final_hi = conf0 >= tau
         ok = torch.zeros(L + 1, len(pos), dtype=torch.bool, device=gm.device)
         for l in range(1, L + 1):
             log_r = F.log_softmax(be.project(hidden[l]).float(), -1)
             r = log_r.exp()
-            cand, conf = choose_tokens(log_r, 0.0, None, MASK)
-            hi = conf > tau
+            cand, conf = _cand_conf(log_r, MASK)
+            hi = conf >= tau
             raw_arg = log_r.argmax(-1)
             d = per_layer[l]
             d["entropy"].append(float((-(r * log_r).sum(-1) / logV).mean()))
@@ -110,9 +116,7 @@ def layer_profile(gm: GuidedModel, picks: List[Tuple[dict, dict]], cfg: Config, 
                 d["recall"].append(float((hi[final_hi] & (cand[final_hi] == cand0[final_hi])).float().mean()))
             d["mask_pred"].append(float((raw_arg == MASK).float().mean()))
             d["eos_pred"].append(float((raw_arg == EOS).float().mean()))
-            if role_end is not None and role_end < be.vocab_size:
-                d["role_end_pred"].append(float((raw_arg == role_end).float().mean()))
-            ok[l] = (cand == cand0) & (r.gather(-1, cand0[:, None]).squeeze(-1) > tau)
+            ok[l] = (cand == cand0) & (r.gather(-1, cand0[:, None]).squeeze(-1) >= tau)
         # stable crossing: first l with ok[k] for every k >= l (suffix-and), L if only the last layer holds
         suffix = torch.ones(len(pos), dtype=torch.bool, device=gm.device)
         crossing = torch.full((len(pos),), L + 1, dtype=torch.long, device=gm.device)
@@ -158,13 +162,13 @@ def readout_metrics(gm: GuidedModel, picks: List[Tuple[dict, dict]], cfg: Config
     tau = float(cfg.generation.commit_threshold if tau is None else tau)
     rows = []
     for roll, step in picks:
-        x, attn, ctx, pos = state_tensors(roll, step, gm.device)
-        out = gm(x[None], attn[None], context=ctx, mode="off", capture_hidden=True)
+        x, ctx, pos = state_tensors(roll, step, gm.device)
+        out = gm(x, context=ctx, mode="off", capture_hidden=True)
         log_q0 = F.log_softmax(out.logits[0, pos].float(), -1)
         log_r = gm.readout_log_probs(out.hidden_early[0, pos])
-        cand0, _ = choose_tokens(log_q0, 0.0, None, MASK)
-        cand, conf = choose_tokens(log_r, 0.0, None, MASK)
-        sel = conf > tau
+        cand0, _ = _cand_conf(log_q0, MASK)
+        cand, conf = _cand_conf(log_r, MASK)
+        sel = conf >= tau
         kl = (log_q0.exp() * (log_q0 - log_r)).sum(-1)
         q0_at = log_q0.exp().gather(-1, cand[:, None]).squeeze(-1)
         row = {"example_id": roll["meta"].get("example_id"), "is_correct": roll.get("is_correct"),

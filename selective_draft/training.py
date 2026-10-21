@@ -1,4 +1,4 @@
-"""Stage 1 (EarlyReadout) and stage 2 (MessageInjector) training loops.
+"""Shared training machinery (distributed helpers, state tensors, base trainer) and stage 1 (EarlyReadout).
 
 Single process by default; with WORLD_SIZE > 1 the loop uses manual gradient all-reduce
 (the modules are ~1M parameters) so that no forward has to go through a DDP wrapper and the
@@ -10,9 +10,8 @@ import json
 import hashlib
 import os
 import time
-import math
 from datetime import timedelta
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -21,13 +20,8 @@ import torch.nn.functional as F
 
 from .checkpoint import load_checkpoint, save_checkpoint, save_snapshot
 from .config import Config
-from .data import Example, tokenize_prompts
-from .scoring import grade
-from .generation import generate
-from .losses import forward_kl
-from .model import GuidanceSpec, GuidedModel, StepContext
-from .teacher import teacher_targets
-from .trace import StateRecorder, load_rollouts, save_rollouts
+from .model import GuidedModel, StepContext
+from .trace import load_rollouts
 
 
 # ----------------------------------------------------------------------------- distributed
@@ -82,44 +76,30 @@ class StateRef:
 
 
 def state_tensors(roll: dict, step: dict, device, commit_threshold: Optional[float] = None,
-                  max_new_tokens: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor, StepContext, torch.Tensor]:
-    """-> x [N], attn [N], context (B=1), eligible absolute positions [n].
-    commit_threshold feeds the threshold group rule; max_new_tokens limits groups to [P, P + max_new_tokens)
-    exactly as the block-causal decoder did when the state was recorded."""
-    meta = roll["meta"]
-    prompt = torch.tensor(meta["prompt_ids"], dtype=torch.long, device=device)
-    pmask = torch.tensor(meta["prompt_attention_mask"], dtype=torch.long, device=device)
-    state = step["state"].to(device=device, dtype=torch.long)
-    x = torch.cat([prompt, state])
-    attn = torch.cat([pmask, torch.ones_like(state)])
+                  end: Optional[int] = None) -> Tuple[torch.Tensor, StepContext, torch.Tensor]:
+    """-> x [1, N], context (B=1), eligible absolute positions [n]. commit_threshold feeds the group rule; `end`
+    (absolute) limits groups to positions before the floored generation end, as the decoder did when recording."""
+    prompt = torch.tensor(roll["meta"]["prompt_ids"], dtype=torch.long, device=device)
+    x = torch.cat([prompt, step["state"].to(device=device, dtype=torch.long)])[None]
     elig_pos = step["eligible_positions"].to(device=device, dtype=torch.long)
-    elig = torch.zeros(1, x.numel(), dtype=torch.bool, device=device)
+    elig = torch.zeros(1, x.shape[1], dtype=torch.bool, device=device)
     elig[0, elig_pos] = True
-    guidance_mask = None
-    if max_new_tokens is not None:
-        guidance_mask = elig & (torch.arange(x.numel(), device=device) < prompt.numel() + int(max_new_tokens))[None]
+    guidance_mask = None if end is None else elig & (torch.arange(x.shape[1], device=device) < int(end))[None]
     ctx = StepContext(eligible_mask=elig, active_rows=torch.ones(1, dtype=torch.bool, device=device),
                       block_start=torch.tensor([step["block_start"]], device=device),
                       block_end=torch.tensor([step["block_end"]], device=device),
                       step_id=torch.tensor([step["step_id"]], device=device),
                       commit_threshold=commit_threshold, guidance_mask=guidance_mask)
-    return x, attn, ctx, elig_pos
+    return x, ctx, elig_pos
 
 
-def collect_state_refs(rollouts: List[dict], filter_correct_only: bool, require_gate: bool,
-                       per_rollout: Optional[int] = None) -> List[StateRef]:
-    """per_rollout=k: k states per rollout, uniform without replacement, seeded by the example id (plan §6.5)."""
+def collect_state_refs(rollouts: List[dict], filter_correct_only: bool, per_rollout: Optional[int] = None) -> List[StateRef]:
+    """per_rollout=k: k states per rollout, uniform without replacement, seeded by the example id."""
     refs = []
     for roll in rollouts:
         if filter_correct_only and not roll.get("is_correct", False):
             continue
-        steps = []
-        for step in roll["steps"]:
-            if len(step["eligible_positions"]) == 0:
-                continue
-            if require_gate and not (step["gate_open"] and len(step["eligible_positions"]) >= 2):
-                continue
-            steps.append(step)
+        steps = [step for step in roll["steps"] if len(step["eligible_positions"]) > 0]
         if per_rollout is not None and len(steps) > per_rollout:
             seed = int(hashlib.sha256(f"readout-train-v1|{roll['meta'].get('example_id', '')}".encode()).hexdigest()[:15], 16)
             keep = torch.randperm(len(steps), generator=torch.Generator().manual_seed(seed))[:per_rollout]
@@ -147,9 +127,7 @@ class BaseTrainer:
                                           betas=(cfg.training.adam_beta1, cfg.training.adam_beta2))
         seed = cfg.training.seed + 1000 * self.dist.rank
         self.gen_data = torch.Generator().manual_seed(seed)
-        self.gen_teacher = torch.Generator().manual_seed(cfg.teacher.seed + 1000 * self.dist.rank)
-        self.gen_sample = torch.Generator(device=self.device).manual_seed(seed + 1)
-        self.generators = {"data": self.gen_data, "teacher": self.gen_teacher, "sample": self.gen_sample}
+        self.generators = {"data": self.gen_data}
         self.state: Dict[str, object] = {"stage": self.stage, "optimizer_step": 0, "rollout_round": 0,
                                          "data_cursor": 0, "states_seen": 0, "skipped_updates": 0,
                                          "consecutive_empty": 0}
@@ -206,12 +184,8 @@ class BaseTrainer:
             zero.backward()
         self.dist.all_reduce_grads(self.params)
         gnorm = torch.nn.utils.clip_grad_norm_(self.params, self.cfg.training.grad_clip)
-        step = int(self.state["optimizer_step"])
-        if self.cfg.training.warmup_updates is not None:  # plan §7.5: first update already has a non-zero lr
-            lr = self.learning_rate * min(1.0, (step + 1) / self.cfg.training.warmup_updates)
-        else:
-            warmup = math.ceil(self.cfg.training.max_steps * self.cfg.training.warmup_ratio)
-            lr = self.learning_rate * (min(1.0, step / warmup) if warmup else 1.0)
+        step = int(self.state["optimizer_step"])  # the first update already has a non-zero lr
+        lr = self.learning_rate * min(1.0, (step + 1) / self.cfg.training.warmup_updates)
         for group in self.optimizer.param_groups:
             group["lr"] = lr
         self.optimizer.step()
@@ -240,7 +214,7 @@ class ReadoutTrainer(BaseTrainer):
     def __init__(self, gm, cfg, out_dir, rollout_paths: List[str], dist_ctx=None):
         super().__init__(gm, cfg, out_dir, dist_ctx)
         rollouts = [r for p in rollout_paths for r in load_rollouts(p)]
-        self.refs = collect_state_refs(rollouts, cfg.training.filter_correct_only, require_gate=False,
+        self.refs = collect_state_refs(rollouts, cfg.training.filter_correct_only,
                                        per_rollout=cfg.training.readout_states_per_rollout)
         if not self.refs:
             raise RuntimeError("no training states (check filter_correct_only and the rollout files)")
@@ -270,9 +244,9 @@ class ReadoutTrainer(BaseTrainer):
         return out
 
     def state_loss(self, ref: StateRef) -> Tuple[torch.Tensor, Dict[str, float]]:
-        x, attn, ctx, elig_pos = state_tensors(ref.roll, ref.step, self.device)
+        x, ctx, elig_pos = state_tensors(ref.roll, ref.step, self.device)
         with torch.no_grad():
-            out = self.gm(x[None], attn[None], context=ctx, mode="off", capture_hidden=True)
+            out = self.gm(x, context=ctx, mode="off", capture_hidden=True)
             logits, H = out.logits[0], out.hidden_early[0]
         positions = elig_pos
         mx = self.cfg.training.max_positions_per_state
@@ -284,11 +258,9 @@ class ReadoutTrainer(BaseTrainer):
         kl = (log_q0.exp() * (log_q0 - log_r)).sum(-1)
         with torch.no_grad():
             maxr = log_r.exp().max(-1).values
-            agree = (log_r.argmax(-1) == log_q0.argmax(-1)).float()
-            src = int(maxr.argmax())
-            stats = {"top1_agree": float(agree.mean()), "source_agree": float(agree[src]),
-                     "source_maxr": float(maxr[src]), "gate_open_0.8": float(maxr[src] >= 0.8 and positions.numel() >= 2),
-                     "n_positions": float(positions.numel())}
+            tau = self.cfg.generation.commit_threshold
+            stats = {"top1_agree": float((log_r.argmax(-1) == log_q0.argmax(-1)).float().mean()),
+                     "draft_above_tau": float((maxr >= tau).float().mean()), "n_positions": float(positions.numel())}
         return kl.mean(), stats
 
     def update(self) -> Dict[str, float]:
@@ -307,173 +279,6 @@ class ReadoutTrainer(BaseTrainer):
                 agg[k] = agg.get(k, 0.0) + v / len(refs)
         rec = self._apply_update(local_sum, len(refs), global_n)
         rec.update({"loss": local_sum / max(1, len(refs)), **agg})
-        self.log(rec)
-        return rec
-
-
-# ----------------------------------------------------------------------------- stage 2
-class GuidanceTrainer(BaseTrainer):
-    stage = "guidance"
-    guidance_mode = "single_soft"
-
-    def __init__(self, gm, cfg, out_dir, examples: List[Example], tokenizer, dist_ctx=None):
-        super().__init__(gm, cfg, out_dir, dist_ctx)
-        self.examples = examples[self.dist.rank::self.dist.world_size]
-        if self.dist.sum_scalar(len(self.examples), self.device) == 0:
-            raise RuntimeError("no training examples on any rank")
-        self.data_signature = hashlib.sha256(json.dumps(
-            [(e.example_id, e.prompt_text, e.answer_value) for e in self.examples]).encode()).hexdigest()
-        self.tokenizer = tokenizer
-        self.order = torch.randperm(len(self.examples), generator=self.gen_data).tolist()
-        self.buffer: List[StateRef] = []
-        self.rollout_dir = os.path.join(out_dir, "rollouts")
-        os.makedirs(self.rollout_dir, exist_ok=True)
-
-    def _next_example(self) -> Example:
-        c = int(self.state["data_cursor"])
-        if c >= len(self.order):
-            self.order = torch.randperm(len(self.examples), generator=self.gen_data).tolist()
-            c = 0
-        self.state["data_cursor"] = c + 1
-        return self.examples[self.order[c]]
-
-    @torch.no_grad()
-    def rollout(self, ex: Example, attempt: int = 0, sample_rng: Optional[torch.Generator] = None) -> dict:
-        ids, mask = tokenize_prompts(self.tokenizer, [ex.prompt_text], self.device)
-        # Training rollouts may sample (training.rollout_temperature, e.g. 0.9 as in THU d-OPSD) while collection,
-        # diagnostics and evaluation stay on generation.temperature. Source selection, gate and injection are the
-        # same code path either way; only the token choice is sampled.
-        gen_cfg = replace(self.cfg.generation, temperature=self.cfg.rollout_temperature())
-        meta = {"example_id": ex.example_id, "prompt_ids": ids[0].tolist(), "prompt_attention_mask": mask[0].tolist(),
-                "policy_version": int(self.state["optimizer_step"]), "guidance_mode": self.guidance_mode,
-                "generation": dict(gen_cfg.__dict__), "gold": ex.answer_value, "question": ex.question, "attempt": attempt,
-                "confidence_policy": "raw_model_probability"}
-        rec = StateRecorder("state_only", self.gm.backend.mask_token_id, self.gm.backend.eos_token_id, ids.shape[1], [meta])
-        res = generate(self.gm, ids, mask, gen_cfg, guidance_mode=self.guidance_mode, recorder=rec,
-                       sample_rng=self.gen_sample if sample_rng is None else sample_rng)
-        text = self.tokenizer.decode(res.completion_ids(0), skip_special_tokens=True)
-        g = grade(ex.question, ex.answer_value, text, ex.task, self.cfg.data.scorer)
-        roll = rec.finalize(res, [{"generation": text, "parsed_answer": g["parsed_answer"], "is_correct": g["is_correct"],
-                                   "verdicts": g["verdicts"], "stats": res.stats}])[0]
-        return roll
-
-    def refresh(self) -> Dict[str, float]:
-        self.buffer = []
-        rolls, kept = [], 0
-        for _ in range(self.cfg.training.rollouts_per_update if self.examples else 0):
-            ex = self._next_example()
-            chosen = None
-            for attempt in range(self.cfg.training.max_rollout_attempts):
-                roll = self.rollout(ex, attempt)
-                rolls.append(roll)
-                if roll["is_correct"] or not self.cfg.training.filter_correct_only:
-                    chosen = roll
-                    break
-            if chosen is None:
-                continue
-            kept += 1
-            cands = [s for s in chosen["steps"] if s["gate_open"] and len(s["eligible_positions"]) >= 2]
-            if not cands:
-                continue
-            k = min(self.cfg.training.states_per_rollout, len(cands))
-            pick = torch.randperm(len(cands), generator=self.gen_data)[:k].tolist()
-            self.buffer.extend(StateRef(chosen, cands[i], int(self.state["optimizer_step"])) for i in pick)
-        rnd = int(self.state["rollout_round"])
-        save_rollouts(os.path.join(self.rollout_dir, f"round-{rnd:05d}_rank{self.dist.rank}.pt"), rolls)
-        self.state["rollout_round"] = rnd + 1
-        n_steps = sum(len(r["steps"]) for r in rolls)
-        n_problems = self.cfg.training.rollouts_per_update if self.examples else 0
-        return {"problems": n_problems, "rollouts": len(rolls), "kept": kept,
-                "correct": sum(r["is_correct"] for r in rolls),
-                "attempts_per_problem": len(rolls) / max(1, n_problems),
-                "gate_open_steps": sum(s["gate_open"] for r in rolls for s in r["steps"]),
-                "rollout_steps": n_steps, "buffer_states": len(self.buffer)}
-
-    def state_loss(self, ref: StateRef) -> Tuple[torch.Tensor, Dict[str, float]]:
-        step, roll = ref.step, ref.roll
-        x, attn, ctx, elig_pos = state_tensors(roll, step, self.device)
-        P = roll["meta"]["prompt_len"]
-        with torch.no_grad():
-            cap = self.gm(x[None], attn[None], context=ctx, mode="readout_only", capture_hidden=True)
-        gi = cap.guidance
-        cap_hidden_norm = None
-        A = int(gi.source_pos[0])
-        self.state["reselect_checked"] = int(self.state.get("reselect_checked", 0)) + 1
-        if A != int(step["source_pos"]) or not bool(gi.gate_open[0]):
-            # bf16 kernels can flip a near-tie / a confidence right at the gate between the batched rollout and
-            # this re-forward. Skip such states (never train on a different A than the rollout used), count them,
-            # and stop only if it is frequent, which would mean the readout is not frozen or not deterministic.
-            n_bad = int(self.state.get("reselect_mismatch", 0)) + 1
-            self.state["reselect_mismatch"] = n_bad
-            with open(os.path.join(self.out_dir, f"reselect_mismatch_rank{self.dist.rank}.jsonl"), "a") as f:
-                f.write(json.dumps({"optimizer_step": int(self.state["optimizer_step"]),
-                                    "example_id": roll["meta"].get("example_id"), "step_id": step["step_id"],
-                                    "recorded_A": int(step["source_pos"]), "recorded_conf": step["source_confidence"],
-                                    "now_A": A, "now_conf": float(gi.source_confidence[0]),
-                                    "now_gate": bool(gi.gate_open[0])}) + "\n")
-            checked = int(self.state["reselect_checked"])
-            if checked >= 20 and n_bad / checked > 0.2:
-                raise RuntimeError(f"source re-selection mismatch in {n_bad}/{checked} states")
-            return None, {}
-        r_A = gi.source_probs[0]
-        cap_hidden_norm = float(cap.hidden_early[0, A].float().norm())  # scale reference for delta_norm
-        receivers = elig_pos[elig_pos != A]
-        realized = int(roll["final_state"][A - P])
-        tgt = teacher_targets(self.gm, x, attn, A, receivers, r_A, realized, self.cfg.teacher, self.gen_teacher)
-        spec = GuidanceSpec(source_pos=gi.source_pos, gate_open=gi.gate_open, source_probs=gi.source_probs)
-        out = self.gm(x[None], attn[None], context=ctx, mode="single_soft", spec=spec)
-        kl = forward_kl(tgt.log_q, out.logits[0, receivers])
-        with torch.no_grad():
-            p_off = F.softmax(cap.logits[0, A].float(), -1)
-            p_on = F.softmax(out.logits[0, A].float(), -1)
-            stats = {"n_receivers": float(receivers.numel()), "teacher_forwards": float(tgt.info["teacher_forwards"]),
-                     "delta_norm": float(out.guidance.delta_norm[0]), "source_conf_off": float(p_off.max()),
-                     "source_conf_on": float(p_on.max()), "source_argmax_changed": float(p_on.argmax() != p_off.argmax()),
-                     "readout_argmax_eq_realized": float(int(r_A.argmax()) == realized),
-                     "final_argmax_eq_realized": float(int(p_off.argmax()) == realized),
-                     "policy_lag": float(int(self.state["optimizer_step"]) - ref.policy_version),
-                     "source_hidden_norm": float(cap_hidden_norm) if cap_hidden_norm is not None else float("nan")}
-        return kl.mean(), stats
-
-    def update(self) -> Dict[str, float]:
-        rec: Dict[str, float] = {}
-        step = int(self.state["optimizer_step"])
-        if not self.buffer or step % self.cfg.training.refresh_updates == 0:
-            rec.update({f"refresh_{k}": v for k, v in self.refresh().items()})
-        refs, self.buffer = self.buffer, []
-        global_n = self.dist.sum_scalar(len(refs), self.device)
-        if global_n == 0:
-            self._skip_update()
-            rec["skipped"] = 1
-            self.log(rec)
-            return rec
-        # Backward each state immediately (one tail graph alive at a time); states skipped by the re-selection
-        # check do not count, so gradients are rescaled by the global number of states actually used.
-        local_sum, agg, used = 0.0, {}, 0
-        for ref in refs:
-            loss, st = self.state_loss(ref)
-            if loss is None:
-                continue
-            loss.backward()
-            local_sum += float(loss.detach())
-            used += 1
-            for k, v in st.items():
-                agg[k] = agg.get(k, 0.0) + v
-        agg = {k: v / max(1, used) for k, v in agg.items()}
-        global_n = self.dist.sum_scalar(used, self.device)
-        if global_n == 0:
-            self._skip_update()
-            rec["skipped"] = 1
-            self.log(rec)
-            return rec
-        self.state["consecutive_empty"] = 0
-        for p in self.params:
-            if p.grad is not None:
-                p.grad.div_(global_n)
-        losses = [None] * used
-        rec.update(self._apply_update(local_sum, len(losses), global_n))
-        rec.update({"loss": local_sum / max(1, len(losses)), "local_states": len(losses),
-                    "reselect_mismatch_total": int(self.state.get("reselect_mismatch", 0)), **agg})
         self.log(rec)
         return rec
 

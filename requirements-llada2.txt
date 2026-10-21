@@ -1,0 +1,9 @@
+# LLaDA2.0-mini environment (python 3.10). torch is installed first from the cu128 index (tacc/setup_llada2_env.sh):
+#   pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cu128
+# Pins are the versions of the environment the Lonestar6 jobs ran in; the mini remote code targets transformers 4.57.1.
+transformers==4.57.1
+datasets==3.3.2
+numpy==1.25.0
+tqdm
+# DMax's MATH scorer (selective_draft/vendor/dmax_val_math.py) needs math_verify, sympy and antlr4 4.11
+math-verify[antlr4_11_0]==0.9.0

@@ -66,7 +66,6 @@ def snapshot_manifest(gm: GuidedModel, cfg: Config, stage: str, extra: Optional[
         "model_path": cfg.model.path, "model_revision": cfg.model.revision, "backend": gm.backend.name,
         "backend_info": gm.backend.describe(), "early_layer": cfg.guidance.early_layer,
         "readout_rank": cfg.guidance.readout_rank, "injector_rank": cfg.guidance.injector_rank,
-        "group_size": cfg.guidance.group_size, "guidance_mode": cfg.guidance.mode,
         "d_model": gm.backend.d_model, "vocab_size": gm.backend.vocab_size, "dtype": cfg.model.dtype,
         "module_param_counts": n_train, "module_params_total": sum(n_train.values()),
     }
@@ -109,8 +108,6 @@ def load_snapshot(snap_dir: str, gm: GuidedModel, cfg: Config, strict: bool = Tr
         "model_revision": (man.get("model_revision"), cfg.model.revision),
     }
     bad = {k: v for k, v in checks.items() if v[0] != v[1]}
-    if man.get("stage") == "joint" and man.get("group_size") != cfg.guidance.group_size:
-        bad["group_size"] = (man.get("group_size"), cfg.guidance.group_size)
     if bad:
         msg = f"snapshot {snap_dir} does not match the current config: {bad}"
         if strict:
