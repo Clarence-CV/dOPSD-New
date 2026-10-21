@@ -64,15 +64,17 @@ class GenerationConfig:
 
 @dataclass
 class TrainingConfig:
-    learning_rate_readout: float = 1e-4
+    learning_rate_readout: float = 5e-4
     learning_rate_guidance: float = 1e-4
     weight_decay: float = 0.1
-    grad_clip: float = 0.2
+    grad_clip: float = 1.0
     adam_beta1: float = 0.9
     adam_beta2: float = 0.99
     warmup_updates: int = 5  # lr = base * min((step+1)/warmup, 1)
+    readout_lr_schedule: str = "cosine"  # readout only: cosine to 0 over the run's max_steps after warmup | constant
+    # (the Joint injector stays constant so a longer JOINT_STEPS can resume the same schedule)
     microbatch_states: int = 1  # readout: states per rank per update
-    readout_states_per_rollout: Optional[int] = 1  # readout: states drawn per recorded rollout (null = all)
+    readout_states_per_rollout: Optional[int] = 4  # readout: states drawn per recorded rollout (null = all)
     max_positions_per_state: int = 32  # readout: uniform subsample of in-block MASK positions
     filter_correct_only: bool = False  # readout: keep only correct rollouts
     loo_batch_size: int = 1  # leave-one-out Teacher inputs per forward
@@ -197,6 +199,7 @@ class Config:
             raise ValueError("generation.dinfer_expected_tpf / dinfer_unroll must be >= 1")
         if tr.microbatch_states < 1 or tr.loo_batch_size < 1 or tr.max_rollout_attempts < 1:
             raise ValueError("training batch sizes and attempts must be >= 1")
+        _choice("training.readout_lr_schedule", tr.readout_lr_schedule, {"cosine", "constant"})
         if tr.warmup_updates < 1:
             raise ValueError("training.warmup_updates must be >= 1")
         if not (0 <= tr.adam_beta1 < 1 and 0 <= tr.adam_beta2 < 1):

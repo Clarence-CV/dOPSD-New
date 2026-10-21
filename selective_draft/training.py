@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import os
 import time
 from datetime import timedelta
@@ -132,6 +133,7 @@ class BaseTrainer:
                                          "data_cursor": 0, "states_seen": 0, "skipped_updates": 0,
                                          "consecutive_empty": 0}
         self.base_checksum = gm.base_checksum()
+        self.total_steps: Optional[int] = None  # set by run_training; the readout cosine schedule needs it
         os.makedirs(out_dir, exist_ok=True)
         self.log_path = os.path.join(out_dir, f"log_rank{self.dist.rank}.jsonl")
         if self.dist.rank == 0:
@@ -186,6 +188,8 @@ class BaseTrainer:
         gnorm = torch.nn.utils.clip_grad_norm_(self.params, self.cfg.training.grad_clip)
         step = int(self.state["optimizer_step"])  # the first update already has a non-zero lr
         lr = self.learning_rate * min(1.0, (step + 1) / self.cfg.training.warmup_updates)
+        if self.stage == "readout" and self.cfg.training.readout_lr_schedule == "cosine" and self.total_steps:
+            lr *= 0.5 * (1.0 + math.cos(math.pi * min(1.0, step / self.total_steps)))
         for group in self.optimizer.param_groups:
             group["lr"] = lr
         self.optimizer.step()
@@ -285,6 +289,7 @@ class ReadoutTrainer(BaseTrainer):
 
 # ----------------------------------------------------------------------------- driver
 def run_training(trainer: BaseTrainer, max_steps: int, save_every: int, resume: Optional[str] = None) -> Dict[str, float]:
+    trainer.total_steps = int(max_steps)
     if resume:
         trainer.resume(resume)
     last: Dict[str, float] = {}

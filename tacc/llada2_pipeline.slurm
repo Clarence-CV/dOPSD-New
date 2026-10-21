@@ -11,11 +11,11 @@
 #   readout    train the readout at that layer, sweep checkpoints on readout_val (§7.1.2 gates + 1-SE choice),
 #              open readout_confirm once for the selected checkpoint (stops if it fails the gates)
 #   joint      root_success_v2 Joint training of the injector from the selected readout (JOINT_STEPS updates)
-#   jointeval  dev:dev_fast (128) for base and Joint checkpoints JOINT_EVAL_STEPS (50 75 100), all sharded over the GPUs,
+#   jointeval  dev:dev_fast (128) for base and Joint checkpoints JOINT_EVAL_STEPS (25 50 75 100), all sharded over the GPUs,
 #              plus group_readout (zero-message parity/overhead) on 32; pick a checkpoint by the fixed rule (dev_fast accuracy,
 #              then fewer mean steps, then earlier); run it on EVAL_SPLIT (MATH-500 test) and pair it with the baseline rows
 # Knobs: RUN, CONFIG, EVAL_SPLIT (test), EVAL_SUBSPLIT (""), N_EVAL (all), READOUT_STEPS (200), JOINT_STEPS (100),
-#        JOINT_EVAL_STEPS ("50 75 100"), SAVE_EVERY (25),
+#        JOINT_EVAL_STEPS ("25 50 75 100"), SAVE_EVERY (25),
 #        SMOKE=1 (tiny sizes; checks every stage end to end and prints per-example timing for the budget),
 #        READOUT_SELECT=step0|<checkpoint dir> (manual readout choice when the gates fail; recorded in selected.json).
 #SBATCH --job-name=llada2
@@ -45,7 +45,7 @@ EVAL_SUBSPLIT="${EVAL_SUBSPLIT:-}"
 N_EVAL="${N_EVAL:-}"
 READOUT_STEPS="${READOUT_STEPS:-200}"
 JOINT_STEPS="${JOINT_STEPS:-100}"
-JOINT_EVAL_STEPS="${JOINT_EVAL_STEPS:-50 75 100}"
+JOINT_EVAL_STEPS="${JOINT_EVAL_STEPS:-25 50 75 100}"
 SAVE_EVERY="${SAVE_EVERY:-25}"
 DEVFAST_LIMIT=()
 STATE_LIMIT=()
@@ -138,7 +138,7 @@ if has readout; then
     if [[ "$CK" != *"-$READOUT_STEPS" ]]; then
         RES=(); [[ -n "$CK" ]] && RES=(--resume "$CK")
         torchrun --standalone --nproc_per_node="$NG" -m selective_draft.cli train-readout "${S[@]}" "${R[@]}" \
-            --set training.readout_states_per_rollout=1 --set training.filter_correct_only=false \
+            --set training.readout_states_per_rollout=4 --set training.filter_correct_only=false \
             --states "$OUT/states/readout_train" --max-steps "$READOUT_STEPS" --save-every 25 \
             --output-dir "$TRAIN" "${RES[@]}" > "$OUT/logs/readout_train.log" 2>&1
     fi
