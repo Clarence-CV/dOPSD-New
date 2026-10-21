@@ -1,6 +1,7 @@
 """python -m selective_draft.cli <command> --config CONFIG [--set section.field=value ...]
 
-commands: prepare-data | inspect | collect | train-readout | diagnose | train-guidance | train-joint | evaluate
+commands: prepare-data | inspect | collect | train-readout | diagnose | train-guidance | train-joint | evaluate |
+          merge-eval | layer-profile | readout-sweep
 Real-model commands run on a TACC compute node; the fake backend runs everything on CPU."""
 
 from __future__ import annotations
@@ -16,7 +17,8 @@ import torch
 
 from .checkpoint import code_revision, load_snapshot
 from .config import Config
-from .data import load_split, prepare_manifest, tokenize_prompts, parse_prediction, is_correct
+from .data import load_split, prepare_manifest, tokenize_prompts
+from .scoring import grade
 from .generation import generate
 from .loading import build_model_and_tokenizer
 from .trace import StateRecorder, load_rollouts, replay_check, save_rollouts, summarize_rollouts
@@ -92,8 +94,9 @@ def cmd_inspect(args):
     gm.assert_base_frozen()
     info = {
         "resolved_config": cfg.to_dict(), "backend": gm.backend.describe(),
-        "boundary_module": type(gm.backend.boundary_module(cfg.guidance.early_layer)).__name__,
-        "early_layer_block_index": cfg.guidance.early_layer - 1,
+        "boundary_module": (type(gm.backend.boundary_module(cfg.guidance.early_layer)).__name__
+                            if cfg.guidance.early_layer is not None else None),
+        "early_layer_block_index": cfg.guidance.early_layer - 1 if cfg.guidance.early_layer is not None else None,
         "trainable_names_stage_readout": (gm.set_stage("readout"), gm.trainable_parameter_names())[1],
         "trainable_names_stage_guidance": (gm.set_stage("guidance"), gm.trainable_parameter_names())[1],
         "module_params": {n: p.numel() for n, p in gm.named_parameters() if not n.startswith("base.")},
@@ -111,12 +114,26 @@ def cmd_collect(args):
     examples = load_split(cfg, tok)
     if args.limit:
         examples = examples[: args.limit]
-    _dump_resolved(cfg, args.output_dir, {"command": "collect", "snapshot": snap_id, "n_examples": len(examples)})
+    si, sn = (int(v) for v in args.shard.split("/")) if args.shard else (0, 1)
+    if si == 0:
+        _dump_resolved(cfg, args.output_dir, {"command": "collect", "snapshot": snap_id, "n_examples": len(examples)})
+    os.makedirs(args.output_dir, exist_ok=True)
     device = gm.device
     bs = cfg.evaluation.batch_size
+    if sn > 1 and bs != 1:
+        raise SystemExit("collect --shard needs evaluation.batch_size=1")
     rng = torch.Generator(device=device).manual_seed(cfg.training.seed)
-    all_summ, shard = [], 0
+    all_summ = []
     for s in range(0, len(examples), bs):
+        shard = s // bs  # file index = global batch index: shards and resumed runs never collide
+        if shard % sn != si:
+            continue
+        path = os.path.join(args.output_dir, f"rollouts-{shard:05d}.pt")
+        if args.resume and os.path.exists(path):
+            all_summ.extend(load_rollouts(path))
+            continue
+        if cfg.generation.temperature > 0 and (sn > 1 or args.resume):  # per-example RNG so shards are reproducible
+            rng = torch.Generator(device=device).manual_seed(cfg.training.seed + shard)
         batch = examples[s:s + bs]
         ids, mask = tokenize_prompts(tok, [e.prompt_text for e in batch], device)
         metas = [{"example_id": e.example_id, "prompt_ids": ids[i].tolist(), "prompt_attention_mask": mask[i].tolist(),
@@ -128,20 +145,19 @@ def cmd_collect(args):
         extras = []
         for i, e in enumerate(batch):
             text = tok.decode(res.completion_ids(i), skip_special_tokens=True)
-            pred = parse_prediction(text, e.task)
-            extras.append({"generation": text, "parsed_answer": pred, "is_correct": is_correct(pred, e.answer_value, e.task),
+            g = grade(e.question, e.answer_value, text, e.task, cfg.data.scorer)
+            extras.append({"generation": text, "parsed_answer": g["parsed_answer"], "is_correct": g["is_correct"],
+                           "verdicts": g["verdicts"],
                            "stats": res.stats})
         rolls = rec.finalize(res, extras)
         for r in rolls:
             replay_check(r)
-        path = os.path.join(args.output_dir, f"rollouts-{shard:05d}.pt")
         save_rollouts(path, rolls)
-        shard += 1
         all_summ.extend(rolls)
         print(f"[collect] {s + len(batch)}/{len(examples)} -> {path} nfe={res.stats['nfe']} "
               f"correct={sum(r['is_correct'] for r in rolls)}/{len(rolls)}")
     summ = summarize_rollouts(all_summ)
-    with open(os.path.join(args.output_dir, "summary.json"), "w") as f:
+    with open(os.path.join(args.output_dir, "summary.json" if sn == 1 else f"summary.shard{si}of{sn}.json"), "w") as f:
         json.dump(summ, f, indent=1)
     print(json.dumps(summ, indent=1))
 
@@ -193,7 +209,11 @@ def cmd_train_joint(args):
     examples = load_split(cfg, tok)
     _dump_resolved(cfg, args.output_dir, {"command": "train-joint", "readout_snapshot": snap_id,
                                         "n_examples": len(examples)})
-    trainer = JointTrainer(gm, cfg, args.output_dir, examples, tok)
+    if cfg.training.sampling_protocol == "root_success_v2":
+        from .root_joint import RootSuccessTrainer
+        trainer = RootSuccessTrainer(gm, cfg, args.output_dir, examples, tok)
+    else:
+        trainer = JointTrainer(gm, cfg, args.output_dir, examples, tok)
     last = run_training(trainer, cfg.training.max_steps, cfg.training.save_every, args.resume)
     print(json.dumps({"final": last, "snapshot": os.path.join(args.output_dir, "snapshot")}, default=float))
 
@@ -217,6 +237,48 @@ def cmd_diagnose(args):
     print(json.dumps(rep, indent=1, default=float))
 
 
+def cmd_layer_profile(args):
+    from .layer_profile import layer_profile, pick_states
+    cfg = _cfg(args)
+    gm, tok, _ = _build(cfg, args)
+    rollouts = [r for p in _rollout_paths(args.states) for r in load_rollouts(p)]
+    picks = pick_states(rollouts)
+    _dump_resolved(cfg, args.output_dir, {"command": "layer-profile", "states": args.states, "n_states": len(picks)})
+    rep = layer_profile(gm, picks, cfg)
+    with open(os.path.join(args.output_dir, "layer_profile.json"), "w") as f:
+        json.dump(rep, f, indent=1, default=float)
+    with open(os.path.join(args.output_dir, "layer_decision.json"), "w") as f:
+        json.dump(dict(rep["decision"], states=args.states, code_revision=code_revision()), f, indent=1, default=float)
+    print(json.dumps(rep["decision"], indent=1, default=float))
+
+
+def cmd_readout_sweep(args):
+    """§7.1.1 metrics for step0 (native lens) and each checkpoint on one fixed state bank; --select applies §7.1.2."""
+    from .layer_profile import pick_states, readout_metrics, select_readout
+    cfg = _cfg(args)
+    gm, tok, _ = _build(cfg, args)
+    rollouts = [r for p in _rollout_paths(args.states) for r in load_rollouts(p)]
+    picks = pick_states(rollouts)
+    _dump_resolved(cfg, args.output_dir, {"command": "readout-sweep", "states": args.states,
+                                        "checkpoints": args.checkpoints, "n_states": len(picks)})
+    results, steps = {"step0": readout_metrics(gm, picks, cfg)}, {"step0": 0}
+    for ck in args.checkpoints:
+        snap = os.path.join(ck, "snapshot") if os.path.isdir(os.path.join(ck, "snapshot")) else ck
+        load_snapshot(snap, gm, cfg)
+        name = os.path.basename(os.path.normpath(ck))
+        with open(os.path.join(ck, "trainer_state.json")) as f:
+            steps[name] = int(json.load(f)["optimizer_step"])
+        results[name] = readout_metrics(gm, picks, cfg)
+        print(name, json.dumps(results[name]["summary"], default=float))
+    out = {"summaries": {k: v["summary"] for k, v in results.items()}, "steps": steps,
+           "checkpoints": {os.path.basename(os.path.normpath(c)): os.path.abspath(c) for c in args.checkpoints}}
+    if args.select:
+        out["selection"] = select_readout(results, steps)
+        print(json.dumps(out["selection"], indent=1, default=float))
+    with open(os.path.join(args.output_dir, "readout_sweep.json"), "w") as f:
+        json.dump(dict(out, rows={k: v["rows"] for k, v in results.items()}), f, indent=1, default=float)
+
+
 def cmd_evaluate(args):
     from .evaluation import evaluate
     cfg = _cfg(args)
@@ -228,9 +290,32 @@ def cmd_evaluate(args):
     limit = args.limit or cfg.evaluation.limit
     if limit:
         examples = examples[:limit]
-    _dump_resolved(cfg, args.output_dir, {"command": "evaluate", "snapshot": snap_id, "n_examples": len(examples)})
+    shard = (0, 1)
+    if args.shard:
+        i, n = (int(v) for v in args.shard.split("/"))
+        shard = (i, n)
+    os.makedirs(args.output_dir, exist_ok=True)  # every shard: they start concurrently
+    if shard == (0, 1):
+        _dump_resolved(cfg, args.output_dir, {"command": "evaluate", "snapshot": snap_id, "n_examples": len(examples)})
+    elif shard[0] == 0:
+        cfg.dump(os.path.join(args.output_dir, "resolved_config.json"))
+    with open(os.path.join(args.output_dir, f"example_ids.shard{shard[0]}of{shard[1]}.json"), "w") as f:
+        json.dump([e.example_id for e in examples], f)
     out = evaluate(gm, tok, examples, cfg, cfg.guidance.mode, args.output_dir, snapshot_id=snap_id,
-                   trace_level=cfg.trace.level)
+                   trace_level=cfg.trace.level, shard=shard, resume=args.resume)
+    print(json.dumps(out["summaries"], indent=1, default=float))
+
+
+def cmd_merge_eval(args):
+    from .evaluation import merge_shards
+    lists = sorted(glob.glob(os.path.join(args.output_dir, "example_ids.shard*of*.json")))
+    expected = None
+    if lists:
+        sets = [json.load(open(p)) for p in lists]
+        if any(s != sets[0] for s in sets):
+            raise SystemExit("shards were launched with different example lists")
+        expected = sets[0]
+    out = merge_shards(args.output_dir, expected)
     print(json.dumps(out["summaries"], indent=1, default=float))
 
 
@@ -245,7 +330,10 @@ def main(argv=None):
     _common(p, output=False); p.add_argument("--snapshot"); p.set_defaults(fn=cmd_inspect)
 
     p = sub.add_parser("collect", help="decode the configured split and save CPU state shards")
-    _common(p); p.add_argument("--snapshot"); p.add_argument("--limit", type=int); p.set_defaults(fn=cmd_collect)
+    _common(p); p.add_argument("--snapshot"); p.add_argument("--limit", type=int)
+    p.add_argument("--shard", help="I/N: every N-th example starting at I (batch size 1)")
+    p.add_argument("--resume", action="store_true", help="skip rollout files that already exist")
+    p.set_defaults(fn=cmd_collect)
 
     p = sub.add_parser("train-readout", help="stage 1: train g_phi on recorded base states")
     _common(p); p.add_argument("--states", nargs="+", required=True); p.add_argument("--snapshot")
@@ -267,7 +355,21 @@ def main(argv=None):
     p.add_argument("--save-every", type=int); p.add_argument("--resume"); p.set_defaults(fn=cmd_train_guidance)
 
     p = sub.add_parser("evaluate", help="task accuracy + latency; threshold sweep via evaluation.commit_thresholds")
-    _common(p); p.add_argument("--snapshot"); p.add_argument("--limit", type=int); p.set_defaults(fn=cmd_evaluate)
+    _common(p); p.add_argument("--snapshot"); p.add_argument("--limit", type=int)
+    p.add_argument("--shard", help="I/N: evaluate examples I, I+N, ... (batch size 1); merge with merge-eval")
+    p.add_argument("--resume", action="store_true", help="keep rows already written under the same fingerprint")
+    p.set_defaults(fn=cmd_evaluate)
+
+    p = sub.add_parser("layer-profile", help="all-layer logit-lens profile on a fixed state bank + layer rule (§7.1)")
+    _common(p); p.add_argument("--states", nargs="+", required=True); p.set_defaults(fn=cmd_layer_profile)
+
+    p = sub.add_parser("readout-sweep", help="readout checkpoint metrics on fixed states; --select applies §7.1.2")
+    _common(p); p.add_argument("--states", nargs="+", required=True)
+    p.add_argument("--checkpoints", nargs="*", default=[]); p.add_argument("--select", action="store_true")
+    p.set_defaults(fn=cmd_readout_sweep)
+
+    p = sub.add_parser("merge-eval", help="merge evaluate --shard outputs into rows_<tag>.jsonl + summary.json")
+    p.add_argument("--output-dir", required=True); p.set_defaults(fn=cmd_merge_eval)
 
     args = ap.parse_args(argv)
     import time as _time

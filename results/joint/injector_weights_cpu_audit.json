@@ -1,0 +1,18 @@
+{
+  "scope": "Only saved small adapter tensors inspected on CPU; no pretrained backbone loaded or evaluated.",
+  "snapshot": "outputs/joint_math_v1/train/snapshot/modules.safetensors",
+  "reader": "Safetensors uint64 header length, JSON dtype/shape/data_offsets, torch.frombuffer on copied bytes",
+  "down_shape": [
+    64,
+    8192
+  ],
+  "up_shape": [
+    4096,
+    64
+  ],
+  "hidden_channel_weight_l2": 5.844552516937256,
+  "message_channel_weight_l2": 5.744560241699219,
+  "up_weight_l2": 0.7876873016357422,
+  "all_finite": true,
+  "limitation": "Nonzero weights do not establish useful dependence on messages for real inference."
+}

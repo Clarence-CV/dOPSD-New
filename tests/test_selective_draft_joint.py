@@ -16,6 +16,10 @@ from selective_draft.trace import StateRecorder, replay_check
 from selective_draft.training import run_training
 
 
+def _fixed_grade(value):
+    return lambda *a, **k: {"parsed_answer": None, "is_correct": value, "scorer": "legacy", "verdicts": {"legacy": value}}
+
+
 def joint_config(**over):
     base = {"guidance.mode": '"group_soft"', "guidance.group_size": 2,
             "teacher.mode": '"joint"', "training.rollout_temperature": 0.9,
@@ -150,8 +154,8 @@ def test_joint_training_eight_branches_frozen_modules_and_exact_resume():
     cfg = joint_config(**{"training.max_steps": 4, "training.warmup_ratio": 0.25,
                           "training.learning_rate_guidance": 0.001})
     with tempfile.TemporaryDirectory() as d, \
-            patch("selective_draft.training.is_correct", return_value=False), \
-            patch("selective_draft.joint.is_correct", return_value=True):
+            patch("selective_draft.training.grade", side_effect=_fixed_grade(False)), \
+            patch("selective_draft.joint.grade", side_effect=_fixed_grade(True)):
         gm, tok = _peaked_model(cfg)
         trainer = JointTrainer(gm, cfg, os.path.join(d, "first"), load_split(cfg, tok), tok)
         frozen = {n: p.clone() for n, p in gm.named_parameters() if not p.requires_grad}
@@ -185,7 +189,7 @@ def test_joint_training_eight_branches_frozen_modules_and_exact_resume():
 
 def test_no_valid_reference_skips_update_and_retains_failures():
     cfg = joint_config(**{"training.max_consecutive_empty_updates": 2})
-    with tempfile.TemporaryDirectory() as d, patch("selective_draft.joint.is_correct", return_value=False):
+    with tempfile.TemporaryDirectory() as d, patch("selective_draft.joint.grade", side_effect=_fixed_grade(False)):
         gm, tok = _peaked_model(cfg)
         trainer = JointTrainer(gm, cfg, d, load_split(cfg, tok), tok)
         before = copy.deepcopy(gm.module_state_dict())

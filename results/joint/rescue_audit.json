@@ -1,0 +1,717 @@
+{
+  "provenance": {
+    "local_root": "/home/elon/PostTraining/dOPSD/outputs/joint_math_v1",
+    "mode": "read_only_saved_artifacts_no_model_or_job",
+    "remote_root": "/scratch/11277/yilunai0430/dopsd/joint/joint_math_v1",
+    "host": "login1.ls6.tacc.utexas.edu",
+    "checked_utc": "2026-10-18T06:09:51.224458Z",
+    "remote_manifest_sha256": "a8be6f6b0d3b45a6b0cd0aa9d84ca5b3f34a8d95897cf2f3a6a54b52e25ec9e5",
+    "verified_files": 1640,
+    "mismatches": 0
+  },
+  "validation": "all checks passed",
+  "label_protocol": "Original saved is_correct labels; legacy_math parser/string scorer; no relabeling",
+  "natural_nfe": 31934,
+  "unique_example_ids": 327,
+  "groups": {
+    "all": {
+      "states": 1308,
+      "any_correct": 587,
+      "certified": 525,
+      "positions": 2019,
+      "candidate_attempts": 10464,
+      "correct_candidates": 3333,
+      "candidate_nfe": 503489,
+      "teacher_nfe": 2503,
+      "failed_state_candidate_nfe": 312275,
+      "trajectories": 327,
+      "any_correct_trajectories": 189,
+      "certified_trajectories": 178,
+      "certified_states_per_trajectory": {
+        "0": 149,
+        "1": 34,
+        "2": 27,
+        "3": 31,
+        "4": 86
+      },
+      "sampled_states_per_trajectory": {
+        "4": 327
+      },
+      "expected_certified_trajectories_one_uniform_saved_state": 131.25,
+      "own_tail_loo_status": {
+        "natural_wrong": 904,
+        "known_pass": 287,
+        "untested": 77,
+        "known_fail": 40
+      },
+      "candidate_success_first_k": {
+        "1": 424,
+        "2": 476,
+        "4": 533,
+        "8": 587
+      }
+    },
+    "natural_wrong": {
+      "states": 904,
+      "any_correct": 189,
+      "certified": 154,
+      "positions": 593,
+      "candidate_attempts": 7232,
+      "correct_candidates": 555,
+      "candidate_nfe": 371419,
+      "teacher_nfe": 753,
+      "failed_state_candidate_nfe": 298442,
+      "trajectories": 226,
+      "any_correct_trajectories": 88,
+      "certified_trajectories": 77,
+      "certified_states_per_trajectory": {
+        "0": 149,
+        "1": 33,
+        "2": 21,
+        "3": 13,
+        "4": 10
+      },
+      "sampled_states_per_trajectory": {
+        "4": 226
+      },
+      "expected_certified_trajectories_one_uniform_saved_state": 38.5,
+      "own_tail_loo_status": {
+        "natural_wrong": 904
+      },
+      "candidate_success_first_k": {
+        "1": 66,
+        "2": 101,
+        "4": 143,
+        "8": 189
+      }
+    },
+    "natural_correct": {
+      "states": 404,
+      "any_correct": 398,
+      "certified": 371,
+      "positions": 1426,
+      "candidate_attempts": 3232,
+      "correct_candidates": 2778,
+      "candidate_nfe": 132070,
+      "teacher_nfe": 1750,
+      "failed_state_candidate_nfe": 13833,
+      "trajectories": 101,
+      "any_correct_trajectories": 101,
+      "certified_trajectories": 101,
+      "certified_states_per_trajectory": {
+        "1": 1,
+        "2": 6,
+        "3": 18,
+        "4": 76
+      },
+      "sampled_states_per_trajectory": {
+        "4": 101
+      },
+      "expected_certified_trajectories_one_uniform_saved_state": 92.75,
+      "own_tail_loo_status": {
+        "known_pass": 287,
+        "untested": 77,
+        "known_fail": 40
+      },
+      "candidate_success_first_k": {
+        "1": 358,
+        "2": 375,
+        "4": 390,
+        "8": 398
+      }
+    }
+  },
+  "training_log_sums": {
+    "local_states": 525,
+    "joint_states_attempted": 1308,
+    "joint_certified": 525,
+    "joint_candidate_attempts": 10464,
+    "joint_correct_candidates": 3333,
+    "joint_teacher_forwards": 2503
+  },
+  "by_block": {
+    "0": {
+      "natural_wrong": {
+        "states": 125,
+        "any_correct": 46,
+        "certified": 35,
+        "positions": 134,
+        "candidate_attempts": 1000,
+        "correct_candidates": 152,
+        "candidate_nfe": 98577,
+        "teacher_nfe": 203,
+        "failed_state_candidate_nfe": 73797,
+        "trajectories": 107,
+        "any_correct_trajectories": 38,
+        "certified_trajectories": 29,
+        "certified_states_per_trajectory": {
+          "0": 78,
+          "1": 23,
+          "2": 6
+        },
+        "sampled_states_per_trajectory": {
+          "1": 91,
+          "2": 14,
+          "3": 2
+        },
+        "expected_certified_trajectories_one_uniform_saved_state": 27.666666666666668,
+        "own_tail_loo_status": {
+          "natural_wrong": 125
+        },
+        "candidate_success_first_k": {
+          "1": 16,
+          "2": 28,
+          "4": 39,
+          "8": 46
+        }
+      },
+      "natural_correct": {
+        "states": 54,
+        "any_correct": 54,
+        "certified": 49,
+        "positions": 185,
+        "candidate_attempts": 432,
+        "correct_candidates": 371,
+        "candidate_nfe": 31918,
+        "teacher_nfe": 225,
+        "failed_state_candidate_nfe": 3293,
+        "trajectories": 46,
+        "any_correct_trajectories": 46,
+        "certified_trajectories": 44,
+        "certified_states_per_trajectory": {
+          "0": 2,
+          "1": 39,
+          "2": 5
+        },
+        "sampled_states_per_trajectory": {
+          "1": 38,
+          "2": 8
+        },
+        "expected_certified_trajectories_one_uniform_saved_state": 42.5,
+        "own_tail_loo_status": {
+          "known_pass": 38,
+          "known_fail": 6,
+          "untested": 10
+        },
+        "candidate_success_first_k": {
+          "1": 47,
+          "2": 52,
+          "4": 54,
+          "8": 54
+        }
+      }
+    },
+    "1": {
+      "natural_wrong": {
+        "states": 115,
+        "any_correct": 39,
+        "certified": 34,
+        "positions": 132,
+        "candidate_attempts": 920,
+        "correct_candidates": 109,
+        "candidate_nfe": 73362,
+        "teacher_nfe": 157,
+        "failed_state_candidate_nfe": 52543,
+        "trajectories": 95,
+        "any_correct_trajectories": 34,
+        "certified_trajectories": 29,
+        "certified_states_per_trajectory": {
+          "0": 66,
+          "1": 25,
+          "2": 3,
+          "3": 1
+        },
+        "sampled_states_per_trajectory": {
+          "1": 77,
+          "2": 16,
+          "3": 2
+        },
+        "expected_certified_trajectories_one_uniform_saved_state": 29.0,
+        "own_tail_loo_status": {
+          "natural_wrong": 115
+        },
+        "candidate_success_first_k": {
+          "1": 11,
+          "2": 19,
+          "4": 29,
+          "8": 39
+        }
+      },
+      "natural_correct": {
+        "states": 73,
+        "any_correct": 71,
+        "certified": 65,
+        "positions": 259,
+        "candidate_attempts": 584,
+        "correct_candidates": 491,
+        "candidate_nfe": 37318,
+        "teacher_nfe": 350,
+        "failed_state_candidate_nfe": 5061,
+        "trajectories": 54,
+        "any_correct_trajectories": 53,
+        "certified_trajectories": 51,
+        "certified_states_per_trajectory": {
+          "0": 3,
+          "1": 39,
+          "2": 10,
+          "3": 2
+        },
+        "sampled_states_per_trajectory": {
+          "1": 39,
+          "2": 11,
+          "3": 4
+        },
+        "expected_certified_trajectories_one_uniform_saved_state": 49.5,
+        "own_tail_loo_status": {
+          "known_pass": 45,
+          "known_fail": 14,
+          "untested": 14
+        },
+        "candidate_success_first_k": {
+          "1": 65,
+          "2": 67,
+          "4": 69,
+          "8": 71
+        }
+      }
+    },
+    "2": {
+      "natural_wrong": {
+        "states": 121,
+        "any_correct": 27,
+        "certified": 20,
+        "positions": 73,
+        "candidate_attempts": 968,
+        "correct_candidates": 63,
+        "candidate_nfe": 63607,
+        "teacher_nfe": 98,
+        "failed_state_candidate_nfe": 54522,
+        "trajectories": 106,
+        "any_correct_trajectories": 24,
+        "certified_trajectories": 19,
+        "certified_states_per_trajectory": {
+          "0": 87,
+          "1": 18,
+          "2": 1
+        },
+        "sampled_states_per_trajectory": {
+          "1": 92,
+          "2": 13,
+          "3": 1
+        },
+        "expected_certified_trajectories_one_uniform_saved_state": 17.0,
+        "own_tail_loo_status": {
+          "natural_wrong": 121
+        },
+        "candidate_success_first_k": {
+          "1": 9,
+          "2": 13,
+          "4": 18,
+          "8": 27
+        }
+      },
+      "natural_correct": {
+        "states": 59,
+        "any_correct": 59,
+        "certified": 56,
+        "positions": 216,
+        "candidate_attempts": 472,
+        "correct_candidates": 405,
+        "candidate_nfe": 21755,
+        "teacher_nfe": 262,
+        "failed_state_candidate_nfe": 1130,
+        "trajectories": 47,
+        "any_correct_trajectories": 47,
+        "certified_trajectories": 46,
+        "certified_states_per_trajectory": {
+          "0": 1,
+          "1": 37,
+          "2": 8,
+          "3": 1
+        },
+        "sampled_states_per_trajectory": {
+          "1": 37,
+          "2": 8,
+          "3": 2
+        },
+        "expected_certified_trajectories_one_uniform_saved_state": 45.166666666666664,
+        "own_tail_loo_status": {
+          "known_pass": 45,
+          "untested": 10,
+          "known_fail": 4
+        },
+        "candidate_success_first_k": {
+          "1": 53,
+          "2": 54,
+          "4": 57,
+          "8": 59
+        }
+      }
+    },
+    "3": {
+      "natural_wrong": {
+        "states": 130,
+        "any_correct": 26,
+        "certified": 23,
+        "positions": 86,
+        "candidate_attempts": 1040,
+        "correct_candidates": 89,
+        "candidate_nfe": 53964,
+        "teacher_nfe": 100,
+        "failed_state_candidate_nfe": 44694,
+        "trajectories": 106,
+        "any_correct_trajectories": 22,
+        "certified_trajectories": 21,
+        "certified_states_per_trajectory": {
+          "0": 85,
+          "1": 19,
+          "2": 2
+        },
+        "sampled_states_per_trajectory": {
+          "1": 86,
+          "2": 16,
+          "3": 4
+        },
+        "expected_certified_trajectories_one_uniform_saved_state": 19.166666666666668,
+        "own_tail_loo_status": {
+          "natural_wrong": 130
+        },
+        "candidate_success_first_k": {
+          "1": 12,
+          "2": 18,
+          "4": 24,
+          "8": 26
+        }
+      },
+      "natural_correct": {
+        "states": 54,
+        "any_correct": 53,
+        "certified": 50,
+        "positions": 192,
+        "candidate_attempts": 432,
+        "correct_candidates": 370,
+        "candidate_nfe": 15951,
+        "teacher_nfe": 227,
+        "failed_state_candidate_nfe": 1664,
+        "trajectories": 47,
+        "any_correct_trajectories": 46,
+        "certified_trajectories": 43,
+        "certified_states_per_trajectory": {
+          "0": 4,
+          "1": 37,
+          "2": 5,
+          "3": 1
+        },
+        "sampled_states_per_trajectory": {
+          "1": 41,
+          "2": 5,
+          "3": 1
+        },
+        "expected_certified_trajectories_one_uniform_saved_state": 43.0,
+        "own_tail_loo_status": {
+          "known_pass": 37,
+          "known_fail": 4,
+          "untested": 13
+        },
+        "candidate_success_first_k": {
+          "1": 47,
+          "2": 47,
+          "4": 51,
+          "8": 53
+        }
+      }
+    },
+    "4": {
+      "natural_wrong": {
+        "states": 92,
+        "any_correct": 14,
+        "certified": 12,
+        "positions": 48,
+        "candidate_attempts": 736,
+        "correct_candidates": 24,
+        "candidate_nfe": 31267,
+        "teacher_nfe": 54,
+        "failed_state_candidate_nfe": 27131,
+        "trajectories": 81,
+        "any_correct_trajectories": 14,
+        "certified_trajectories": 12,
+        "certified_states_per_trajectory": {
+          "0": 69,
+          "1": 12
+        },
+        "sampled_states_per_trajectory": {
+          "1": 70,
+          "2": 11
+        },
+        "expected_certified_trajectories_one_uniform_saved_state": 12.0,
+        "own_tail_loo_status": {
+          "natural_wrong": 92
+        },
+        "candidate_success_first_k": {
+          "1": 3,
+          "2": 3,
+          "4": 9,
+          "8": 14
+        }
+      },
+      "natural_correct": {
+        "states": 52,
+        "any_correct": 52,
+        "certified": 49,
+        "positions": 184,
+        "candidate_attempts": 416,
+        "correct_candidates": 353,
+        "candidate_nfe": 12470,
+        "teacher_nfe": 242,
+        "failed_state_candidate_nfe": 1061,
+        "trajectories": 41,
+        "any_correct_trajectories": 41,
+        "certified_trajectories": 39,
+        "certified_states_per_trajectory": {
+          "0": 2,
+          "1": 30,
+          "2": 8,
+          "3": 1
+        },
+        "sampled_states_per_trajectory": {
+          "1": 31,
+          "2": 9,
+          "3": 1
+        },
+        "expected_certified_trajectories_one_uniform_saved_state": 38.5,
+        "own_tail_loo_status": {
+          "untested": 11,
+          "known_pass": 38,
+          "known_fail": 3
+        },
+        "candidate_success_first_k": {
+          "1": 46,
+          "2": 49,
+          "4": 50,
+          "8": 52
+        }
+      }
+    },
+    "5": {
+      "natural_wrong": {
+        "states": 126,
+        "any_correct": 18,
+        "certified": 14,
+        "positions": 56,
+        "candidate_attempts": 1008,
+        "correct_candidates": 61,
+        "candidate_nfe": 30228,
+        "teacher_nfe": 68,
+        "failed_state_candidate_nfe": 27185,
+        "trajectories": 100,
+        "any_correct_trajectories": 17,
+        "certified_trajectories": 13,
+        "certified_states_per_trajectory": {
+          "0": 87,
+          "1": 12,
+          "2": 1
+        },
+        "sampled_states_per_trajectory": {
+          "1": 75,
+          "2": 24,
+          "3": 1
+        },
+        "expected_certified_trajectories_one_uniform_saved_state": 13.0,
+        "own_tail_loo_status": {
+          "natural_wrong": 126
+        },
+        "candidate_success_first_k": {
+          "1": 8,
+          "2": 11,
+          "4": 11,
+          "8": 18
+        }
+      },
+      "natural_correct": {
+        "states": 41,
+        "any_correct": 38,
+        "certified": 36,
+        "positions": 139,
+        "candidate_attempts": 328,
+        "correct_candidates": 267,
+        "candidate_nfe": 7355,
+        "teacher_nfe": 162,
+        "failed_state_candidate_nfe": 1146,
+        "trajectories": 35,
+        "any_correct_trajectories": 33,
+        "certified_trajectories": 31,
+        "certified_states_per_trajectory": {
+          "0": 4,
+          "1": 26,
+          "2": 5
+        },
+        "sampled_states_per_trajectory": {
+          "1": 29,
+          "2": 6
+        },
+        "expected_certified_trajectories_one_uniform_saved_state": 31.0,
+        "own_tail_loo_status": {
+          "untested": 9,
+          "known_pass": 29,
+          "known_fail": 3
+        },
+        "candidate_success_first_k": {
+          "1": 33,
+          "2": 35,
+          "4": 38,
+          "8": 38
+        }
+      }
+    },
+    "6": {
+      "natural_wrong": {
+        "states": 112,
+        "any_correct": 11,
+        "certified": 9,
+        "positions": 36,
+        "candidate_attempts": 896,
+        "correct_candidates": 34,
+        "candidate_nfe": 15675,
+        "teacher_nfe": 42,
+        "failed_state_candidate_nfe": 14371,
+        "trajectories": 88,
+        "any_correct_trajectories": 10,
+        "certified_trajectories": 8,
+        "certified_states_per_trajectory": {
+          "0": 80,
+          "1": 7,
+          "2": 1
+        },
+        "sampled_states_per_trajectory": {
+          "1": 65,
+          "2": 22,
+          "3": 1
+        },
+        "expected_certified_trajectories_one_uniform_saved_state": 7.5,
+        "own_tail_loo_status": {
+          "natural_wrong": 112
+        },
+        "candidate_success_first_k": {
+          "1": 4,
+          "2": 6,
+          "4": 8,
+          "8": 11
+        }
+      },
+      "natural_correct": {
+        "states": 36,
+        "any_correct": 36,
+        "certified": 35,
+        "positions": 136,
+        "candidate_attempts": 288,
+        "correct_candidates": 260,
+        "candidate_nfe": 3977,
+        "teacher_nfe": 149,
+        "failed_state_candidate_nfe": 148,
+        "trajectories": 28,
+        "any_correct_trajectories": 28,
+        "certified_trajectories": 28,
+        "certified_states_per_trajectory": {
+          "1": 21,
+          "2": 7
+        },
+        "sampled_states_per_trajectory": {
+          "1": 21,
+          "2": 6,
+          "3": 1
+        },
+        "expected_certified_trajectories_one_uniform_saved_state": 27.666666666666668,
+        "own_tail_loo_status": {
+          "known_pass": 29,
+          "untested": 6,
+          "known_fail": 1
+        },
+        "candidate_success_first_k": {
+          "1": 32,
+          "2": 36,
+          "4": 36,
+          "8": 36
+        }
+      }
+    },
+    "7": {
+      "natural_wrong": {
+        "states": 83,
+        "any_correct": 8,
+        "certified": 7,
+        "positions": 28,
+        "candidate_attempts": 664,
+        "correct_candidates": 23,
+        "candidate_nfe": 4739,
+        "teacher_nfe": 31,
+        "failed_state_candidate_nfe": 4199,
+        "trajectories": 75,
+        "any_correct_trajectories": 7,
+        "certified_trajectories": 7,
+        "certified_states_per_trajectory": {
+          "0": 68,
+          "1": 7
+        },
+        "sampled_states_per_trajectory": {
+          "1": 67,
+          "2": 8
+        },
+        "expected_certified_trajectories_one_uniform_saved_state": 6.5,
+        "own_tail_loo_status": {
+          "natural_wrong": 83
+        },
+        "candidate_success_first_k": {
+          "1": 3,
+          "2": 3,
+          "4": 5,
+          "8": 8
+        }
+      },
+      "natural_correct": {
+        "states": 35,
+        "any_correct": 35,
+        "certified": 31,
+        "positions": 115,
+        "candidate_attempts": 280,
+        "correct_candidates": 261,
+        "candidate_nfe": 1326,
+        "teacher_nfe": 133,
+        "failed_state_candidate_nfe": 330,
+        "trajectories": 29,
+        "any_correct_trajectories": 29,
+        "certified_trajectories": 26,
+        "certified_states_per_trajectory": {
+          "0": 3,
+          "1": 21,
+          "2": 5
+        },
+        "sampled_states_per_trajectory": {
+          "1": 23,
+          "2": 6
+        },
+        "expected_certified_trajectories_one_uniform_saved_state": 25.5,
+        "own_tail_loo_status": {
+          "known_pass": 26,
+          "untested": 4,
+          "known_fail": 5
+        },
+        "candidate_success_first_k": {
+          "1": 35,
+          "2": 35,
+          "4": 35,
+          "8": 35
+        }
+      }
+    }
+  },
+  "limitations": [
+    "Rescue = a correct compatible continuation passing LOO, not demonstrated downstream model improvement.",
+    "Originally wrong final answer does not establish that the sampled state already contained an error.",
+    "Four states times eight continuations per trajectory; not one state times eight.",
+    "No equal-compute prompt-restart baseline or removal ablation was run.",
+    "NFE is recorded forward-call count, not GPU time; excludes group readout, training/backward and other overhead.",
+    "First-k bank coverage measures answer correctness only, not exact LOO acceptance at smaller K.",
+    "Known own-tail LOO results cover previously tested identical tuples only; untested results remain unknown.",
+    "Accepted states entered losses, including initial zero-learning-rate update; not every target changed weights."
+  ]
+}

@@ -1,0 +1,58 @@
+{
+  "scope": "Synthetic CPU path audit through production GuidedModel; no pretrained weights or task evaluation.",
+  "torch_version": "2.14.0+cpu",
+  "seed": 0,
+  "zero_initialized_injector": {
+    "model_class": "FakeLLaDA",
+    "early_layer": 2,
+    "peer_position": 4,
+    "receiver_position": 3,
+    "group_positions": [
+      4,
+      3,
+      1
+    ],
+    "receiver_message_unchanged": true,
+    "repeat_logits_max_abs": 0.0,
+    "scale_zero_vs_off_logits_max_abs": 0.0,
+    "natural_vs_off_logits_max_abs": 0.0,
+    "peer_edit_next_input_peer_max_abs": 0.0,
+    "peer_edit_next_input_receiver_max_abs": 0.0,
+    "peer_edit_receiver_hidden_max_abs_by_layer": {
+      "L3_output": 0.0,
+      "L4_output": 0.0,
+      "L5_output": 0.0,
+      "L6_output": 0.0
+    },
+    "peer_edit_receiver_logits_max_abs": 0.0,
+    "receiver_logit_gradient_wrt_peer_probs_l2": 0.0,
+    "gradient_probe_token": 55
+  },
+  "synthetic_nonzero_injector": {
+    "model_class": "FakeLLaDA",
+    "early_layer": 2,
+    "peer_position": 4,
+    "receiver_position": 3,
+    "group_positions": [
+      4,
+      3,
+      1
+    ],
+    "receiver_message_unchanged": true,
+    "repeat_logits_max_abs": 0.0,
+    "scale_zero_vs_off_logits_max_abs": 0.0,
+    "natural_vs_off_logits_max_abs": 2.294436454772949,
+    "peer_edit_next_input_peer_max_abs": 0.29012882709503174,
+    "peer_edit_next_input_receiver_max_abs": 0.0,
+    "peer_edit_receiver_hidden_max_abs_by_layer": {
+      "L3_output": 0.011261343955993652,
+      "L4_output": 0.019683837890625,
+      "L5_output": 0.023641586303710938,
+      "L6_output": 0.026747703552246094
+    },
+    "peer_edit_receiver_logits_max_abs": 0.07726407051086426,
+    "receiver_logit_gradient_wrt_peer_probs_l2": 0.1567162126302719,
+    "gradient_probe_token": 55
+  },
+  "limitation": "Nonzero effects show connectivity, not learned peer use, useful reasoning, or mini MoE gradient correctness."
+}

@@ -1,6 +1,6 @@
 # Joint-reference OPSD：MATH v1（job 3515124）
 
-方法见 `doc/dlm_fixed_points_rollout_guarantees_zh.md`，实现见 `selective_draft/JOINT.md`。代码 commit 16c07e4。
+方法见[研究概览](../../doc/Selective_Draft_OPSD.md)，实现见[Joint流水线](../../selective_draft/JOINT.md)。代码 commit 16c07e4。
 
 ## 设置
 

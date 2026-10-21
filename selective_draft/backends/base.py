@@ -76,13 +76,18 @@ class Backend:
 
 
 def resolve_backend(name: str, model: nn.Module, mask_token_id: Optional[int] = None,
-                    eos_token_id: Optional[int] = None) -> Backend:
+                    eos_token_id: Optional[int] = None, block_length: Optional[int] = None) -> Backend:
     if name == "llada":
         from .llada import LLaDABackend
         return LLaDABackend(model, mask_token_id=mask_token_id, eos_token_id=eos_token_id)
     if name == "illada":
         from .illada import ILLaDABackend
         return ILLaDABackend(model, mask_token_id=mask_token_id, eos_token_id=eos_token_id)
+    if name in ("llada2_mini", "fake_llada2"):
+        from .llada2_mini import LLaDA2MiniBackend
+        if block_length is None:
+            raise ValueError("llada2_mini needs the attention block length (generation.block_length)")
+        return LLaDA2MiniBackend(model, block_length, mask_token_id=mask_token_id, eos_token_id=eos_token_id)
     if name == "fake_llada":
         from .llada import LLaDABackend
         return LLaDABackend(model, mask_token_id=mask_token_id, eos_token_id=eos_token_id)

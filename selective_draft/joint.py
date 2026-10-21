@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 import torch
 import torch.nn.functional as F
 
-from .data import is_correct, parse_prediction
+from .scoring import grade
 from .generation import generate
 from .losses import forward_kl
 from .model import GuidanceSpec
@@ -151,12 +151,12 @@ class JointTrainer(GuidanceTrainer):
                           sample_rng=self.gen_sample, initial_state=x[None], start_block=ref.step["block_id"],
                           initial_step=ref.step["step_id"])
         text = self.tokenizer.decode(result.completion_ids(0), skip_special_tokens=True)
-        pred = parse_prediction(text, self.cfg.data.task)
+        g = grade(meta.get("question", ""), meta["gold"], text, self.cfg.data.task, self.cfg.data.scorer)
         return {"meta": dict(meta, attempt=attempt, policy_version=int(self.state["optimizer_step"])),
                 "final_state": result.sequences[0, P:].to(torch.int32).cpu(),
                 "computed_length": result.computed_lengths[0], "completion_length": result.effective_lengths[0],
-                "stop_reason": result.stop_reasons[0], "generation": text, "parsed_answer": pred,
-                "is_correct": is_correct(pred, meta["gold"], self.cfg.data.task), "stats": result.stats}
+                "stop_reason": result.stop_reasons[0], "generation": text, "parsed_answer": g["parsed_answer"],
+                "is_correct": g["is_correct"], "verdicts": g["verdicts"], "stats": result.stats}
 
     def state_loss(self, ref):
         self.round_stats["states_attempted"] = self.round_stats.get("states_attempted", 0) + 1

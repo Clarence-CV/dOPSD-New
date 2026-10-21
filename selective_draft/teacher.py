@@ -1,7 +1,7 @@
 """Frozen-teacher targets for receivers B given a source A.
 
 reveal_view only changes the token at A (prompt, other MASKs, attention mask, positions untouched).
-Modes (see doc/Selective_Draft_OPSD_Review.md §2 for why `realized` is the default):
+Modes (see doc/Selective_Draft_OPSD.md §4 for the single-source default and its limits):
   realized  q_B^{a}  with a = the token A actually receives in the rollout    (1 forward)
   argmax    q_B^{v*} with v* = argmax r_A                                      (1 forward)
   mc        sum_j w_j q_B^{v_j},  v_j ~ r_A with replacement, w_j = counts/K    (<= K forwards)

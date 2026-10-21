@@ -37,10 +37,22 @@ Your reasoning here
 </answer>" 
 """
 
+# KLASS (github.com/shkim0116/KLASS @ad87ecb, src/llada_evaluation.py::test_dataset): separate system message.
+KLASS_SYSTEM_PROMPT = ("Your task is to answer the question below. Give step by step reasoning before you answer, "
+                       "and when you're ready to answer, please use the format 'The final answer is'.")
+# DMax (github.com/czg1225/DMax @43fafda, dInfer/evaluations/tasks/math/minerva_math_algebra.yaml doc_to_text, used by
+# minerva_math500 with --apply_chat_template): user turn only.
+DMAX_BOXED = "\nLet's think step by step, and put your final answer within \\boxed{}."
+# Original LLaDA OpenCompass MATH 0-shot (ML-GSAI/LLaDA @9182493, math_0shot_gen_11c4b5.py): appended to the problem.
+BOXED_STEP_BY_STEP = "\nPlease reason step by step, and put your final answer within \\boxed{}."
+
 RECIPES = {
-    # (system prompt, text appended after the generation prompt)
+    # (instruction, text appended after the generation prompt); legacy recipes put the instruction in the user turn
     "legacy_boxed_reasoning": (GSM_SYSTEM_PROMPT, "<reasoning>"),
     "legacy_math_boxed_reasoning": (MATH_SYSTEM_PROMPT, "<reasoning>"),
+    "klass_final_answer": (KLASS_SYSTEM_PROMPT, ""),  # system message, then the bare problem
+    "boxed_step_by_step": (BOXED_STEP_BY_STEP, ""),  # problem + instruction in the user turn, no system message
+    "dmax_boxed": (DMAX_BOXED, ""),  # same layout, DMax's wording
     "fake": ("Solve.", ""),
 }
 
@@ -102,9 +114,18 @@ def recipe_hash(name: str) -> str:
     return hashlib.sha256(f"{name}\n{sp}\n{suffix}".encode()).hexdigest()[:16]
 
 
+def build_messages(question: str, recipe: str) -> List[Dict[str, str]]:
+    sp, _ = RECIPES[recipe]
+    if recipe == "klass_final_answer":
+        return [{"role": "system", "content": sp}, {"role": "user", "content": question}]
+    if recipe in ("boxed_step_by_step", "dmax_boxed"):
+        return [{"role": "user", "content": question + sp}]
+    return [{"role": "user", "content": sp + "\n\n" + question}]
+
+
 def build_prompt(tokenizer, question: str, recipe: str) -> str:
-    sp, suffix = RECIPES[recipe]
-    messages = [{"role": "user", "content": sp + "\n\n" + question}]
+    _, suffix = RECIPES[recipe]
+    messages = build_messages(question, recipe)
     text = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
     return text + suffix
 
@@ -172,7 +193,7 @@ def load_raw(cfg: DataConfig) -> Dict[str, List[Tuple[str, str, str]]]:
     out = {}
     for split in ("train", "test"):
         if split == "test" and cfg.test_dataset_id:
-            ds = load_dataset(cfg.test_dataset_id, split="test")
+            ds = load_dataset(cfg.test_dataset_id, split="test", revision=cfg.test_dataset_revision)
         else:
             ds = load_dataset(cfg.dataset_id, cfg.dataset_config, split=split, revision=cfg.dataset_revision)
         if cfg.task == "math":
@@ -214,6 +235,34 @@ def prepare_manifest(cfg: DataConfig, path: str, force: bool = False) -> dict:
     return manifest
 
 
+# Question-level sub-splits of the parent manifest (plan §6.5): inside each parent split, sort by
+# SHA256(tag + question_id) and cut consecutive slices in this order. Not stratified by type/level.
+SUBSPLITS = {
+    "train": ("mini-readout-v1", [("readout_train_initial", 256), ("readout_train_extension", 256)]),
+    "analysis": ("mini-readout-v1", [("protocol", 128), ("readout_val", 64), ("readout_confirm", 64),
+                                     ("sampling_pilot", 32), ("sampling_confirm", 32), ("mechanism", 128),
+                                     ("analysis_reserve", 52)]),
+    "dev": ("mini-dev-fast-v1", [("dev_fast", 128)]),
+}
+
+
+def subsplit_ids(parent_ids: List[str], parent: str, name: str, seed: int = 42) -> List[str]:
+    if parent not in SUBSPLITS or name not in dict(SUBSPLITS[parent][1]):
+        raise ValueError(f"unknown sub-split {parent}:{name}")
+    tag, slices = SUBSPLITS[parent]
+    if parent_ids and all(q.startswith("fake-") for q in parent_ids):
+        return list(parent_ids)  # CPU fake dataset (a handful of ids): every sub-split is the whole parent
+    order = sorted(parent_ids, key=lambda q: hashlib.sha256(f"{tag}|{seed}|{q}".encode("utf-8")).hexdigest())
+    cursor = 0
+    for sub, size in slices:
+        if sub == name:
+            if cursor + size > len(order):
+                raise ValueError(f"{parent} has {len(order)} ids, too few for {name}")
+            return order[cursor:cursor + size]
+        cursor += size
+    raise AssertionError("unreachable")
+
+
 def load_split(cfg: Config, tokenizer) -> List[Example]:
     d = cfg.data
     raw = load_raw(d)
@@ -232,6 +281,8 @@ def load_split(cfg: Config, tokenizer) -> List[Example]:
         if manifest.get("task", "gsm8k") != d.task:
             raise ValueError(f"manifest task {manifest.get('task', 'gsm8k')} != data.task {d.task}")
     ids = manifest["splits"][d.split]
+    if d.subsplit:
+        ids = subsplit_ids(ids, d.split, d.subsplit, d.seed)
     if d.limit is not None:
         ids = ids[: d.limit]
     out = []

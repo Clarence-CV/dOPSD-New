@@ -1,6 +1,7 @@
 # Common environment for every d-OPSD process on Lonestar6 (login node, idev, sbatch).
 #   source tacc/env.sh            # compute node: offline HF/W&B
 #   ONLINE=1 source tacc/env.sh   # login node: downloads allowed
+#   CONDA_ENV=llada2 source tacc/env.sh   # LLaDA2.0-mini env (tacc/setup_llada2_env.sh)
 # All caches are redirected off $HOME (10 GB quota).
 
 export DOPSD_ROOT="${DOPSD_ROOT:-$WORK/inf385t}"
@@ -32,7 +33,7 @@ fi
 MINIFORGE="$DOPSD_ROOT/miniforge3"
 if [[ -f "$MINIFORGE/etc/profile.d/conda.sh" ]]; then
     source "$MINIFORGE/etc/profile.d/conda.sh"
-    conda activate dOPSD
+    conda activate "${CONDA_ENV:-dOPSD}"  # LLaDA2.0-mini jobs: CONDA_ENV=llada2 (transformers 4.57.1)
 else
     echo "[env.sh] WARN: $MINIFORGE missing; run tacc/setup_env.sh on a login node first."
 fi

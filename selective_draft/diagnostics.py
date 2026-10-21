@@ -1,10 +1,10 @@
 """Research diagnostics on recorded states. All run offline on rollout shards and need no training:
   readout      early-readout reliability (KL to q^0, top-1 agreement, gate coverage, calibration buckets)
   teacher      target signal: KL of {mixture, realized, argmax} targets to q^0, candidate agreement rates,
-               and the activation-patch oracle ceiling at the early layer
-  consistency  same-step coordination: parallel–sequential agreement, sibling PMI, one-step regret,
+               and activation-patch recovery at the early layer (not a proven upper bound)
+  consistency  same-step coordination: parallel–sequential agreement, reveal response, one-step regret,
                message-induced-commit fidelity
-See doc/Selective_Draft_OPSD_Review.md §3–§4 for definitions."""
+See doc/Selective_Draft_OPSD.md §4 and §6 for definitions and limitations."""
 
 from __future__ import annotations
 

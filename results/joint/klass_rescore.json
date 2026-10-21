@@ -1,0 +1,42 @@
+{
+  "note": "CPU-only rescoring of saved outputs; no new model generation. Original reported scores are unchanged.",
+  "klass_tree_sha": "ad87ecbe9fdef4a6e93701afbc150cb9213fbcd7",
+  "klass_repository": "https://github.com/shkim0116/KLASS",
+  "scorer_source": "https://github.com/shkim0116/KLASS/blob/ad87ecbe9fdef4a6e93701afbc150cb9213fbcd7/src/utils.py",
+  "scorer_sha256": "997b7655e39421e4f158836b8dd14fbb61eaa8ad5f80a25903606a681996479f",
+  "dataset_check": {
+    "same_question_same_index": 500,
+    "own_gold_equals_hf_answer": 500
+  },
+  "method": "Apply official extract_math_answer to question + reference solution and question + saved generation, then official compare_answers.",
+  "results": {
+    "base": {
+      "old_correct": 172,
+      "klass_correct": 176,
+      "gained": [
+        "test-157",
+        "test-343",
+        "test-368",
+        "test-441"
+      ],
+      "lost": [],
+      "errors": []
+    },
+    "joint": {
+      "old_correct": 175,
+      "klass_correct": 183,
+      "gained": [
+        "test-165",
+        "test-181",
+        "test-343",
+        "test-383",
+        "test-389",
+        "test-441",
+        "test-451",
+        "test-488"
+      ],
+      "lost": [],
+      "errors": []
+    }
+  }
+}

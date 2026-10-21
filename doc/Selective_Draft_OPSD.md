@@ -1,194 +1,128 @@
-# 单个高置信 Soft Draft 指导的 On-policy Self-distillation
+# Selective Draft / Joint OPSD：研究概览
 
-**核心思路：在中间层通过一个轻量读出适配器复用原 LM Head，选出当前置信度最高的一个 MASK 位置；当其置信度达到 0.8 时，将该位置的 soft draft 注入中间表示，让剩余原生层利用它预测其他位置。最终由末层决定内容和提交集合。从一开始就采用固定阈值、自适应步数解码，再补充固定预算实验；以最终准确率与实际解码时延验证效果。**
+更新：2026-10-18。合并原研究记录、单源方法、工程计划与数学审阅，保留修订后的结论。已运行的是 **LLaDA Joint-v1**；用户已接受的下一版是 **mini + root_success_v2**，尚未实现或训练。历史候选不再视为当前执行要求。
 
-## 1. 研究目标与本版取舍
+## 1. 要解决的问题
 
-dLLM 的双向 attention 已让不同位置共享隐藏上下文，但并行输出通常没有再条件于其他位置本次实际选出的 token identity。我们先研究一个更小的问题：**把一个高置信位置的候选分布提前显式读出来，能否帮助剩余层作出更好的预测？**
+dLLM的双向attention已让位置共享上下文，但同一步并行提交时，Receiver的最终预测未必再条件于同伴本次实际选定的token identity。研究目标是改善这种条件协调，最终用**准确率与实际生成时延**判断价值。
 
-本版只做一次单源 soft guidance，不要求所有位置同时互相修正，也不提前锁定硬 token。中间层固定的是本轮指导消息，指导位置的最终 token 仍可改变。因此，这是 soft proposal guidance，不是 early commitment，也不保证最终整组 token 已满足联合一致性。
+THU self-future PI提供后续去噪/未来block信息；sibling PI只在同一真实状态S中揭开指定同伴，其他位置保持不变。mini是block-causal：更晚block的reveal不能直接影响当前block，因此同block的sibling PI是有结构理由的迁移方向，效果仍需验证。
 
-多步去噪允许每步重新选择指导位置；本步实际写入的硬 token 会成为下一步的可见上下文。后续步骤能继续调整尚未提交的位置，但普通单调解码不会自动修正已经写错的 token。先验证这一简化机制；只有出现有效信号后，再考虑有限轮候选修正。
+## 2. 方法演进
 
-**采用 OPSD 的理由：** 在 Student 自身生成的状态上，用冻结 Teacher 的完整预测监督早期读出，并尝试用 Teacher 读取指定候选后的条件预测监督指导效果。这里的条件来自本步 soft draft，区别于原 d-OPSD 的 self-future PI；条件 Teacher 的具体近似仍须验证。
+| 阶段 | 核心设计 | 当前定位 |
+| --- | --- | --- |
+| 无训练全位置L24 feedback | 原LM head读出hard draft，手工加embedding残差 | 具体试验负收益，暂停 |
+| Early Commitment / Partial Loop | 早锁Anchor，或重用部分层增加条件传播 | 历史候选，未证明有效；不加入当前主线 |
+| 单源Selective Draft | L28 readout，最高置信位置以0.8门控发送soft message；单位置条件Teacher | 已实现并有初试；`single_soft`流程保留 |
+| LLaDA Joint-v1 | 最多4位置同时发消息；每轨迹抽4状态，每状态续写8次，选择完整tuple并LOO认证 | 已完成100次更新，速度有正向结果，准确率增益不确定 |
+| mini / root_success_v2 | confidence>.95决定全组；从prompt最多8次、首次答对即停、抽1状态、使用自身最终tuple | 当前批准的下一版计划；取消主线额外续写与多tuple搜索 |
 
-## 2. 架构：一个早期读出头，一个消息来源
+soft guidance是**proposal**：最终层仍可改变组员token，也可暂不提交。它不是early commitment；若以后锁定硬Anchor，必须保证内部条件与最终写入一致，重新定义错误锁定与提交额度。
 
-### 2.1 轻量适配器复用原 LM Head
+## 3. 两阶段结构与Joint目标
 
-以 32 层模型的 L28 为起始候选，记中间层为 $\ell$，末层为 $L$。冻结原主干、token embedding、final normalization 和 LM Head；新增一个轻量读出适配器 $g_\phi$，以及一个消息注入模块 $J_\psi$。
-
-**连接顺序为“中间 hidden state → 轻量适配器 → 原 final normalization → 共享 LM Head”。** 本文沿用前面讨论的 hidden-state 适配方案；词表 logits 后的修正头是另一种实现，未纳入首版。最终层继续使用原输出路径，不经过这个早期适配器。
-
-$$
-H^\ell=F_{1:\ell}(S_t),\qquad
-r_i=\operatorname{softmax}\!\left(W_{\rm LM}\operatorname{Norm}(g_\phi(h_i^\ell))\right).
-$$
-
-$g_\phi$ 可采用小型残差瓶颈或低秩适配，初始为恒等映射。$r_i$ 同时提供 token 分布和位置置信度，**不再设置独立位置头，也不再使用位置排序 loss**。原 LM Head 直接读取中间层，即 $g_\phi=\operatorname{Identity}$，作为读出基线。
-
-相比直接复用未适配的 LM Head，训练适配器允许中间表示对齐原词表映射；相比新增完整词表头，参数成本较小。哪种读出更可靠仍需测量。新增模块中只有一个预测头；$J_\psi$ 负责传递消息，不输出另一套词表分布或位置分数。
-
-### 2.2 选择一个最高置信位置，0.8 门控
-
-令 $M_t$ 为当前可解码 block 中尚未提交的位置。若 $|M_t|\leq1$，没有其他 Receiver，直接跳过指导。否则：
-
-$$
-s_i=\max_v r_i(v),\qquad
-A=\arg\max_{i\in M_t}s_i,\qquad
-z_t=\mathbf 1[s_A\geq\tau_{\rm msg}],\quad \tau_{\rm msg}=0.8.
-$$
-
-平分时按固定位置顺序选择。每步最多发送一条指导消息。**0.8 是首版待验证的消息门控，不是已证明最优的阈值，也不代表实际正确率一定达到 80%。** 它比 0.9 允许更多步骤参与指导，同时保留对明显低置信 draft 的过滤；收益取决于置信度校准与消息质量。
-
-### 2.3 Soft draft 注入与后续计算
-
-将 A 的完整候选分布转换为 soft embedding：
-
-$$
-m_A=\sum_{v\in\mathcal V}r_A(v)E(v).
-$$
-
-这里的 argmax 仅用于选择位置，不把消息硬化为某个 token，也不在 Student 路径采样硬 Anchor。将消息经适配后注入 A 的 residual stream：
-
-$$
-\widetilde h_A^\ell=h_A^\ell+z_tJ_\psi(h_A^\ell,m_A),\qquad
-\widetilde h_i^\ell=h_i^\ell\quad(i\neq A),
-$$
-
-$$
-p^{\rm final}=\operatorname{Head}\!\left(F_{\ell+1:L}(\widetilde H^\ell)\right).
-$$
-
-消息注入输出从零初始化。其他位置通过后续原生双向 attention 读取消息，不增加专门的组内 attention 或本步循环。单源指导不限制原生 attention 的其他交互，A 自己的末层预测也可能变化。门控关闭时，$\widetilde H^\ell=H^\ell$，数值输出应与原模型一致，但中间读出仍有运行开销。
-
-```mermaid
-flowchart TD
-    S["当前状态：可见 token + MASK"] --> H["原主干到中间层：首选检查 L28"]
-    H --> D["轻量适配器 → 共享原 LM Head"]
-    D --> A["选最高置信位置 A"]
-    A --> G{"置信度 ≥ 0.8 且存在其他 MASK？"}
-    G -->|是| M["A 的 soft embedding → 消息注入模块"]
-    H --> I["中间 hidden state"]
-    M --> I
-    G -->|否：跳过注入| I
-    I --> T["剩余原生层 + 原 LM Head"]
-    T --> C["末层选 token 和提交集合：阈值优先，另测固定预算"]
-    C --> N["写入后进入下一步，重新选择指导位置"]
+```text
+真实去噪状态 S → 冻结主干到选定层
+  → readout adapter → 原final norm → 共享LM head → r_i
+  → 选择G；m_i = sum_v r_i(v) * input_embedding[v]
+  → h'_i = h_i + Injector(h_i, m_i)，全部消息先算好再同时注入
+  → 冻结的剩余原生层 → 最终logits → 正常解码提交
 ```
 
-**不强制提交 A，不固定其最终身份，也不要求 A 属于本步末层提交集合。** 中间层选择消息来源，最终层选择写入内容与位置。
+- **阶段一**只训练readout：`mean_i KL(q0_i(S) || r_i(S))`。q0是同状态原模型末层分布，不是LOO；读出旁路不应改变原模型输出。
+- **阶段二**冻结readout与主干，只更新injector。历史LLaDA的rank64模块分别有524288和786432参数；mini必须按其维度重建，不能复用旧权重。
+- Joint参考pi来自一条完整、答案验证通过且与S相容的轨迹，不能跨轨迹拼接token。对每个i，Teacher只揭开`G除i`的参考token，i仍MASK；所有`argmax(q_i)==pi_i`才接受。
+- 优化`mean_i_in_G KL(q_i || p_student_i)`：完整词表、组内位置平均、有效state间平均。Teacher目标detach；Student只接收S与自己的soft messages，不接收pi或成功轨迹尾部。
+- LOO认证局部坐标自洽，终局答案由另一verifier判断；均不保证Student实际提交的tuple满足同一性质。Joint loss目前只监督G，组外Receiver虽受attention影响，却没有直接损失。
 
-## 3. 解码协议：从固定阈值开始，兼测固定预算
+## 4. 数学审阅：保留的结论与修正
 
-### 3.1 主协议：固定阈值、自适应步数
+单源`teacher.py`的模式与Joint整组LOO分开：
 
-从首次机制验证、训练数据采集到任务评测，都优先使用固定阈值解码。先以 $\tau_{\rm commit}=0.9$ 为起始设置；这与消息门控 $\tau_{\rm msg}=0.8$ 是两个不同参数。
+| 模式 | Teacher在源位置A揭开什么 | 边界 |
+| --- | --- | --- |
+| `realized`（单源默认） | 本条Student轨迹中A最终得到的token | 可能来自后续步；不保证正确或Student能预测它 |
+| `argmax` | 当前readout最大概率token | 可能与最终提交不同 |
+| `mc` / `topk` | 多候选条件分布的概率混合 | MC按频数，top-k按保留质量重归一化；不能平均logits |
 
-以 greedy 解码为例，在指导后的最终分布上计算：
+1. **mixture可能弱化信号，但不是已证明必然无效。** 自洽联合分布满足`sum_a q_A(a|S) q_B(b|S,A=a) = q_B(b|S)`；readout接近q_A时，mixture接近原边缘预测。实际dLLM未必联合自洽，必须实测mixture/argmax/realized相对q0的差异；旧稿“必然学不到”已撤回。detached权重下，平均hard条件KL与mixture KL对Student梯度相同，标量不一定相同。
+2. **soft message不是新外部信息。** 它是hidden的确定函数，可能让已有信息更易被尾层使用，也可能被injector忽略。固定hidden及其他输入，只改变消息再测Receiver；loss下降不足以证明同伴信息被利用。
+3. **主干冻结仍能学习。** injector参数会改变尾层输入和最终预测。“多采样找到正确参考再学习”是合理收益来源。Teacher很尖锐时，forward KL梯度接近参考token CE；不能把收益全部归因于LOO或协调。
+4. **不可见参考有学习限制。** 同一S对应不同参考而Student无法区分时，它可能只能拟合平均目标。soft guidance也不保证最终组员身份与Teacher条件一致。
+5. **撤回过强推断。** raw LM head读不出不等于早层没有identity；patch恢复率不是学到的injector能力上限，不能与readout准确率相乘预测收益；下一次前向不是“免费”；不能用事件数替代实测加速，或用小样本Reveal数值推出普适门控阈值。
 
-$$
-\hat x_i=\arg\max_v p_i^{\rm final}(v),\qquad
-c_i=p_i^{\rm final}(\hat x_i),\qquad
-C_t=\{i\in M_t:c_i>\tau_{\rm commit}\}.
-$$
+## 5. 已有证据及范围
 
-若 $C_t$ 为空，提交最终层置信度最高的一个位置，保证推进。带温度采样时，沿用原生成器，以实际候选 token 在原预测分布中的概率计分，不把它与最大概率混用。
+| 实验 | 主要观察 | 能说明什么 |
+| --- | --- | --- |
+| 历史GSM8K sibling response | 固定预算均值约−.130 nat、负向26%；阈值约+.017～.02、负向7% | 协议改变条件冲突分布，不能换算成任务涨点 |
+| 受控Reveal，128个Receiver | 正确Anchor：log-prob +.099，100→102答对；错误Anchor：−2.095，降至58答对 | identity有影响，错误条件危害明显；不是大幅任务增益证明 |
+| 原LM head逐层读出 | L28 55.47%，L31 97.66% | 该口径下晚层更可读，不证明早层无信息 |
+| Activation patch | L8/L16/L24/L28/L31恢复约104%/74%/37%/19%/6% | 条件传播探针，不是accuracy增益或严格上限 |
+| 无训练L24 hard feedback，GSM8K500 | 30.8%→26.6%；抽查L24/L32 agreement约18%；零注入parity通过 | 具体方案负收益；draft错误与表示不对齐尚未区分 |
+| 单源训练初试，MATH-500前200 | tau=.9时base41.0%→guided37.0%；其他阈值也未见明确增益 | head改善不自动带来任务收益；见[初试报告](../results/selective_draft/math_prelim_v3_REPORT.md) |
+| Joint-v1，MATH-500全500 | base34.4%→35.0%；步数100.422→82.232；时延5.533s→4.927s | NFE约−18.1%、时延约−11.0%；32修复/29损伤、净+3题，配对p约.80 |
 
-- A 未达到末层提交阈值时，可以继续保持 MASK。
-- Receiver 经指导后达到阈值，可以在当前步提交；变得不确定的位置继续等待。
-- 消息门控关闭时，仍执行正常的末层阈值提交和至少一个 token 的兜底规则。
-- 每步提交数量不固定，去噪步数自适应；不预先预测完整提交集合。
+前几项来自2026-10-11研究记录，原trace/统计定义仍需回查，不能与不同prompt、长度、模型或题集直接比较。早期“L24可读率近0%”与独立抽查“18% agreement”口径不同；30.8%与历史约79%的GSM8K结果也未统一协议。
 
-消息门控判断“早期分布是否值得用于指导”，提交阈值判断“最终预测是否可以写入”。它们来自不同层，不能假定相同数值具有相同可靠性。阈值选择应使用独立开发集，并报告覆盖率和实际可靠性。
+历史GSM8K背景一并收于此：300题greedy sweep选step448，78.3%→82.7%，最终step1344降至18.0%；同一测试子集选点，不能视为独立held-out效果。T=.9下固定预算75.0%→82.0%，阈值.9为79.3%→79.7%。future PI使兄弟与对照的绝对reveal response分别缩小约32%/38%，兄弟特有部分仅约+.010 nat；师生提交集合重合约54%，是排序变化线索，不能推出已学会协调。单seed、300题与稍后提交的对照token限制因果解释；数值/图保留在[历史结果](../results/pipeline_gsm_20261002/SUMMARY.md)及同目录产物中。
 
-### 3.2 补充协议：固定预算
+Joint-v1访问327题、178题贡献监督，100updates合计525有效state、2019位置；6000是题池大小。原评分有等价答案误判；相同输出换KLASS scorer为35.2%→36.6%，不能混用新旧分数。详见[Joint分析](../results/joint/math_v1_analysis.md)和[解码审计](decoding_protocol_audit_zh.md)。
 
-固定预算实验保留原调度给出的每步提交数 $k_t$。使用指导后的**最终层**候选置信度，选择当前 MASK 中得分最高的 $k_t$ 个位置提交。A 不预占额度、不强制进入集合，选择指导消息本身不消耗提交额度。
+Joint加速主要来自fallback每题51.30→31.63，输出长度约244不变；每步成本反而55.1→59.9ms。Teacher参考概率中位数.9984，draft/参考一致率71.4%，支持“学会更确信成功参考”这一待检验解释。checkpoint25/50/75未做任务评测，不能说100步最优或已收敛。逐题修复/损伤案例并入上述Joint分析，完整分组统计保留在[详细指标](../results/joint/math_v1_detail.md)。
 
-即使本步 $k_t=1$，只要仍有多个 MASK，指导也可以启用；是否需要跳过由是否存在 Receiver 和消息门控决定。历史 256 generated tokens / 128 steps / block length 32 可作为 LLaDA 的参考设置，但不同模型、长度和停止协议下的结果不直接混比。
+TACC[续写审计](../results/joint/rescue_audit.md)：226条自然错轨迹中77条找到LOO通过参考，贡献29.4%的监督位置，却花掉73.8%的续写NFE；每题预算是4×8条额外续写。原本成功轨迹的404个抽样state中，至少287个用自身最终tuple就能通过LOO。这支持简化采样，但不证明删去搜索后能保留全部收益；“救回监督”不等于模型救回相同题目。
 
-**实验顺序是阈值解码在先，固定预算在后。** 两种协议都比较匹配设置下的 base 与本方法。若训练或微调到固定预算协议，应重新采集相应状态；也可先评估阈值训练模型的直接迁移，但须明确标注训练与测试协议的差异。
+## 6. 诊断指标怎么解释
 
-## 4. Teacher 的两个监督目标
+| 指标 | 定义 / 用途 | 边界 |
+| --- | --- | --- |
+| PSA，并行—顺序一致率 | 同步提交的B是否等于只揭开实际A后Teacher的argmax | 两者可能一起错，不是正确率证书 |
+| D_S / reveal response | `log T_B(x_B given S,A=x_A) - log T_B(x_B given S)` | 旧代码键`pmi`保留兼容；无联合一致性假设就不是严格PMI |
+| re-mask regret | 写入本步其他token后重新mask B，检查Teacher是否改变预测 | 稳定的错误也能低后悔 |
+| induced-commit fidelity | 对guided新触发提交的B，从同一前态关闭guidance继续到B真正提交，比较token | 比较baseline决策，不是ground truth，也不一定只需下一步 |
+| readout fidelity / coverage | 与末层KL、argmax一致率、过阈值组覆盖、概率保真 | confidence不是语义正确率 |
+| 消息/patch干预 | 固定S/G及Receiver自身消息，改变同伴消息，观察尾层响应 | 非零响应只证明依赖；有益还需自然消息优于off/扰乱对照 |
 
-Teacher 是冻结的原模型，只在训练时提供目标。Student 是原模型加早期适配器与消息注入模块。Teacher 和 Student 必须匹配模型、tokenizer、prompt 与状态定义。
+固定分析state与各自on-policy轨迹分开统计，误差区间按题计算。现有induced-commit fidelity只支持有完整元数据的greedy阈值trace，其他情况显式报告不支持。NFE是调用次数，实际时延必须包含readout、soft embedding、注入与cache成本。
 
-### 4.1 普通 Teacher：监督早期读出
+## 7. 实现必须保持的契约
 
-普通 Teacher 输入与 Student 相同的去噪状态 $S_t$，输出完整模型分布 $q_i^0=T_i(S_t)$：
+- 原生final norm/head仅应用一次，同位置输出不套AR右移loss；层号指`blocks[layer-1]`输出。backend检查权重版本、hidden/vocab、token IDs与tied head。
+- readout初始为恒等残差，injector初始输出零；不能上下投影都零初始化。冻结base参数不等于关闭尾层输入梯度，Teacher才走no_grad。
+- scoped hook及时移除，Teacher/off无残留；off/readout-only/zero-injector做真实parity。activation checkpointing或compile另验证重算hook与梯度。
+- state保存提交前token、绝对位置、block、attention、G、policy与RNG；同一次更新内固定policy。逐项检查已知token/MASK/EOS相容性，不把未来token送入Student。
+- full-soft message和完整目标KL用FP32累加；chunk省显存不改变目标。top-k日志不能冒充完整训练分布。
+- 多卡按全局有效state数归一化；空rank仍同步，全局无目标不更新optimizer/scheduler。完整checkpoint含optimizer、各rank RNG、cursor、协议hash；snapshot只供初始化/推理。
+- base/方法匹配prompt、题集、长度、block、温度、停止、scorer和backend。固定预算steps与阈值实际NFE分开；计时关闭详细trace，诊断另跑，模型评测在TACC计算节点。
 
-$$
-\mathcal L_{\rm draft}
-=\operatorname{mean}_{i\in M_t}\mathrm{KL}(q_i^0\Vert r_i).
-$$
+CLI、现有模式和恢复约定见[流水线README](../selective_draft/README.md)，Joint-v1见[JOINT.md](../selective_draft/JOINT.md)。本概览不重复命令和旧默认配置。
 
-只更新 $g_\phi$。可分块或抽样 MASK 位置计算，确保覆盖实际选中的指导位置及其他候选位置。这个目标让早期分布接近完整模型，**不等于学会唯一正确的硬 token，也不监督最优解码顺序**。必须另测最高置信位置的可靠性与指导价值。
+## 8. 当前下一版：mini / root_success_v2
 
-### 4.2 条件 Teacher：监督收到 soft draft 后的响应
+1. **先复现官方mini MATH**：block32、T0、confidence>.95，每block steps32，实际NFE自适应；完整prompt/cap/scorer仍有缺项，不用自定2048或旧THU prompt宣称复现93.22%。
+2. **重新选层、训练readout**：全层confidence/entropy/identity稳定性诊断，不指定L16/L17；64题验证＋64题一次确认，head拟合q0而非LOO。G为早层所有>.95位置，少于2不通信，无固定4人组。
+3. **简化在线采样**：训练root T=.9，最多8次含首次，第一次答案成功即停；成功轨迹均匀抽1个有组state，自身最终tuple做LOO。失败换题，不额外续写、不重抽、不做距离排序；明确成功筛选偏差。
+4. **扩大独特题覆盖**：6000题池第一遍不放回，dev/analysis不回流；每25有效updates保存，dev128粗筛、dev500选点，按贡献题与SU决定续训，不只比较100steps。
+5. **验证真实消息路径**：记录注入、下一层输入、Receiver响应和梯度；修查mini的T0采样、MoE eval的no_grad、block-causal mask及EOS返回差异。CPU fake不代替真实验证。
+6. **收益与归因分开**：先跑一条主线；需要主张LOO独立价值时，再用相同数据/模块对比LOO-KL与参考token CE，并做消息干预。主干冻结不排除正确路径学习。
 
-对本步选出的 A，仅在 Teacher 输入中将 A 揭示为候选 $v$，其余位置保持 $S_t$ 原样，Receiver $B\in M_t\setminus\{A\}$ 仍为 MASK：
+短版交接见[mini handoff](llada2-mini_handoff.md)，实施细则和官方链接见[mini engineering plan](llada2-mini_engineering_plan.md)，跨仓库参数差异见[decoding audit](decoding_protocol_audit_zh.md)。本概览不授权新作业，也不恢复Partial Loop、全位置hard feedback或Receiver新损失为默认实验。
 
-$$
-q_B^v=T_B(S_t^{+A=v}).
-$$
+## 9. 相关工作与创新边界
 
-Student 使用的是 $r_A$ 而非一个已确定的硬 token，因此本版的候选 soft 条件目标为：
+保留影响设计的历史检索入口；正式比较前仍须核查具体版本与协议。不能把增加head、soft embedding或几层循环本身当作新贡献。
 
-$$
-\bar q_B=\sum_v r_A(v)q_B^v,\qquad
-\mathcal L_{\rm cond}
-=\operatorname{mean}_{B\in M_t\setminus\{A\}}
-\mathrm{KL}(\bar q_B\Vert p_B^{\rm final}).
-$$
-
-该项只在消息门控开启且存在 Receiver 时使用，Receiver 不限于最终提交集合。训练通信时固定 $g_\phi$，对 $r_A$ 和 Teacher 目标停止梯度；梯度穿过冻结尾层，只更新 $J_\psi$。目标是学习 Receiver 的条件预测响应，不是直接监督某些 attention 权重变大。
-
-**条件 Teacher 仍是待验证部分：**
-
-- 对完整词表逐一运行 Teacher 不现实。可从 $r_A$ 采样，或截取 top-K 并重新归一化近似；记录样本数、保留的概率质量和目标近似误差。每个候选的一次 Teacher 前向可同时监督多个 Receiver。
-- 高置信消息通常更集中，有利于近似，但平均可能削弱条件响应。先测目标相对 $q_B^0$ 是否有有效变化。
-- 只用 argmax 硬候选的 Teacher 是另一种近似，不能声称与 Student 的 soft 条件完全相同；也不能将 soft embedding 注入等同于对硬条件预测精确求平均。
-- 在相同 $S_t$、相同 A 上改变消息并重算 Teacher 目标，检查 Student 是否产生对应响应，避免只凭一个 KL 数字认定它使用了消息。人工扰动需注意与自然消息分布的差异。
-
-本版只有早期读出与条件响应两个候选训练目标，不添加位置 loss、最终正确率奖励或 GRPO。Teacher 揭示的候选也可能错误；条件蒸馏不能替代对指导可靠性的验证。
-
-## 5. 训练与数据流程
-
-1. **先采集阈值轨迹，建立读出基线。** 在独立分析集的真实状态上测原 LM Head 的中间读出，重点看每步 top-1 指导位置在 0.8 门控下的覆盖率、与末层预测的一致性、条件指导价值。0.9 可作为更保守门控的对照。
-2. **阶段一：训练早期适配器。** 关闭消息，以原模型的阈值解码轨迹构造 $q_i^0$，只训练 $g_\phi$；原最终输出路径保持冻结。没有消息时，早期读出不改变提交策略。训练后在同一独立分析集复测读出可靠性与门控覆盖率。
-3. **验证条件目标，再训练消息注入。** 固定早期读出，在当前 Student 实际选中的 A、实际 $r_A$ 上构造候选条件目标。确认可靠性和条件目标有信号后，只训练零输出初始化的 $J_\psi$。
-4. **刷新 on-policy 状态。** 消息会改变最终分布、阈值提交集合与后续状态，阶段二需使用当前 Student 的阈值 rollout 持续更新数据。训练和推理执行同一套选位置、门控与注入规则。
-5. **再扩展协议与模型。** 补固定预算对照，并尽早验证 iLLaDA 的读出与指导可行性；不把 LLaDA 的层位、置信度或效果直接移植为结论。
-
-保存正确与错误 rollout。若初版沿用“仅最终答案验证正确的轨迹用于训练”的筛选，应明确这是数据筛选条件，不能将其视为全部局部 draft 正确；错误轨迹仍用于诊断，完整任务评测不按最终正确性筛选。采样与 checkpoint/阈值选择使用独立数据，避免在最终测试集反复选方案。
-
-## 6. 模型迁移与验证标准
-
-### 6.1 LLaDA 与 iLLaDA
-
-LLaDA 可用于已有管线上的机制验证，iLLaDA 是后续强模型验证的明确目标。两者均为 32 层，但中间表示与置信度成熟时机需要分别测量，L28 只是起始候选。
-
-[iLLaDA 原文](https://arxiv.org/abs/2606.25331)给出的隐藏维度为 4096、词表大小为 155,136，输入 embedding 与 LM Head 共享权重。完整新增词表矩阵约需 6.35 亿参数，因此优先复用冻结的原输出映射并训练小型适配器。这里的“共享”指同一个模型的早期与最终读出共享，不是跨模型共享权重。
-
-iLLaDA 的变长分块生成与 low-confidence remasking 不强制要求固定数值阈值；固定阈值是我们选定的主实验协议。迁移时核对 tokenizer、MASK/EOS/stop token、归一化、生成长度与停止规则，重新训练或校准该模型的适配器、注入模块和阈值。不能仅修改模型名后假定完全兼容。
-
-### 6.2 准确率与实际速度均可提供有效性证据
-
-**提高最终准确率，或在质量相近时缩短实际解码时间，都能支持方法有效；不要求二者同时提升。** 若两者存在取舍，报告准确率—时延曲线。固定阈值下，一个重要假设是：指导让部分原本需要下一步的位置更早达到可靠提交条件，从而减少前向次数。
-
-历史阈值协议的 sibling 冲突小于固定预算，说明可修复空间可能更小；这些旧观察不是 iLLaDA 上的效果预测。不要只把置信度上升或步数减少当作成功，它们也可能来自过度自信。中间词表投影、soft embedding 与消息注入的额外开销必须计入实际时延。
-
-最小验证内容：
-
-- **原模型基线与关闭注入的数值一致性：** 确认适配器只在早期分支使用，关闭消息时原 logits 和提交行为保持一致；随机解码比较时固定采样随机性。
-- **读出对照：** 直接共享 LM Head 与训练轻量适配器，在同一批状态上比较 top-1 指导位置的可靠性和 0.8/0.9 门控覆盖率。
-- **指导效果：** 在匹配解码参数下比较 base 与本方法；使用同等计算开销、改变消息内容的对照，区分具体消息信息与额外计算/模块的贡献。
-- **任务与时延：** 报告完整分析集/测试集准确率、实际端到端生成时间、前向次数、每步提交量、门控触发率和最终提交 token 的可靠性，并给出不确定性。分开报告 Teacher 训练成本与 Student 推理成本。
-- **协议一致性：** base 与本方法匹配 prompt、温度、最大长度、block、停止与答案抽取规则。先比较相同阈值，再在独立开发集选阈值比较准确率—时延曲线；固定预算结果单独报告。
-
-## 7. 方法边界与后续方向
-
-单源 soft feedback 本身不构成已成立的创新。已有中间预测反馈方法需要比较；[DFlash](https://arxiv.org/abs/2602.06036)使用并行 draft，[DSpark](https://arxiv.org/abs/2607.05147)进一步用轻量 Markov/RNN 模块条件于已采样前缀。我们当前验证的是：**能否将选择性的 soft draft 指导放进 dLLM 自身的深度计算中，通过 on-policy 条件监督获得实际准确率或时延收益。** 原生 attention 已有信息共享，不能将本方法描述成首次让 token 互相可见。
-
-本版不声称消除了循环依赖、不锁定硬 Anchor、不增加 Partial Loop，也不训练完整解码顺序。若单源指导有效，再尝试有限轮候选修正；新增循环必须有同等额外计算的对照并实测时延。若早期可靠性、条件目标或实际收益不成立，应据此调整假设，而不是预先堆叠更多 head 或循环。
+| 方向 | 来源 | 对本项目的约束 |
+| --- | --- | --- |
+| 中间预测反馈 | [DSLP](https://arxiv.org/abs/2110.07515)、[DiscoLoop](https://arxiv.org/abs/2607.00341)、[Tuned Lens](https://github.com/AlignmentResearch/tuned-lens) | readout与embedding feedback有先例，需证明具体监督/计算收益 |
+| 联合提交 / 条件修正 | [CoCommit](https://arxiv.org/abs/2607.04469)、[ADJUST](https://arxiv.org/abs/2509.22738)、[MRP](https://arxiv.org/abs/2605.18817) | 重算尾层或外挂条件预测器须比较重合与成本 |
+| 揭示调度 | [DAPD](https://proceedings.mlr.press/v306/kim26t.html)、[AXON](https://arxiv.org/abs/2606.04236)、[Learning Unmasking Policies](https://proceedings.mlr.press/v306/jazbec26a.html) | 高置信不等于高条件价值；选位置已有相关工作 |
+| 循环深度 | [LoopMDM](https://arxiv.org/abs/2605.26106)、[Recurrent-Depth Samplers](https://proceedings.mlr.press/v306/geiping26a.html) | 若恢复loop，需同等计算的无Anchor对照与实测时延 |
+| PI / 成功路径蒸馏 | [THU self-future](https://arxiv.org/abs/2606.18195)、[另一篇dOPSD](https://arxiv.org/abs/2607.04428)、[GKD](https://arxiv.org/abs/2306.13649)、[STaR](https://arxiv.org/abs/2203.14465) | 区分PI来源、成功筛选、可见条件与普通参考学习 |
+| 共同终点 / 部分揭示 | [CLLMs（ICML 2024）](https://proceedings.mlr.press/v235/kou24a.html)、[Glancing Transformer（ACL 2021）](https://aclanthology.org/2021.acl-long.155/) | AR Jacobi收敛论证不能直接移植双向DLM；Student直接见参考与Teacher-only PI不同 |
+| 监督可靠性 / 可迁移性 | [SelFusion（ACL 2026）](https://aclanthology.org/2026.acl-long.1008/)、[PI Distillation（ICML 2026）](https://openreview.net/forum?id=ebZcMQImhG) | 更多已知token未必更正确，Teacher受益也未必可由Student复现；旧Receiver门控建议仅保留为详细计划§11.4的可选后续 |
+| 关键位置 / 推理训练 | [Critical Tokens Matter（ICML 2025）](https://proceedings.mlr.press/v267/lin25j.html)、[d1（NeurIPS 2025）](https://openreview.net/forum?id=7ZVRlBFuEv)、[Fast-dLLM（ICLR 2026）](https://openreview.net/forum?id=3Z3Is6hnOT) | 关键位置与原生模型训练有先例；不能直接搬AR概率、跨协议成绩或把阈值加速等同于纠错 |
+| 机制 / 外部draft | [Steering Without Breaking](https://arxiv.org/abs/2605.10971)、[DFlash](https://proceedings.mlr.press/v306/chen26bv.html)、[DSpark](https://arxiv.org/abs/2607.05147) | 机制诊断和外部speculative pipeline不冒充同协议对照 |
+| 强模型 / 置信度训练 | [mini](https://huggingface.co/inclusionAI/LLaDA2.0-mini)、[mini-CAP](https://huggingface.co/inclusionAI/LLaDA2.0-mini-CAP) | 分别复现原生解码；置信度提升不等于协同推理 |

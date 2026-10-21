@@ -21,7 +21,8 @@ import torch.nn.functional as F
 
 from .checkpoint import load_checkpoint, save_checkpoint, save_snapshot
 from .config import Config
-from .data import Example, is_correct, parse_prediction, tokenize_prompts
+from .data import Example, tokenize_prompts
+from .scoring import grade
 from .generation import generate
 from .losses import forward_kl
 from .model import GuidanceSpec, GuidedModel, StepContext
@@ -80,8 +81,11 @@ class StateRef:
     policy_version: int = -1
 
 
-def state_tensors(roll: dict, step: dict, device) -> Tuple[torch.Tensor, torch.Tensor, StepContext, torch.Tensor]:
-    """-> x [N], attn [N], context (B=1), eligible absolute positions [n]."""
+def state_tensors(roll: dict, step: dict, device, commit_threshold: Optional[float] = None,
+                  max_new_tokens: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor, StepContext, torch.Tensor]:
+    """-> x [N], attn [N], context (B=1), eligible absolute positions [n].
+    commit_threshold feeds the threshold group rule; max_new_tokens limits groups to [P, P + max_new_tokens)
+    exactly as the block-causal decoder did when the state was recorded."""
     meta = roll["meta"]
     prompt = torch.tensor(meta["prompt_ids"], dtype=torch.long, device=device)
     pmask = torch.tensor(meta["prompt_attention_mask"], dtype=torch.long, device=device)
@@ -91,24 +95,36 @@ def state_tensors(roll: dict, step: dict, device) -> Tuple[torch.Tensor, torch.T
     elig_pos = step["eligible_positions"].to(device=device, dtype=torch.long)
     elig = torch.zeros(1, x.numel(), dtype=torch.bool, device=device)
     elig[0, elig_pos] = True
+    guidance_mask = None
+    if max_new_tokens is not None:
+        guidance_mask = elig & (torch.arange(x.numel(), device=device) < prompt.numel() + int(max_new_tokens))[None]
     ctx = StepContext(eligible_mask=elig, active_rows=torch.ones(1, dtype=torch.bool, device=device),
                       block_start=torch.tensor([step["block_start"]], device=device),
                       block_end=torch.tensor([step["block_end"]], device=device),
-                      step_id=torch.tensor([step["step_id"]], device=device))
+                      step_id=torch.tensor([step["step_id"]], device=device),
+                      commit_threshold=commit_threshold, guidance_mask=guidance_mask)
     return x, attn, ctx, elig_pos
 
 
-def collect_state_refs(rollouts: List[dict], filter_correct_only: bool, require_gate: bool) -> List[StateRef]:
+def collect_state_refs(rollouts: List[dict], filter_correct_only: bool, require_gate: bool,
+                       per_rollout: Optional[int] = None) -> List[StateRef]:
+    """per_rollout=k: k states per rollout, uniform without replacement, seeded by the example id (plan §6.5)."""
     refs = []
     for roll in rollouts:
         if filter_correct_only and not roll.get("is_correct", False):
             continue
+        steps = []
         for step in roll["steps"]:
             if len(step["eligible_positions"]) == 0:
                 continue
             if require_gate and not (step["gate_open"] and len(step["eligible_positions"]) >= 2):
                 continue
-            refs.append(StateRef(roll, step))
+            steps.append(step)
+        if per_rollout is not None and len(steps) > per_rollout:
+            seed = int(hashlib.sha256(f"readout-train-v1|{roll['meta'].get('example_id', '')}".encode()).hexdigest()[:15], 16)
+            keep = torch.randperm(len(steps), generator=torch.Generator().manual_seed(seed))[:per_rollout]
+            steps = [steps[i] for i in sorted(keep.tolist())]
+        refs.extend(StateRef(roll, step) for step in steps)
     return refs
 
 
@@ -190,8 +206,12 @@ class BaseTrainer:
             zero.backward()
         self.dist.all_reduce_grads(self.params)
         gnorm = torch.nn.utils.clip_grad_norm_(self.params, self.cfg.training.grad_clip)
-        warmup = math.ceil(self.cfg.training.max_steps * self.cfg.training.warmup_ratio)
-        lr = self.learning_rate * (min(1.0, int(self.state["optimizer_step"]) / warmup) if warmup else 1.0)
+        step = int(self.state["optimizer_step"])
+        if self.cfg.training.warmup_updates is not None:  # plan §7.5: first update already has a non-zero lr
+            lr = self.learning_rate * min(1.0, (step + 1) / self.cfg.training.warmup_updates)
+        else:
+            warmup = math.ceil(self.cfg.training.max_steps * self.cfg.training.warmup_ratio)
+            lr = self.learning_rate * (min(1.0, step / warmup) if warmup else 1.0)
         for group in self.optimizer.param_groups:
             group["lr"] = lr
         self.optimizer.step()
@@ -220,7 +240,8 @@ class ReadoutTrainer(BaseTrainer):
     def __init__(self, gm, cfg, out_dir, rollout_paths: List[str], dist_ctx=None):
         super().__init__(gm, cfg, out_dir, dist_ctx)
         rollouts = [r for p in rollout_paths for r in load_rollouts(p)]
-        self.refs = collect_state_refs(rollouts, cfg.training.filter_correct_only, require_gate=False)
+        self.refs = collect_state_refs(rollouts, cfg.training.filter_correct_only, require_gate=False,
+                                       per_rollout=cfg.training.readout_states_per_rollout)
         if not self.refs:
             raise RuntimeError("no training states (check filter_correct_only and the rollout files)")
         # each rank takes an interleaved slice so ranks see disjoint states
@@ -317,7 +338,7 @@ class GuidanceTrainer(BaseTrainer):
         return self.examples[self.order[c]]
 
     @torch.no_grad()
-    def rollout(self, ex: Example, attempt: int = 0) -> dict:
+    def rollout(self, ex: Example, attempt: int = 0, sample_rng: Optional[torch.Generator] = None) -> dict:
         ids, mask = tokenize_prompts(self.tokenizer, [ex.prompt_text], self.device)
         # Training rollouts may sample (training.rollout_temperature, e.g. 0.9 as in THU d-OPSD) while collection,
         # diagnostics and evaluation stay on generation.temperature. Source selection, gate and injection are the
@@ -325,15 +346,15 @@ class GuidanceTrainer(BaseTrainer):
         gen_cfg = replace(self.cfg.generation, temperature=self.cfg.rollout_temperature())
         meta = {"example_id": ex.example_id, "prompt_ids": ids[0].tolist(), "prompt_attention_mask": mask[0].tolist(),
                 "policy_version": int(self.state["optimizer_step"]), "guidance_mode": self.guidance_mode,
-                "generation": dict(gen_cfg.__dict__), "gold": ex.answer_value, "attempt": attempt,
+                "generation": dict(gen_cfg.__dict__), "gold": ex.answer_value, "question": ex.question, "attempt": attempt,
                 "confidence_policy": "raw_model_probability"}
         rec = StateRecorder("state_only", self.gm.backend.mask_token_id, self.gm.backend.eos_token_id, ids.shape[1], [meta])
         res = generate(self.gm, ids, mask, gen_cfg, guidance_mode=self.guidance_mode, recorder=rec,
-                       sample_rng=self.gen_sample)
+                       sample_rng=self.gen_sample if sample_rng is None else sample_rng)
         text = self.tokenizer.decode(res.completion_ids(0), skip_special_tokens=True)
-        pred = parse_prediction(text, ex.task)
-        roll = rec.finalize(res, [{"generation": text, "parsed_answer": pred,
-                                   "is_correct": is_correct(pred, ex.answer_value, ex.task), "stats": res.stats}])[0]
+        g = grade(ex.question, ex.answer_value, text, ex.task, self.cfg.data.scorer)
+        roll = rec.finalize(res, [{"generation": text, "parsed_answer": g["parsed_answer"], "is_correct": g["is_correct"],
+                                   "verdicts": g["verdicts"], "stats": res.stats}])[0]
         return roll
 
     def refresh(self) -> Dict[str, float]:
@@ -462,7 +483,7 @@ def run_training(trainer: BaseTrainer, max_steps: int, save_every: int, resume: 
     if resume:
         trainer.resume(resume)
     last: Dict[str, float] = {}
-    while int(trainer.state["optimizer_step"]) < max_steps:
+    while int(trainer.state["optimizer_step"]) < max_steps and not getattr(trainer, "finished", False):
         last = trainer.update()
         s = int(trainer.state["optimizer_step"])
         if save_every and s % save_every == 0 and "skipped" not in last:

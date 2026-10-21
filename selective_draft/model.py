@@ -3,8 +3,11 @@ scoped forward hook on the early-layer block. Modes:
   off           native forward, no hook (exact base output);
   readout_only  hook computes the early readout and picks the source, but does not touch hidden;
   single_soft   additionally adds the message at the source position when the gate is open.
-  group_readout selects the top-m communication group without changing hidden states;
+  group_readout selects the communication group without changing hidden states;
   group_soft    injects all group members' natural soft drafts simultaneously.
+Group rule (guidance.group_policy): topk = Joint-v1's top-m readout confidence; confidence_threshold_all =
+every guidance-eligible position whose readout candidate has raw confidence > the step's commit threshold
+(StepContext.commit_threshold, i.e. the decoder's own tau), with no size budget; fewer than 2 -> no message.
 """
 
 from __future__ import annotations
@@ -31,6 +34,10 @@ class StepContext:
     block_start: torch.Tensor  # [B] long, absolute, inclusive
     block_end: torch.Tensor  # [B] long, exclusive
     step_id: torch.Tensor  # [B] long, actual denoising step
+    commit_threshold: Optional[float] = None  # the decoder's tau; the threshold group rule reads it from here
+    # Positions allowed into a communication group (subset of eligible_mask); None = eligible_mask. Block-causal
+    # decoding uses it to keep the physically rounded-up tail of the last block out of G (plan §5.4).
+    guidance_mask: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -56,6 +63,7 @@ class GuidanceInfo:
     source_argmax: Optional[torch.Tensor] = None  # [B] long, argmax r_A (-1 when no source)
     group_pos: Optional[torch.Tensor] = None
     group_probs: Optional[torch.Tensor] = None
+    n_high: Optional[torch.Tensor] = None  # [B] long: threshold rule, #positions with readout confidence > tau
 
 
 @dataclass
@@ -90,7 +98,8 @@ class GuidedModel(nn.Module):
         self.readout = EarlyReadoutAdapter(backend.d_model, cfg.readout_rank).to(device=device, dtype=torch.float32)
         self.injector = MessageInjector(backend.d_model, cfg.injector_rank).to(device=device, dtype=torch.float32)
         self._scratch: Optional[_Scratch] = None
-        self.backend.boundary_module(cfg.early_layer)  # validates the layer index now
+        if cfg.early_layer is not None:
+            self.backend.boundary_module(cfg.early_layer)  # validates the layer index now
 
     # ------------------------------------------------------------------ housekeeping
     def train(self, mode: bool = True):
@@ -170,6 +179,8 @@ class GuidedModel(nn.Module):
             return StepOutput(self.base_forward(input_ids, attention_mask), None, None)
         if mode != "off" and context is None:
             raise ValueError("context is required unless mode='off'")
+        if self.cfg.early_layer is None:
+            raise ValueError("guidance.early_layer is unresolved: only mode='off' without hidden capture can run")
         scratch = _Scratch(mode=mode, context=context, spec=spec, capture=capture_hidden)
         with self._scoped_hook(scratch):
             logits = self.backend.forward_logits(input_ids, attention_mask)
@@ -199,7 +210,12 @@ class GuidedModel(nn.Module):
         if sc.mode == "off":
             return None
         if sc.mode in ("group_readout", "group_soft"):
-            info = self._select_group(h, sc.context) if sc.spec is None else self._group_info_from_spec(sc.spec, sc.context)
+            if sc.spec is not None:
+                info = self._group_info_from_spec(sc.spec, sc.context)
+            elif self.cfg.group_policy == "confidence_threshold_all":
+                info = self._select_group_threshold(h, sc.context)
+            else:
+                info = self._select_group(h, sc.context)
             sc.info = info
             if sc.mode == "group_readout" or not bool(info.gate_open.any()):
                 return None
@@ -300,6 +316,49 @@ class GuidedModel(nn.Module):
         spec = GuidanceSpec(positions[:, 0], (positions >= 0).sum(1) >= 2,
                             probs[:, 0], group_pos=positions, group_probs=probs)
         return self._group_info_from_spec(spec, ctx)
+
+    @torch.no_grad()
+    def _select_group_threshold(self, h: torch.Tensor, ctx: StepContext) -> GuidanceInfo:
+        """G = {i guidance-eligible : readout candidate confidence > tau}, all of them, ascending position.
+        Candidate/confidence use the decoder's own rule (MASK forbidden, raw probability, greedy)."""
+        from .decoding import choose_tokens
+        tau = ctx.commit_threshold
+        if tau is None:
+            raise ValueError("group_policy=confidence_threshold_all needs StepContext.commit_threshold")
+        B, V = h.shape[0], self.backend.vocab_size
+        allowed = ctx.eligible_mask if ctx.guidance_mask is None else (ctx.guidance_mask & ctx.eligible_mask)
+        allowed = allowed & ctx.active_rows[:, None]
+        rows_pos, rows_probs = [], []
+        n_high = torch.zeros(B, dtype=torch.long, device=h.device)
+        for b in range(B):
+            idx = allowed[b].nonzero(as_tuple=False).flatten()
+            keep_pos, keep_probs = [], []
+            for chunk in idx.split(self.cfg.readout_position_chunk):
+                log_r = self.readout_log_probs(h[b, chunk])
+                _, conf = choose_tokens(log_r, 0.0, None, self.backend.mask_token_id)
+                hit = conf > tau
+                if bool(hit.any()):
+                    keep_pos.append(chunk[hit])
+                    keep_probs.append(log_r[hit].exp())
+            pos = torch.cat(keep_pos) if keep_pos else idx[:0]
+            n_high[b] = len(pos)
+            rows_pos.append(pos)
+            rows_probs.append(torch.cat(keep_probs) if keep_probs else None)
+        K = max([2] + [len(p) for p in rows_pos])
+        positions = torch.full((B, K), -1, dtype=torch.long, device=h.device)
+        probs = torch.zeros(B, K, V, dtype=torch.float32, device=h.device)
+        for b, pos in enumerate(rows_pos):
+            if len(pos) >= 2:  # a singleton has no peer for leave-one-out: no message
+                positions[b, :len(pos)] = pos
+                probs[b, :len(pos)] = rows_probs[b]
+        spec = GuidanceSpec(positions[:, 0], (positions >= 0).sum(1) >= 2, probs[:, 0],
+                            group_pos=positions, group_probs=probs)
+        info = self._group_info_from_spec(spec, ctx)
+        info.n_high = n_high
+        info.skip_reason = ["inactive" if not bool(ctx.active_rows[b]) else
+                            "open" if int(n_high[b]) >= 2 else
+                            "single_high" if int(n_high[b]) == 1 else "none_high" for b in range(B)]
+        return info
 
     @staticmethod
     def _group_info_from_spec(spec: GuidanceSpec, ctx: StepContext) -> GuidanceInfo:

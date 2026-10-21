@@ -1,6 +1,6 @@
-"""Selective Draft OPSD: one early readout adapter -> shared frozen LM head -> single
-highest-confidence soft draft -> one residual message at the source position -> native
-tail layers -> final commit. See doc/Selective_Draft_OPSD.md and the engineering plan.
+"""Selective Draft / Joint OPSD: early readout -> shared frozen LM head -> residual
+soft messages -> native tail layers -> final commit.
+See doc/Selective_Draft_OPSD.md for the research overview and this package's README for usage.
 
 Run with `python -m selective_draft.cli --help`.
 """
