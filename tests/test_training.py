@@ -43,6 +43,7 @@ def test_readout_training_updates_only_the_readout_and_resumes_exactly():
         # 3 updates, checkpoint, new process state, 3 more == 6 straight
         gm_b, _, _ = build(cfg)
         tr_b = ReadoutTrainer(gm_b, cfg, os.path.join(d, "b"), paths)
+        tr_b.total_steps = 6  # run_training sets it in a real run; the cosine readout schedule depends on it
         for _ in range(3):
             tr_b.update()
         ckpt = tr_b.save()
