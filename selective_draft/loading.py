@@ -37,8 +37,14 @@ def build_model_and_tokenizer(cfg: Config, device: torch.device):
         tok = AutoTokenizer.from_pretrained(m.path, trust_remote_code=m.trust_remote_code, **rev)
         mask_id, eos_id = _special_ids(tok, cfg)
         # AutoModel maps to the headless backbone in this repo's config.json: the LM head needs ForCausalLM.
+        # Weights go straight to the GPU with device_map, as in the official model card and DMax README
+        # (from_pretrained(..., device_map="cuda:0")); the dtype is fixed at load time so nothing is materialised in fp32.
+        placement = {"device_map": str(device)} if device.type == "cuda" else {}
         base = AutoModelForCausalLM.from_pretrained(
             m.path, trust_remote_code=m.trust_remote_code, torch_dtype=DTYPES[m.dtype],
-            attn_implementation=m.attn_implementation or "sdpa", **rev).to(device).eval()
+            attn_implementation=m.attn_implementation or "sdpa", **placement, **rev)
+        if device.type != "cuda":
+            base = base.to(device)
+        base = base.eval()
     backend = LLaDA2MiniBackend(base, cfg.generation.block_length, mask_token_id=mask_id, eos_token_id=eos_id)
     return GuidedModel(base, backend, cfg.guidance), tok

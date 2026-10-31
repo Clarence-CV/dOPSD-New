@@ -36,6 +36,20 @@ export PYTHONUNBUFFERED=1
 # Job 3519705 died with a CUDA OOM at ~2.1k tokens: 31.8 GiB allocated but 6.7 GiB reserved-and-unusable
 # (fragmentation from ever-growing prefix shapes). Expandable segments remove that waste.
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# Stage the weights on the node-local disk once per job. Every stage starts fresh processes that otherwise page the
+# 31 GB checkpoint in lazily from $WORK (Lustre). On 2026-10-31 jobs 3544349 and 3544533 stalled there for 100 and
+# 15+ min (~2 MB/s, GPU idle) on the same node where 3544039 had loaded in ~10 min, while a sequential read of the
+# same files from the login node ran at ~136 MB/s. A sequential copy avoids the slow lazy-read path.
+MODEL_CACHE="models--inclusionAI--LLaDA2.0-mini"
+if [[ -d "$HF_HOME/hub/$MODEL_CACHE" ]]; then
+    export HF_HUB_CACHE="/tmp/$USER-hf-hub-${SLURM_JOB_ID:-local}"
+    mkdir -p "$HF_HUB_CACHE"
+    trap 'rm -rf "$HF_HUB_CACHE"' EXIT
+    t0=$(date +%s)
+    timeout 1800 cp -a "$HF_HOME/hub/$MODEL_CACHE" "$HF_HUB_CACHE/" \
+        || { echo "copying the model to node-local /tmp failed or took over 30 min"; exit 8; }
+    echo "[llada2] model staged to $HF_HUB_CACHE in $(( $(date +%s) - t0 )) s ($(du -sh "$HF_HUB_CACHE" | cut -f1))"
+fi
 
 STAGES="${STAGES:-baseline}"
 SMOKE="${SMOKE:-0}"
@@ -87,7 +101,9 @@ cp .code_status "$OUT/meta/code_status.txt" 2>/dev/null || true
 pip freeze > "$OUT/meta/pip_freeze.txt" 2>/dev/null || true
 nvidia-smi > "$OUT/meta/nvidia_smi.txt" 2>&1 || true
 echo "$SLURM_JOB_ID $(hostname) $(date -Is) STAGES=$STAGES SMOKE=$SMOKE" >> "$OUT/meta/jobs.txt"
-[[ -f "$OUT/meta/inspect.json" ]] || python -m selective_draft.cli inspect "${S[@]}" > "$OUT/meta/inspect.json"
+# Job 3544349 sat 1h40 in this step: the weights were paged in from $WORK at ~2 MB/s on its node. Fail fast instead of burning the allocation.
+[[ -s "$OUT/meta/inspect.json" ]] || timeout 900 python -m selective_draft.cli inspect "${S[@]}" > "$OUT/meta/inspect.json" \
+    || { rm -f "$OUT/meta/inspect.json"; echo "model load/inspect failed or took over 15 min (slow storage on $(hostname)?)"; exit 7; }
 
 # evaluate NAME ARGS...: shard examples over all GPUs (resumable), then merge
 par_eval() { local name=$1; shift
