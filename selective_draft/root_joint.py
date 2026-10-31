@@ -120,6 +120,7 @@ class RootSuccessTrainer(BaseTrainer):
         self.reference_dir = os.path.join(out_dir, "references")
         os.makedirs(self.reference_dir, exist_ok=True)
         self.tau = float(cfg.generation.commit_threshold)
+        self.group_tau = self.tau if cfg.guidance.group_threshold is None else float(cfg.guidance.group_threshold)
 
     @property
     def finished(self) -> bool:
@@ -193,7 +194,8 @@ class RootSuccessTrainer(BaseTrainer):
     def state_loss(self, ref: StateRef, ledger: Dict[str, object]):
         P = int(ref.roll["meta"]["prompt_len"])
         end = P + int(ref.roll["stats"]["max_new_tokens_effective"])
-        x, ctx, elig_pos = state_tensors(ref.roll, ref.step, self.device, commit_threshold=self.tau, end=end)
+        x, ctx, elig_pos = state_tensors(ref.roll, ref.step, self.device, commit_threshold=self.tau, end=end,
+                                          group_threshold=self.group_tau)
         with torch.no_grad():
             cap = self.gm(x, context=ctx, mode="group_readout")
         gi = cap.guidance

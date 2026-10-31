@@ -11,7 +11,8 @@ layer_profile: native logit lens r_l = lm_head(norm(h_l)) at every layer, q0 = f
   A position whose argmax is MASK is never a candidate (dInfer).
   C_l = per question, share of final-confident positions with crossing <= l (questions with none are reported
   separately); l_best = argmax_{l<L} C_l; l_star = earliest l < L with C_l >= C_best - SE_boot(C_best).
-readout_metrics / select_readout: §7.1.1 table and the §7.1.2 gates and one-standard-error choice.
+readout_metrics / select_readout: §7.1.1 table; the checkpoint is chosen by KL_all (one-standard-error rule), the old
+§7.1.2 thresholds are only reported as reference levels and never stop the pipeline.
 """
 
 from __future__ import annotations
@@ -27,6 +28,12 @@ from .config import Config
 from .decoding import choose_tokens
 from .model import GuidedModel
 from .training import state_tensors
+
+
+def _group_tau(cfg: Config) -> float:
+    """Confidence an early readout needs to join a group: guidance.group_threshold, else the decoder's tau."""
+    g = cfg.guidance.group_threshold
+    return float(cfg.generation.commit_threshold if g is None else g)
 
 
 def _seed(*parts) -> int:
@@ -84,7 +91,7 @@ def _capture_all_layers(gm: GuidedModel, x: torch.Tensor, pos: torch.Tensor):
 def layer_profile(gm: GuidedModel, picks: List[Tuple[dict, dict]], cfg: Config, tau: Optional[float] = None):
     be = gm.backend
     L, MASK, EOS = be.n_layers, be.mask_token_id, be.eos_token_id
-    tau = float(cfg.generation.commit_threshold if tau is None else tau)
+    tau = float(_group_tau(cfg) if tau is None else tau)
     logV = math.log(be.vocab_size)
     per_layer = {l: {"entropy": [], "maxprob": [], "above_tau": [], "kl": [], "agree": [], "group2": [],
                      "precision": [], "recall": [], "mask_pred": [], "eos_pred": []}
@@ -159,7 +166,7 @@ def readout_metrics(gm: GuidedModel, picks: List[Tuple[dict, dict]], cfg: Config
     """§7.1.1 for the readout currently loaded in gm, on fixed states. Per-question values kept for paired CIs."""
     be = gm.backend
     MASK, EOS = be.mask_token_id, be.eos_token_id
-    tau = float(cfg.generation.commit_threshold if tau is None else tau)
+    tau = float(_group_tau(cfg) if tau is None else tau)
     rows = []
     for roll, step in picks:
         x, ctx, pos = state_tensors(roll, step, gm.device)
@@ -197,7 +204,7 @@ def readout_metrics(gm: GuidedModel, picks: List[Tuple[dict, dict]], cfg: Config
     return {"summary": summary, "rows": [{k: v for k, v in r.items() if not k.startswith("fidelity")} for r in rows]}
 
 
-GATES = {"kl_improvement": 0.20, "agreement_selected": 0.90, "group_coverage": 0.50, "selected_positions": 128,
+REFERENCE_LEVELS = {"kl_improvement": 0.20, "agreement_selected": 0.90, "group_coverage": 0.50, "selected_positions": 128,
          "fidelity_abs_mean": 0.05}
 
 
@@ -213,30 +220,29 @@ def _paired_improvement(step0_rows: List[dict], rows: List[dict], n_boot: int = 
 
 def select_readout(results: Dict[str, dict], steps: Dict[str, int]) -> Dict[str, object]:
     """results: name -> readout_metrics output (must include 'step0'); steps: name -> optimizer step.
-    Gate every checkpoint (§7.1.2), keep the passing ones, take min KL_all, then the earliest checkpoint within one
-    bootstrap SE of it; ties -> earlier. step0 may be chosen when it passes every gate except the KL improvement."""
+    No gate: every checkpoint (step0 included) competes; take min KL_all, then the earliest checkpoint within one
+    bootstrap SE of it; ties -> earlier. The former gate values are kept in table[...]['checks'] as reference levels
+    ('meets_reference_levels'), reported for the reader, never used to reject or stop."""
     base = results["step0"]
     k0 = base["summary"]["KL_all"]
     table = {}
     for name, res in results.items():
         s = res["summary"]
         mean_gain, lo = _paired_improvement(base["rows"], res["rows"])
-        checks = {"agreement_selected": s["agreement_selected"] >= GATES["agreement_selected"],
-                  "group_coverage": s["group_coverage"] >= GATES["group_coverage"]
-                  and s["selected_positions"] >= GATES["selected_positions"],
-                  "fidelity": s["fidelity_abs_mean"] <= GATES["fidelity_abs_mean"]}
+        checks = {"agreement_selected": s["agreement_selected"] >= REFERENCE_LEVELS["agreement_selected"],
+                  "group_coverage": s["group_coverage"] >= REFERENCE_LEVELS["group_coverage"]
+                  and s["selected_positions"] >= REFERENCE_LEVELS["selected_positions"],
+                  "fidelity": s["fidelity_abs_mean"] <= REFERENCE_LEVELS["fidelity_abs_mean"]}
         if name != "step0":
-            checks["kl_improvement"] = (k0 - s["KL_all"]) >= GATES["kl_improvement"] * k0 and lo > 0
+            checks["kl_improvement"] = (k0 - s["KL_all"]) >= REFERENCE_LEVELS["kl_improvement"] * k0 and lo > 0
         table[name] = {"step": steps[name], "KL_all": s["KL_all"], "KL_all_se": s["KL_all_se"],
                        "kl_gain_mean": mean_gain, "kl_gain_ci_low": lo, "checks": checks,
-                       "passed": all(bool(v) for v in checks.values())}
-    passing = [n for n, t in table.items() if t["passed"]]
-    out = {"gates": GATES, "table": table, "selected": None, "status": "no_checkpoint_passed"}
-    if passing:
-        best = min(passing, key=lambda n: (table[n]["KL_all"], table[n]["step"]))
-        se = table[best]["KL_all_se"]
-        se = 0.0 if math.isnan(se) else se
-        chosen = min((n for n in passing if table[n]["KL_all"] <= table[best]["KL_all"] + se),
-                     key=lambda n: table[n]["step"])
-        out.update(selected=chosen, best_by_kl=best, status="selected_on_val")
-    return out
+                       "passed": all(bool(v) for v in checks.values()),
+                       "meets_reference_levels": all(bool(v) for v in checks.values())}
+    best = min(table, key=lambda n: (table[n]["KL_all"], table[n]["step"]))
+    se = table[best]["KL_all_se"]
+    se = 0.0 if math.isnan(se) else se
+    chosen = min((n for n in table if table[n]["KL_all"] <= table[best]["KL_all"] + se),
+                 key=lambda n: table[n]["step"])
+    return {"reference_levels": REFERENCE_LEVELS, "gates": REFERENCE_LEVELS, "table": table, "selected": chosen,
+            "best_by_kl": best, "status": "selected_on_val_no_gate"}

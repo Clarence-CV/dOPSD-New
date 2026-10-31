@@ -77,7 +77,7 @@ class StateRef:
 
 
 def state_tensors(roll: dict, step: dict, device, commit_threshold: Optional[float] = None,
-                  end: Optional[int] = None) -> Tuple[torch.Tensor, StepContext, torch.Tensor]:
+                  end: Optional[int] = None, group_threshold: Optional[float] = None) -> Tuple[torch.Tensor, StepContext, torch.Tensor]:
     """-> x [1, N], context (B=1), eligible absolute positions [n]. commit_threshold feeds the group rule; `end`
     (absolute) limits groups to positions before the floored generation end, as the decoder did when recording."""
     prompt = torch.tensor(roll["meta"]["prompt_ids"], dtype=torch.long, device=device)
@@ -90,7 +90,8 @@ def state_tensors(roll: dict, step: dict, device, commit_threshold: Optional[flo
                       block_start=torch.tensor([step["block_start"]], device=device),
                       block_end=torch.tensor([step["block_end"]], device=device),
                       step_id=torch.tensor([step["step_id"]], device=device),
-                      commit_threshold=commit_threshold, guidance_mask=guidance_mask)
+                      commit_threshold=commit_threshold, guidance_mask=guidance_mask,
+                      group_threshold=group_threshold)
     return x, ctx, elig_pos
 
 
@@ -262,7 +263,8 @@ class ReadoutTrainer(BaseTrainer):
         kl = (log_q0.exp() * (log_q0 - log_r)).sum(-1)
         with torch.no_grad():
             maxr = log_r.exp().max(-1).values
-            tau = self.cfg.generation.commit_threshold
+            g = self.cfg.guidance.group_threshold
+            tau = self.cfg.generation.commit_threshold if g is None else g
             stats = {"top1_agree": float((log_r.argmax(-1) == log_q0.argmax(-1)).float().mean()),
                      "draft_above_tau": float((maxr >= tau).float().mean()), "n_positions": float(positions.numel())}
         return kl.mean(), stats

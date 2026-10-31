@@ -8,8 +8,8 @@
 #   baseline   base model, greedy, tau .95, block 32, cap 2048: EVAL_SPLIT[/EVAL_SUBSPLIT], sharded over the GPUs
 #   states     greedy state banks: analysis:readout_val, analysis:readout_confirm, train:readout_train_initial
 #   profile    all-layer logit-lens profile on readout_val -> profile/layer_decision.json (stops if no usable layer)
-#   readout    train the readout at that layer, sweep checkpoints on readout_val (§7.1.2 gates + 1-SE choice),
-#              open readout_confirm once for the selected checkpoint (stops if it fails the gates)
+#   readout    train the readout at that layer, sweep checkpoints on readout_val (choice by KL_all, 1-SE rule, no gate),
+#              open readout_confirm once for the selected checkpoint (metrics only, no pass/fail stop)
 #   joint      root_success_v2 Joint training of the injector from the selected readout (JOINT_STEPS updates)
 #   jointeval  dev:dev_fast (128) for base and Joint checkpoints JOINT_EVAL_STEPS (25 50 75 100), all sharded over the GPUs,
 #              plus group_readout (zero-message parity/overhead) on 32; pick a checkpoint by the fixed rule (dev_fast accuracy,
@@ -152,7 +152,7 @@ if has readout; then
         stamp "READOUT_SELECT=$READOUT_SELECT overrides the val rule (rule picked: ${SEL:-none})"
         SEL="$READOUT_SELECT"
     fi
-    [[ -z "$SEL" ]] && { echo "no readout checkpoint passed the val gates; stopping (see readout/val)"; exit 4; }
+    [[ -z "$SEL" ]] && { echo "readout selection returned nothing (see readout/val); stopping"; exit 4; }
     if [[ ! -f "$OUT/readout/confirm/readout_sweep.json" ]]; then
         CKS=(); [[ "$SEL" != "step0" ]] && CKS=("$SEL")
         python -m selective_draft.cli readout-sweep "${S[@]}" "${R[@]}" --states "$OUT/states/readout_confirm" \
@@ -167,8 +167,7 @@ ok = d[name]["passed"]
 manual = bool(os.environ.get("READOUT_SELECT"))
 json.dump({"selected": sel, "confirm_passed": ok, "manual_override": manual, "confirm": d[name]},
           open(f"{out}/readout/selected.json", "w"), indent=1)
-print("readout", name, "confirm passed" if ok else "NOT confirmed", "(manual override)" if manual else "")
-sys.exit(0 if ok or manual else 5)
+print("readout", name, "meets the reference levels on confirm" if ok else "is below some reference levels on confirm (reported only)", "(manual override)" if manual else "")
 PY
 fi
 

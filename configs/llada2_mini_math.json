@@ -13,7 +13,7 @@
     "prompt_recipe": "dmax_boxed", "manifest_sizes": {"train": 6000, "dev": 500, "analysis": 500}, "seed": 42
   },
   "guidance": {
-    "early_layer": null, "readout_rank": 64, "injector_rank": 64, "mode": "off", "scale": 1.0,
+    "early_layer": null, "group_threshold": 0.8, "readout_rank": 64, "injector_rank": 64, "mode": "off", "scale": 1.0,
     "readout_position_chunk": 8, "message_vocab_chunk": 16384
   },
   "generation": {

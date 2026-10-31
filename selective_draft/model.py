@@ -4,7 +4,8 @@ early-layer block. Modes:
   group_readout selects the communication group without changing hidden states;
   group_soft    injects every group member's natural soft draft simultaneously.
 Group rule: G = every guidance-eligible position whose early-readout candidate has raw confidence >= the decoder's
-own threshold (StepContext.commit_threshold, never a second number), with no size budget; fewer than 2 -> no message.
+own threshold unless guidance.group_threshold sets a lower one (StepContext.group_threshold), with no size budget;
+fewer than 2 -> no message.
 """
 
 from __future__ import annotations
@@ -35,6 +36,8 @@ class StepContext:
     commit_threshold: Optional[float] = None  # the decoder's tau; the group rule reads it from here
     # Positions allowed into a communication group (subset of eligible_mask); None = eligible_mask.
     guidance_mask: Optional[torch.Tensor] = None
+    # Early-readout confidence needed to join a group; None = commit_threshold (the decoder's own tau).
+    group_threshold: Optional[float] = None
 
 
 @dataclass
@@ -215,9 +218,9 @@ class GuidedModel(nn.Module):
         """G = {i guidance-eligible : readout candidate confidence >= tau}, all of them, ascending position.
         Candidate and confidence follow the decoder (greedy argmax, raw probability); positions whose readout argmax is
         MASK are not candidates."""
-        tau = ctx.commit_threshold
+        tau = ctx.group_threshold if ctx.group_threshold is not None else ctx.commit_threshold
         if tau is None:
-            raise ValueError("the group rule needs StepContext.commit_threshold")
+            raise ValueError("the group rule needs StepContext.group_threshold or commit_threshold")
         mask_id = self.backend.mask_token_id
         B, V = h.shape[0], self.backend.vocab_size
         allowed = ctx.eligible_mask if ctx.guidance_mask is None else (ctx.guidance_mask & ctx.eligible_mask)

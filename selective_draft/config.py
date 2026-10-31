@@ -47,6 +47,7 @@ class GuidanceConfig:
     mode: str = "off"  # off | group_readout | group_soft
     readout_position_chunk: int = 8
     message_vocab_chunk: int = 16384
+    group_threshold: Optional[float] = None  # early-readout confidence needed to join a group; None = the decoder's commit_threshold
 
 
 @dataclass
@@ -186,6 +187,8 @@ class Config:
             raise ValueError("guidance.early_layer must be >= 1 (1-based count of completed blocks)")
         if g.readout_rank < 1 or g.injector_rank < 1:
             raise ValueError("ranks must be >= 1")
+        if g.group_threshold is not None and not (0.0 <= g.group_threshold <= 1.0):
+            raise ValueError("guidance.group_threshold must be in [0, 1] or null")
         if g.readout_position_chunk < 1 or g.message_vocab_chunk < 1:
             raise ValueError("chunks must be >= 1")
         if not (0.0 <= gen.commit_threshold <= 1.0):

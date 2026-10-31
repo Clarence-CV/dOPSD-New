@@ -92,7 +92,8 @@ def generate(gm: GuidedModel, prompt_ids: torch.Tensor, cfg: GenerationConfig, g
             ctx = StepContext(eligible_mask=eligible, active_rows=active.clone(),
                               block_start=torch.tensor([bs], device=device), block_end=torch.tensor([be], device=device),
                               step_id=torch.tensor([steps], device=device), commit_threshold=tau,
-                              guidance_mask=eligible & (positions[:be] < end)[None])
+                              guidance_mask=eligible & (positions[:be] < end)[None],
+                              group_threshold=gm.cfg.group_threshold)
             if use_cache and need_cross:  # seal the previous block with its clean tokens, decode this block
                 cross = torch.zeros(1, 1, 2 * BL, bs + BL, dtype=mask_dtype, device=device)
                 cross[..., :BL, bs:bs + BL] = -math.inf
