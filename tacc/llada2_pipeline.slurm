@@ -4,7 +4,7 @@
 # Submit from the repo root (tacc/sync_and_submit_llada2.sh does sync + qlimits + sbatch):
 #   SMOKE=1 STAGES="baseline states profile readout joint jointeval" sbatch -p gpu-a100-small -t 00:45:00 tacc/llada2_pipeline.slurm
 #   STAGES="baseline" sbatch tacc/llada2_pipeline.slurm
-# Stages (in this order when listed):
+# Stages (in this order when listed; memprobe = peak memory of a Joint step at worst-case lengths, between readout and joint):
 #   baseline   base model, greedy, tau .95, block 32, cap 2048: EVAL_SPLIT[/EVAL_SUBSPLIT], sharded over the GPUs
 #   states     greedy state banks: analysis:readout_val, analysis:readout_confirm, train:readout_train_initial
 #   profile    all-layer logit-lens profile on readout_val -> profile/layer_decision.json (stops if no usable layer)
@@ -17,6 +17,9 @@
 # Knobs: RUN, CONFIG, EVAL_SPLIT (test), EVAL_SUBSPLIT (""), N_EVAL (all), READOUT_STEPS (200), JOINT_STEPS (100),
 #        JOINT_EVAL_STEPS ("25 50 75 100"), SAVE_EVERY (25),
 #        SMOKE=1 (tiny sizes; checks every stage end to end and prints per-example timing for the budget),
+#        STATE_SETS ("readout_val readout_confirm readout_train"), VAL_N (all 64), TESTS=1 (CPU tests first),
+#        e.g. layer choice in the dev queue: STAGES="states profile" STATE_SETS=readout_val VAL_N=48 TESTS=1 RUN=<run> \
+#             sbatch -p gpu-a100-dev -t 02:00:00 tacc/llada2_pipeline.slurm   (a later long job with the same RUN skips both stages)
 #        READOUT_SELECT=step0|<checkpoint dir> (manual readout choice when the gates fail; recorded in selected.json).
 #SBATCH --job-name=llada2
 #SBATCH --output=logs/%x-%j.out
@@ -47,6 +50,13 @@ READOUT_STEPS="${READOUT_STEPS:-200}"
 JOINT_STEPS="${JOINT_STEPS:-100}"
 JOINT_EVAL_STEPS="${JOINT_EVAL_STEPS:-25 50 75 100}"
 SAVE_EVERY="${SAVE_EVERY:-25}"
+STATE_SETS="${STATE_SETS:-readout_val readout_confirm readout_train}"   # which state banks the states stage collects
+VAL_N="${VAL_N:-}"                                                      # first N readout_val questions only (e.g. 48)
+CONF_N="${CONF_N:-}"                                                    # first N readout_confirm questions only
+TRAIN_N="${TRAIN_N:-}"                                                  # first N readout_train_initial questions only (e.g. 128)
+DEV_N="${DEV_N:-}"                                                      # jointeval dev_fast: first N questions only (e.g. 64)
+FINAL_TEST="${FINAL_TEST:-1}"                                           # jointeval: 0 skips the final EVAL_SPLIT base-vs-Joint run
+TESTS="${TESTS:-0}"                                                     # 1: run the CPU contract tests first, stop on failure
 DEVFAST_LIMIT=()
 STATE_LIMIT=()
 JOINT_EXTRA=()
@@ -63,6 +73,12 @@ S=(--config "$CONFIG")
 mkdir -p "$OUT"/{meta,eval,states,profile,readout,joint,logs}
 stamp() { echo "[llada2 $(date +%H:%M:%S)] $*"; }
 has() { [[ " $STAGES " == *" $1 "* ]]; }
+
+# ---- optional CPU contract tests (cheap, run on the allocated node before any GPU work) ----
+if [[ "$TESTS" == "1" ]]; then
+    for t in decoder guidance training data; do python tests/test_$t.py > "$OUT/logs/test_$t.log" 2>&1 || { echo "CPU test $t FAILED; see $OUT/logs/test_$t.log"; tail -20 "$OUT/logs/test_$t.log"; exit 6; }; done
+    stamp "CPU tests passed"
+fi
 
 # ---- run record (code, env, GPU) -----------------------------------------------------------------
 cp "$CONFIG" "$OUT/meta/config.json"
@@ -118,9 +134,12 @@ fi
 
 # ---- stage 1: state banks, layer profile, readout -------------------------------------------------
 if has states; then
-    par_collect readout_val analysis readout_val
-    par_collect readout_confirm analysis readout_confirm
-    par_collect readout_train train readout_train_initial
+    sets() { [[ " $STATE_SETS " == *" $1 "* ]]; }
+    KEEP=("${STATE_LIMIT[@]}")
+    sets readout_val && { [[ -n "$VAL_N" ]] && STATE_LIMIT=(--limit "$VAL_N"); par_collect readout_val analysis readout_val; STATE_LIMIT=("${KEEP[@]}"); }
+    sets readout_confirm && { [[ -n "$CONF_N" ]] && STATE_LIMIT=(--limit "$CONF_N"); par_collect readout_confirm analysis readout_confirm; STATE_LIMIT=("${KEEP[@]}"); }
+    sets readout_train && { [[ -n "$TRAIN_N" ]] && STATE_LIMIT=(--limit "$TRAIN_N"); par_collect readout_train train readout_train_initial; STATE_LIMIT=("${KEEP[@]}"); }
+    true
 fi
 if has profile; then
     if [[ ! -f "$OUT/profile/layer_decision.json" ]]; then
@@ -171,6 +190,14 @@ print("readout", name, "meets the reference levels on confirm" if ok else "is be
 PY
 fi
 
+# ---- memory probe: one Joint training step on a synthetic worst-case state (single GPU, a few minutes) -------
+if has memprobe; then
+    L=$(early_layer)
+    [[ -f "$OUT/memprobe/memprobe.json" ]] || CUDA_VISIBLE_DEVICES=0 python -m selective_draft.cli memprobe "${S[@]}" \
+        --set "guidance.early_layer=$L" --output-dir "$OUT/memprobe" > "$OUT/logs/memprobe.log" 2>&1
+    stamp "memprobe: $(python -c "import json;print([(r['length'],r.get('oom'),r.get('peak_allocated_gib'),r.get('peak_reserved_gib')) for r in json.load(open('$OUT/memprobe/memprobe.json'))['results']])")"
+fi
+
 # ---- stage 2: Joint (root_success_v2) ---------------------------------------------------------------
 if has joint; then
     L=$(early_layer)
@@ -201,6 +228,7 @@ PY
 fi
 if has jointeval; then
     L=$(early_layer)
+    [[ -n "$DEV_N" && "$SMOKE" != "1" ]] && DEVFAST_LIMIT=(--limit "$DEV_N")
     D=(--set 'data.split="dev"' --set 'data.subsplit="dev_fast"' --set "guidance.early_layer=$L" "${DEVFAST_LIMIT[@]}")
     par_eval devfast_base "${D[@]}" --set guidance.mode='"off"'
     for st in $JOINT_EVAL_STEPS; do
@@ -209,7 +237,8 @@ if has jointeval; then
         par_eval "devfast_joint_$st" "${D[@]}" --snapshot "$CK/snapshot" --set guidance.mode='"group_soft"'
     done
     LAST=$(latest_ckpt "$OUT/joint/train")
-    par_eval devfast_readout_only "${D[@]}" --snapshot "$LAST/snapshot" --set guidance.mode='"group_readout"' --limit 32
+    RO_LIMIT=(--limit 32); [[ "$SMOKE" == "1" ]] && RO_LIMIT=()   # smoke: keep the 3-question limit of D
+    par_eval devfast_readout_only "${D[@]}" --snapshot "$LAST/snapshot" --set guidance.mode='"group_readout"' "${RO_LIMIT[@]}"
     # fixed selection rule on dev_fast: accuracy, then fewer mean steps, then the earlier checkpoint
     python - "$OUT" $JOINT_EVAL_STEPS <<'PY'
 import json, os, sys
@@ -237,6 +266,7 @@ sel = {"rule": "max dev_fast accuracy, then min mean_row_steps, then earliest st
 json.dump(sel, open(f"{out}/eval/joint_selection.json", "w"), indent=1)
 print("selected joint step", best["step"], rows, "base", sel["base"])
 PY
+    if [[ "$FINAL_TEST" == "1" ]]; then
     SELCK=$(python -c "import json;print(json.load(open('$OUT/eval/joint_selection.json'))['checkpoint'])")
     T=(--set "data.split=\"$EVAL_SPLIT\"" --set "guidance.early_layer=$L")
     [[ -n "$EVAL_SUBSPLIT" ]] && T+=(--set "data.subsplit=\"$EVAL_SUBSPLIT\"")
@@ -267,6 +297,7 @@ out = {"n": n, "base_acc": m(b, "is_correct"), "joint_acc": m(j, "is_correct"), 
 json.dump(out, open(sys.argv[3], "w"), indent=1)
 print("paired", json.dumps(out))
 PY
+    fi
 fi
 
 BACKUP="$WORK/inf385t/results/llada2/$RUN"

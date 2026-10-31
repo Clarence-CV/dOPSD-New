@@ -17,7 +17,7 @@ scp -q /tmp/sd_rev "ls6:$DEST/.code_revision"; scp -q /tmp/sd_status "ls6:$DEST/
 echo "synced to $DEST at $(cat /tmp/sd_rev)$( [[ -s /tmp/sd_status ]] && echo ' (+uncommitted changes)')"
 ssh ls6 "qlimits 2>/dev/null | grep -E 'Queue|gpu-a100' || true"
 PASS=""
-for v in RUN STAGES SMOKE EVAL_SPLIT EVAL_SUBSPLIT N_EVAL READOUT_STEPS JOINT_STEPS READOUT_SELECT CONFIG; do
+for v in RUN STAGES SMOKE EVAL_SPLIT EVAL_SUBSPLIT N_EVAL READOUT_STEPS JOINT_STEPS READOUT_SELECT CONFIG STATE_SETS VAL_N CONF_N TRAIN_N DEV_N FINAL_TEST JOINT_EVAL_STEPS TESTS; do
     [[ -n "${!v:-}" ]] && PASS+="$v='${!v}' "
 done
 if [[ "${DRY:-0}" == "1" ]]; then echo "DRY=1: not submitting"; exit 0; fi

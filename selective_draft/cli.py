@@ -1,7 +1,7 @@
 """python -m selective_draft.cli <command> --config CONFIG [--set section.field=value ...]
 
 commands: prepare-data | inspect | collect | layer-profile | train-readout | readout-sweep | train-joint | evaluate |
-          merge-eval
+          merge-eval | memprobe
 Real-model commands run on a TACC compute node; the fake backend runs everything on CPU."""
 
 from __future__ import annotations
@@ -223,6 +223,20 @@ def cmd_train_joint(args):
     print(json.dumps({"final": last, "snapshot": os.path.join(args.output_dir, "snapshot")}, default=float))
 
 
+def cmd_memprobe(args):
+    """Peak GPU memory of one Joint training step at the given sequence lengths (synthetic state)."""
+    from .memprobe import probe
+    cfg = _cfg(args)
+    if cfg.guidance.early_layer is None:
+        raise SystemExit("memprobe needs guidance.early_layer (--set guidance.early_layer=L)")
+    gm, tok, snap_id = _build(cfg, args, args.snapshot)
+    res = probe(gm, cfg, args.lengths, group=args.group)
+    os.makedirs(args.output_dir, exist_ok=True)
+    with open(os.path.join(args.output_dir, "memprobe.json"), "w") as f:
+        json.dump({"early_layer": cfg.guidance.early_layer, "results": res}, f, indent=1)
+    print(json.dumps(res, indent=1))
+
+
 def cmd_evaluate(args):
     from .evaluation import evaluate
     cfg = _cfg(args)
@@ -292,6 +306,10 @@ def main(argv=None):
     p = sub.add_parser("train-joint", help="stage 2: root_success_v2 Joint training of the message injector")
     _common(p); p.add_argument("--readout-snapshot"); p.add_argument("--max-steps", type=int)
     p.add_argument("--save-every", type=int); p.add_argument("--resume"); p.set_defaults(fn=cmd_train_joint)
+
+    p = sub.add_parser("memprobe", help="peak GPU memory of one Joint training step at worst-case lengths")
+    _common(p); p.add_argument("--snapshot"); p.add_argument("--group", type=int, default=32)
+    p.add_argument("--lengths", type=int, nargs="+", default=[1024, 2048, 2336]); p.set_defaults(fn=cmd_memprobe)
 
     p = sub.add_parser("evaluate", help="task accuracy + latency; sweep via evaluation.commit_thresholds")
     _common(p); p.add_argument("--snapshot"); p.add_argument("--limit", type=int)

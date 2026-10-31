@@ -35,7 +35,7 @@ from .training import BaseTrainer, StateRef, state_tensors
 
 COUNTERS = ("question_visits", "root_attempts", "questions_with_correct_rollout", "questions_with_eligible_state",
             "states_drawn", "invalid_reference_states", "reselect_mismatch_states", "loo_rejected_states",
-            "accepted_states", "supervised_positions", "trace_states", "eligible_trace_states")
+            "accepted_states", "supervised_positions", "trace_states", "eligible_trace_states", "oom_skipped_states")
 
 
 def derived_seed(*parts) -> int:
@@ -199,7 +199,7 @@ class RootSuccessTrainer(BaseTrainer):
         with torch.no_grad():
             cap = self.gm(x, context=ctx, mode="group_readout")
         gi = cap.guidance
-        native = cap.logits[0]
+        native = cap.logits[0, elig_pos].clone()  # only the block rows: the full [N, V] fp32 logits are freed here
         del cap
         valid = gi.group_pos[0] >= 0
         positions = gi.group_pos[0, valid]
@@ -235,9 +235,10 @@ class RootSuccessTrainer(BaseTrainer):
                      "draft_reference_agreement": float((probs.argmax(-1) == pi).float().mean()),
                      "high_conf_wrong": float(((conf >= self.tau) & (pred != pi)).sum()),
                      "delta_norm": float(out.guidance.delta_norm[0]), "teacher_forwards": float(cert["teacher_forwards"])}
-            outside = elig_pos[~torch.isin(elig_pos, positions)]
+            outside_mask = ~torch.isin(elig_pos, positions)
+            outside = elig_pos[outside_mask]
             if outside.numel():  # positions outside G get no loss but see the injection through the tail
-                lq0 = F.log_softmax(native[outside].float(), -1)
+                lq0 = F.log_softmax(native[outside_mask].float(), -1)
                 c0, a0 = lq0.exp().max(-1)
                 c1, a1 = out.logits[0, outside].float().softmax(-1).max(-1)
                 stats.update(outside_kl=float(forward_kl(lq0, out.logits[0, outside]).mean()),
@@ -252,14 +253,23 @@ class RootSuccessTrainer(BaseTrainer):
         gidx = rnd * self.dist.world_size + self.dist.rank
         self.state["question_round"] = rnd + 1
         loss, stats, ledger = None, {}, {"question_index": gidx, "outcome": "first_pass_exhausted"}
-        if gidx < len(self.order):
-            ref, ledger = self.root_question(self.examples[self.order[gidx]], gidx)
-            if ref is not None:
-                loss, stats = self.state_loss(ref, ledger)
         used, local_loss = 0, 0.0
-        if loss is not None:
-            loss.backward()
-            local_loss, used = float(loss.detach()), 1
+        try:
+            if gidx < len(self.order):
+                ref, ledger = self.root_question(self.examples[self.order[gidx]], gidx)
+                if ref is not None:
+                    loss, stats = self.state_loss(ref, ledger)
+            if loss is not None:
+                loss.backward()
+                local_loss, used = float(loss.detach()), 1
+        except torch.cuda.OutOfMemoryError:
+            # A 40 GB card can run out on the longest states (weights alone are ~30 GiB). Skip this state, keep the
+            # run alive and count it: the rank still joins every collective below.
+            loss, stats, used, local_loss = None, {}, 0, 0.0
+            self.optimizer.zero_grad(set_to_none=True)
+            torch.cuda.empty_cache()
+            self._bump("oom_skipped_states")
+            ledger["outcome"] = "oom_skipped"
         busy = time.perf_counter() - t_start
         self.state["busy_seconds"] = float(self.state["busy_seconds"]) + busy
         ledger["seconds"] = busy
