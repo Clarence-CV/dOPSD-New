@@ -40,15 +40,20 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # 31 GB checkpoint in lazily from $WORK (Lustre). On 2026-10-31 jobs 3544349 and 3544533 stalled there for 100 and
 # 15+ min (~2 MB/s, GPU idle) on the same node where 3544039 had loaded in ~10 min, while a sequential read of the
 # same files from the login node ran at ~136 MB/s. A sequential copy avoids the slow lazy-read path.
+# Follow-up (job 3544790, copy timed out after 30 min): the slow part is one /work storage target. Shards 2 and 6 sit
+# on Lustre OST 13, which read at 3.7-5.2 MB/s from the login node too, while the other shards read at 39-80 MB/s.
+# A second copy of the same revision lives in $SCRATCH/hf_hub (BeeGFS) and is preferred as the staging source.
 MODEL_CACHE="models--inclusionAI--LLaDA2.0-mini"
-if [[ -d "$HF_HOME/hub/$MODEL_CACHE" ]]; then
+MODEL_HUB_SRC="${MODEL_HUB_SRC:-$SCRATCH/hf_hub}"
+[[ -d "$MODEL_HUB_SRC/$MODEL_CACHE/snapshots" ]] || MODEL_HUB_SRC="$HF_HOME/hub"
+if [[ -d "$MODEL_HUB_SRC/$MODEL_CACHE" ]]; then
     export HF_HUB_CACHE="/tmp/$USER-hf-hub-${SLURM_JOB_ID:-local}"
     mkdir -p "$HF_HUB_CACHE"
     trap 'rm -rf "$HF_HUB_CACHE"' EXIT
     t0=$(date +%s)
-    timeout 1800 cp -a "$HF_HOME/hub/$MODEL_CACHE" "$HF_HUB_CACHE/" \
+    timeout 1800 cp -a "$MODEL_HUB_SRC/$MODEL_CACHE" "$HF_HUB_CACHE/" \
         || { echo "copying the model to node-local /tmp failed or took over 30 min"; exit 8; }
-    echo "[llada2] model staged to $HF_HUB_CACHE in $(( $(date +%s) - t0 )) s ($(du -sh "$HF_HUB_CACHE" | cut -f1))"
+    echo "[llada2] model staged from $MODEL_HUB_SRC to $HF_HUB_CACHE in $(( $(date +%s) - t0 )) s ($(du -sh "$HF_HUB_CACHE" | cut -f1))"
 fi
 
 STAGES="${STAGES:-baseline}"

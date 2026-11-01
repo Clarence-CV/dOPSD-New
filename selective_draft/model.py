@@ -120,13 +120,10 @@ class GuidedModel(nn.Module):
 
     @torch.no_grad()
     def base_checksum(self, n: int = 8) -> List[float]:
-        out = []
-        for i, p in enumerate(self.base.parameters()):
-            if i % max(1, sum(1 for _ in self.base.parameters()) // n) == 0:
-                out.append(float(p.float().sum()))
-            if len(out) >= n:
-                break
-        return out
+        # Same tensors as before (every len//n-th, first n). The old loop recounted all parameters at every index:
+        # with ~15k MoE expert tensors that took ~7 min per call on the real mini, once per optimizer update.
+        params = list(self.base.parameters())
+        return [float(p.float().sum()) for p in params[::max(1, len(params) // n)][:n]]
 
     def module_state_dict(self) -> dict:
         d = {f"readout.{k}": v for k, v in self.readout.state_dict().items()}
