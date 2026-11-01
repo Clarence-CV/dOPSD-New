@@ -8,9 +8,14 @@ blocks <= j, bidirectionally inside its own block. The HF forward only accepts t
 bf16). Inputs are batch-1 without padding: left padding would move the block grid.
 
 MoE: in eval mode the official SparseMoeBlock calls `moe_infer`, which is decorated with @torch.no_grad, so routed
-experts contribute no input gradient. Every MoE layer gets an instance-level `moe_infer` with the same arithmetic
-minus no_grad and in-place autograd hazards; under no_grad it is bit-identical (tested), so the Teacher, rollouts and
-the frozen model are unchanged.
+experts contribute no input gradient. Every MoE layer gets an instance-level `moe_infer`:
+  moe_impl="hf_loop" (default): the official arithmetic minus no_grad and in-place autograd hazards; under no_grad it is
+    bit-identical (tested), so the Teacher, rollouts and the frozen model are unchanged. It loops over the 256 experts
+    in Python, ~15k small kernels per forward, so a forward is CPU-bound (~0.5 s on an A100 node, slower on Vista).
+  moe_impl="fused": DMax's training path. The expert weights of each layer are stacked into [E, I, H] / [E, H, I]
+    tensors as dFactory/scripts/moe_convertor.py --mode merge does (in memory; each expert Linear keeps a view, so no
+    copy stays alive) and the routed experts run through VeOmni's fused_moe_forward (Triton group GEMM with a
+    backward), vendored in vendor/veomni_moe. Same function, different bf16 summation order: not bit-identical.
 """
 
 from __future__ import annotations
@@ -51,11 +56,38 @@ def _moe_infer_autograd(self, x: torch.Tensor, topk_ids: torch.Tensor, topk_weig
             .sum(dim=1).type(new_x.dtype))
 
 
+MOE_IMPLS = ("hf_loop", "fused")
+
+
+def _moe_infer_fused(self, x: torch.Tensor, topk_ids: torch.Tensor, topk_weight: torch.Tensor) -> torch.Tensor:
+    """Routed experts through VeOmni's fused_moe_forward on the stacked weights (DMax LLaDA2MoeExperts forward)."""
+    from .vendor.veomni_moe.ops.fused_moe import fused_moe_forward
+    gate, up, down = self._fused_weights
+    out = fused_moe_forward(module=self, num_experts=gate.shape[0], routing_weights=topk_weight,
+                            selected_experts=topk_ids, hidden_states=x, fc1_1_weight=gate, fc1_2_weight=up,
+                            fc2_weight=down)
+    return out.type(x.dtype)
+
+
+@torch.no_grad()
+def _stack_experts(mlp: nn.Module) -> None:
+    """dFactory moe_convertor merge, in place: torch.stack over experts per projection, then point every expert's
+    weight at its slice so the per-expert tensors are freed (the HF loop still works on the same storage)."""
+    stacked = []
+    for proj in ("gate_proj", "up_proj", "down_proj"):
+        weights = [getattr(e, proj).weight for e in mlp.experts]
+        merged = torch.stack([w.data for w in weights], dim=0).contiguous()
+        for i, w in enumerate(weights):
+            w.data = merged[i]
+        stacked.append(merged)
+    mlp._fused_weights = tuple(stacked)
+
+
 class LLaDA2MiniBackend:
     name = "llada2_mini"
 
     def __init__(self, model: nn.Module, block_length: int, mask_token_id: Optional[int] = None,
-                 eos_token_id: Optional[int] = None):
+                 eos_token_id: Optional[int] = None, moe_impl: str = "hf_loop"):
         self.model = model
         inner = getattr(model, "model", None)
         if inner is None or not hasattr(inner, "layers") or not hasattr(inner, "word_embeddings"):
@@ -80,12 +112,31 @@ class LLaDA2MiniBackend:
         self.eos_token_id = int(MINI_EOS_ID if eos_token_id is None else eos_token_id)
         self.attn_implementation = getattr(cfg, "_attn_implementation", None)
         self._mask_cache: Dict[Tuple[int, str, torch.dtype], torch.Tensor] = {}
-        self.moe_layers = []
-        for i, layer in enumerate(self.blocks):
-            mlp = getattr(layer, "mlp", None)
-            if mlp is not None and hasattr(mlp, "moe_infer"):
+        self.moe_layers = [i for i, layer in enumerate(self.blocks)
+                           if getattr(layer, "mlp", None) is not None and hasattr(layer.mlp, "moe_infer")]
+        self.moe_impl = None
+        self.set_moe_impl(moe_impl)
+
+    def set_moe_impl(self, impl: str) -> None:
+        """Switch every MoE layer between the HF loop and the fused kernels (stacking the weights on first use)."""
+        if impl not in MOE_IMPLS:
+            raise ValueError(f"moe_impl={impl!r} not in {MOE_IMPLS}")
+        if impl == "fused":
+            if not self.moe_layers:
+                raise ValueError("moe_impl=fused needs LLaDA2 MoE layers")
+            if self.embedding.weight.device.type != "cuda":
+                raise ValueError("moe_impl=fused runs Triton kernels and needs the model on a CUDA device")
+            if getattr(self.model.config, "hidden_act", "silu") != "silu":
+                raise ValueError("the vendored fused MoE hard-codes SiLU")
+        for i in self.moe_layers:
+            mlp = self.blocks[i].mlp
+            if impl == "fused":
+                if not hasattr(mlp, "_fused_weights"):
+                    _stack_experts(mlp)
+                mlp.moe_infer = types.MethodType(_moe_infer_fused, mlp)
+            else:
                 mlp.moe_infer = types.MethodType(_moe_infer_autograd, mlp)
-                self.moe_layers.append(i)
+        self.moe_impl = impl
 
     # ------------------------------------------------------------------ structure
     def boundary_module(self, early_layer: int) -> nn.Module:
@@ -171,4 +222,6 @@ class LLaDA2MiniBackend:
                 "d_model": self.d_model, "vocab_size": self.vocab_size, "mask_token_id": self.mask_token_id,
                 "eos_token_id": self.eos_token_id, "block_length": self.block_length,
                 "attention": "block_causal_absolute_zero", "attn_implementation": self.attn_implementation,
-                "moe_layers": self.moe_layers, "moe_infer": "autograd_equivalent (official arithmetic without no_grad)"}
+                "moe_layers": self.moe_layers, "moe_impl": self.moe_impl,
+                "moe_infer": {"hf_loop": "autograd_equivalent (official arithmetic without no_grad)",
+                              "fused": "VeOmni fused_moe_forward on stacked experts (DMax/dFactory training path)"}[self.moe_impl]}

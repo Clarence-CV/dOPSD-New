@@ -1,5 +1,6 @@
 #!/bin/bash
-# One-time setup for LLaDA2.0-mini on a Lonestar6 LOGIN node (needs internet; no GPU work).
+# One-time setup for LLaDA2.0-mini on a Lonestar6 or Vista LOGIN node (needs internet; no GPU work). Vista is aarch64:
+# the miniforge installer follows `uname -m` and the cu128 torch index has aarch64 (GH200) wheels.
 #   bash tacc/setup_llada2_env.sh                         # miniforge + env + downloads + offline check
 #   bash tacc/setup_llada2_env.sh download                # downloads + offline check only
 #   ENV_NAME=llada2_check bash tacc/setup_llada2_env.sh env   # only (re)create an env, e.g. to test the recipe
@@ -12,7 +13,7 @@ MODEL=inclusionAI/LLaDA2.0-mini
 MODEL_REV=dad945cac317da394b390f82c7b40691d8a881ed
 MINIFORGE="$DOPSD_ROOT/miniforge3"
 if [[ ! -f "$MINIFORGE/etc/profile.d/conda.sh" ]]; then
-    curl -fsSL -o "/tmp/miniforge_$USER.sh" https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
+    curl -fsSL -o "/tmp/miniforge_$USER.sh" https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-$(uname -m).sh
     bash "/tmp/miniforge_$USER.sh" -b -p "$MINIFORGE"
     rm -f "/tmp/miniforge_$USER.sh"
 fi

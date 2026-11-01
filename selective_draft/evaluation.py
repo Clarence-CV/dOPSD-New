@@ -49,6 +49,11 @@ def eval_fingerprint(cfg: Config, guidance_mode: str, snapshot_id: str, threshol
         "guidance": {"mode": guidance_mode, "early_layer": cfg.guidance.early_layer, "scale": cfg.guidance.scale},
         "snapshot_id": snapshot_id, "thresholds": thresholds, "seed": cfg.training.seed,
     }
+    # Added later; only recorded when not at the original default so earlier fingerprints keep their hash.
+    if cfg.model.moe_impl != "hf_loop":
+        fp["model"]["moe_impl"] = cfg.model.moe_impl
+    if cfg.guidance.group_threshold is not None:
+        fp["guidance"]["group_threshold"] = cfg.guidance.group_threshold
     fp["hash"] = hashlib.sha256(json.dumps(fp, sort_keys=True, default=str).encode()).hexdigest()[:16]
     return fp
 

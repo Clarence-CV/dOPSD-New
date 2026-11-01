@@ -1,8 +1,8 @@
 {
-  "_comment": "LLaDA2.0-mini on MATH with DMax's evaluation setup: block 32 from position 0, greedy, confidence >= 0.95 (else the best), block-end EOS stop, total length floored to a multiple of 32 (max_new_tokens 2048, fixed by the user 2026-10-19), DMax prompt and scorer. early_layer stays null until layer-profile writes layer_decision.json. root_success_v2 settings are used by train-joint only.",
+  "_comment": "LLaDA2.0-mini on MATH with DMax's evaluation setup: block 32 from position 0, greedy, confidence >= 0.95 (else the best), block-end EOS stop, total length floored to a multiple of 32 (max_new_tokens 2048, fixed by the user 2026-10-19), DMax prompt and scorer. early_layer stays null until layer-profile writes layer_decision.json. root_success_v2 settings are used by train-joint only. Since 2026-11-01 the routed experts run through the fused DMax/VeOmni MoE kernel (model.moe_impl=fused; dev job 3545297: 8.2x faster per denoising step than the HF expert loop, 7/8 vs 7/8 correct on 8 dev questions; not bit-identical to the HF loop). Set model.moe_impl=hf_loop for the original HF code.",
   "model": {
     "path": "inclusionAI/LLaDA2.0-mini", "backend": "llada2_mini",
-    "revision": "dad945cac317da394b390f82c7b40691d8a881ed", "dtype": "bfloat16",
+    "revision": "dad945cac317da394b390f82c7b40691d8a881ed", "dtype": "bfloat16", "moe_impl": "fused",
     "attn_implementation": "sdpa", "mask_token_id": 156895, "eos_token_id": 156892
   },
   "data": {

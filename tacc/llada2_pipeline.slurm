@@ -4,7 +4,8 @@
 # Submit from the repo root (tacc/sync_and_submit_llada2.sh does sync + qlimits + sbatch):
 #   SMOKE=1 STAGES="baseline states profile readout joint jointeval" sbatch -p gpu-a100-small -t 00:45:00 tacc/llada2_pipeline.slurm
 #   STAGES="baseline" sbatch tacc/llada2_pipeline.slurm
-# Stages (in this order when listed; memprobe = peak memory of a Joint step at worst-case lengths, between readout and joint):
+# Stages (in this order when listed; memprobe = peak memory of a Joint step at worst-case lengths, between readout and joint;
+#   moecheck = fused MoE vs HF loop parity/speed, MOECHECK_STATES (default states/readout_val), MOECHECK_NGEN (8)):
 #   baseline   base model, greedy, tau .95, block 32, cap 2048: EVAL_SPLIT[/EVAL_SUBSPLIT], sharded over the GPUs
 #   states     greedy state banks: analysis:readout_val, analysis:readout_confirm, train:readout_train_initial
 #   profile    all-layer logit-lens profile on readout_val -> profile/layer_decision.json (stops if no usable layer)
@@ -89,6 +90,7 @@ NG=$(nvidia-smi -L | wc -l)
 RECIPE=$(python -c "import json;print(json.load(open('$CONFIG'))['data']['prompt_recipe'])")
 TEST_TAG="${EVAL_SPLIT}${EVAL_SUBSPLIT:+_$EVAL_SUBSPLIT}_${RECIPE}"
 S=(--config "$CONFIG")
+[[ -n "${MOE_IMPL:-}" ]] && S+=(--set "model.moe_impl=\"$MOE_IMPL\"")   # hf_loop | fused (overrides the config)
 mkdir -p "$OUT"/{meta,eval,states,profile,readout,joint,logs}
 stamp() { echo "[llada2 $(date +%H:%M:%S)] $*"; }
 has() { [[ " $STAGES " == *" $1 "* ]]; }
@@ -108,7 +110,7 @@ nvidia-smi > "$OUT/meta/nvidia_smi.txt" 2>&1 || true
 echo "$SLURM_JOB_ID $(hostname) $(date -Is) STAGES=$STAGES SMOKE=$SMOKE" >> "$OUT/meta/jobs.txt"
 # Job 3544349 sat 1h40 in this step: the weights were paged in from $WORK at ~2 MB/s on its node. Fail fast instead of burning the allocation.
 [[ -s "$OUT/meta/inspect.json" ]] || timeout 900 python -m selective_draft.cli inspect "${S[@]}" > "$OUT/meta/inspect.json" \
-    || { rm -f "$OUT/meta/inspect.json"; echo "model load/inspect failed or took over 15 min (slow storage on $(hostname)?)"; exit 7; }
+    || { rm -f "$OUT/meta/inspect.json"; echo "model load/inspect failed or took over 15 min on $(hostname); see the job's .err log"; exit 7; }
 
 # evaluate NAME ARGS...: shard examples over all GPUs (resumable), then merge
 par_eval() { local name=$1; shift
@@ -217,6 +219,14 @@ if has memprobe; then
     [[ -f "$OUT/memprobe/memprobe.json" ]] || CUDA_VISIBLE_DEVICES=0 python -m selective_draft.cli memprobe "${S[@]}" \
         --set "guidance.early_layer=$L" --output-dir "$OUT/memprobe" > "$OUT/logs/memprobe.log" 2>&1
     stamp "memprobe: $(python -c "import json;print([(r['length'],r.get('oom'),r.get('peak_allocated_gib'),r.get('peak_reserved_gib')) for r in json.load(open('$OUT/memprobe/memprobe.json'))['results']])")"
+fi
+
+# ---- moecheck: fused MoE (DMax/VeOmni) vs the HF expert loop on recorded states + greedy decoding (single GPU) --------
+if has moecheck; then
+    MC_STATES="${MOECHECK_STATES:-$OUT/states/readout_val}"
+    [[ -f "$OUT/moecheck/moe_check.json" ]] || CUDA_VISIBLE_DEVICES=0 python -m selective_draft.cli moe-check "${S[@]}" \
+        --states "$MC_STATES" --n-gen "${MOECHECK_NGEN:-8}" --output-dir "$OUT/moecheck" > "$OUT/logs/moecheck.log" 2>&1
+    stamp "moecheck: $(grep -E '^(logits|gradient|forward_seconds|decode) ' "$OUT/logs/moecheck.log" | cut -c1-400 | tr '\n' ' ')"
 fi
 
 # ---- stage 2: Joint (root_success_v2) ---------------------------------------------------------------

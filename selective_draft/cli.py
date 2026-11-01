@@ -1,7 +1,7 @@
 """python -m selective_draft.cli <command> --config CONFIG [--set section.field=value ...]
 
 commands: prepare-data | inspect | collect | layer-profile | train-readout | readout-sweep | train-joint | evaluate |
-          merge-eval | memprobe
+          merge-eval | memprobe | moe-check
 Real-model commands run on a TACC compute node; the fake backend runs everything on CPU."""
 
 from __future__ import annotations
@@ -237,6 +237,31 @@ def cmd_memprobe(args):
     print(json.dumps(res, indent=1))
 
 
+def cmd_moe_check(args):
+    """moe_impl=fused vs the HF expert loop on the real model: logits, input gradient, greedy decoding, speed."""
+    from .layer_profile import pick_states
+    from .moe_check import decode_parity, forward_timing, gradient_parity, logits_parity
+    cfg = _cfg(args)
+    gm, tok, _ = _build(cfg, args)
+    rollouts = [r for p in _rollout_paths(args.states) for r in load_rollouts(p)]
+    picks = pick_states(rollouts)[: args.n_states]
+    os.makedirs(args.output_dir, exist_ok=True)
+    _dump_resolved(cfg, args.output_dir, {"command": "moe-check", "states": args.states, "n_states": len(picks)})
+    rep = {"logits": logits_parity(gm, picks)}
+    print("logits", json.dumps(rep["logits"]["summary"]), flush=True)
+    rep["gradient"] = gradient_parity(gm, picks[: args.n_grad], args.layer)
+    print("gradient", json.dumps(rep["gradient"]["summary"]), flush=True)
+    rep["forward_seconds"] = forward_timing(gm, args.lengths)
+    print("forward_seconds", json.dumps(rep["forward_seconds"]), flush=True)
+    if args.n_gen:
+        cfg.data.split, cfg.data.subsplit = "dev", "dev_fast"
+        rep["decode"] = decode_parity(gm, tok, load_split(cfg, tok)[: args.n_gen], cfg)
+        print("decode", json.dumps(rep["decode"]["summary"]), flush=True)
+    rep["peak_gpu_mem_gb"] = round(torch.cuda.max_memory_allocated() / 2 ** 30, 3) if torch.cuda.is_available() else None
+    with open(os.path.join(args.output_dir, "moe_check.json"), "w") as f:
+        json.dump(rep, f, indent=1, default=float)
+
+
 def cmd_evaluate(args):
     from .evaluation import evaluate
     cfg = _cfg(args)
@@ -310,6 +335,12 @@ def main(argv=None):
     p = sub.add_parser("memprobe", help="peak GPU memory of one Joint training step at worst-case lengths")
     _common(p); p.add_argument("--snapshot"); p.add_argument("--group", type=int, default=32)
     p.add_argument("--lengths", type=int, nargs="+", default=[1024, 2048, 2336]); p.set_defaults(fn=cmd_memprobe)
+
+    p = sub.add_parser("moe-check", help="fused MoE (DMax/VeOmni) vs the HF expert loop: logits, gradient, decoding, speed")
+    _common(p); p.add_argument("--states", nargs="+", required=True)
+    p.add_argument("--n-states", type=int, default=16); p.add_argument("--n-grad", type=int, default=4)
+    p.add_argument("--layer", type=int, default=17); p.add_argument("--n-gen", type=int, default=8)
+    p.add_argument("--lengths", type=int, nargs="+", default=[512, 1024, 2048]); p.set_defaults(fn=cmd_moe_check)
 
     p = sub.add_parser("evaluate", help="task accuracy + latency; sweep via evaluation.commit_thresholds")
     _common(p); p.add_argument("--snapshot"); p.add_argument("--limit", type=int)

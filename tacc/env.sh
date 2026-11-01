@@ -14,7 +14,9 @@ export TOKENIZERS_PARALLELISM=false
 export WANDB_MODE=offline  # project convention; nothing here logs to W&B
 # CUDA toolkit module: torch wheels bring their own CUDA runtime, but the jobs were validated with this module
 # loaded, so it stays.
-module load cuda/12.8 >/dev/null 2>&1 || echo "[env.sh] WARN: could not load cuda/12.8"
+# Vista (GH200, aarch64) has no cuda/12.8 module; its newest is cuda/12.6.
+if [[ "$(uname -m)" == "aarch64" ]]; then CUDA_MODULE=cuda/12.6; else CUDA_MODULE=cuda/12.8; fi
+module load "$CUDA_MODULE" >/dev/null 2>&1 || echo "[env.sh] WARN: could not load $CUDA_MODULE"
 export CUDA_HOME="${CUDA_HOME:-${TACC_CUDA_DIR:-}}"
 mkdir -p "$HF_HOME" "$PIP_CACHE_DIR" "$TORCH_EXTENSIONS_DIR" "$TRITON_CACHE_DIR" "$XDG_CACHE_HOME"
 

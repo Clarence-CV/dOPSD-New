@@ -46,5 +46,6 @@ def build_model_and_tokenizer(cfg: Config, device: torch.device):
         if device.type != "cuda":
             base = base.to(device)
         base = base.eval()
-    backend = LLaDA2MiniBackend(base, cfg.generation.block_length, mask_token_id=mask_id, eos_token_id=eos_id)
+    backend = LLaDA2MiniBackend(base, cfg.generation.block_length, mask_token_id=mask_id, eos_token_id=eos_id,
+                                moe_impl=cfg.model.moe_impl)
     return GuidedModel(base, backend, cfg.guidance), tok

@@ -20,6 +20,7 @@ class ModelConfig:
     mask_token_id: Optional[int] = None  # cross-checked against the tokenizer when set
     eos_token_id: Optional[int] = None
     fake_kwargs: Dict[str, Any] = field(default_factory=dict)  # fake_llada2 only
+    moe_impl: str = "hf_loop"  # hf_loop (official HF code) | fused (DMax/VeOmni Triton group GEMM, CUDA only)
 
 
 @dataclass
@@ -167,6 +168,7 @@ class Config:
                                     self.evaluation, self.trace)
         _choice("model.backend", m.backend, {"llada2_mini", "fake_llada2"})
         _choice("model.dtype", m.dtype, {"bfloat16", "float16", "float32"})
+        _choice("model.moe_impl", m.moe_impl, {"hf_loop", "fused"})
         if m.attn_implementation is not None:
             _choice("model.attn_implementation", m.attn_implementation, {"sdpa", "eager"})
         _choice("data.split", d.split, {"train", "dev", "analysis", "test"})
