@@ -16,7 +16,7 @@
 #        QPU (questions per process per update; 2 when NG*TPG < 3, else 1), SAVE_EVERY (50),
 #        EVAL_STEPS ("100 200 300 400"), FINAL_TEST (1), N_TEST (all 500), TESTS=1 (CPU tests first), DEV=1 (small
 #        sizes for the 2-hour dev queue), MOE_IMPL (override model.moe_impl), PPG (evaluation/diag processes per GPU, 1),
-#        LOO_BATCH (Teacher rows per forward, 4).
+#        LOO_BATCH (Teacher rows per forward, 4), DIAG_TAUS ("0.7 0.95"), DIAG_EVAL_TAUS ("0.95 0.7"), DIAG_K (8).
 # Monitoring: nvidia-smi samples (utilisation, memory, power) every 30 s -> $OUT/logs/gpu_monitor_<job>.csv;
 #        train/log_rank0.jsonl has per-update loss terms, LOO statistics, on-policy accuracy/TPF, timing and peak memory.
 #SBATCH --job-name=sibling
@@ -63,6 +63,9 @@ FINAL_TEST="${FINAL_TEST:-1}"
 N_TEST="${N_TEST:-}"
 TESTS="${TESTS:-0}"
 PPG="${PPG:-1}"
+DIAG_TAUS="${DIAG_TAUS:-0.7 0.95}"             # sibling-diag thresholds
+DIAG_EVAL_TAUS="${DIAG_EVAL_TAUS:-0.95 0.7}"   # greedy base evaluations in the diag stage
+DIAG_K="${DIAG_K:-8}"                          # rollout attempts per question in sibling-diag
 LOO_BATCH="${LOO_BATCH:-4}"
 if [[ "${DEV:-0}" == "1" ]]; then
     DIAG_N="${DIAG_N_DEV:-12}"; DEV_N=8; TRAIN_STEPS=4; QPU=1; SAVE_EVERY=2; EVAL_STEPS="2 4"; FINAL_TEST=0
@@ -137,10 +140,13 @@ fi
 
 # ---- Phase 0: diagnostics on the frozen base --------------------------------------------------------------------
 if has diag; then
-    par_eval "diag_base_t95" "${DEVSET[@]}" "${BASE[@]}" "${T95[@]}" --limit "$DIAG_N"
-    par_eval "diag_base_t70" "${DEVSET[@]}" "${BASE[@]}" --limit "$DIAG_N"
-    par_diag "tau70" "${DEVSET[@]}" --limit "$DIAG_N"
-    par_diag "tau95" "${DEVSET[@]}" "${T95[@]}" --limit "$DIAG_N"
+    for tau in $DIAG_EVAL_TAUS; do   # greedy base accuracy / TPF reference
+        par_eval "diag_base_t${tau#0.}" "${DEVSET[@]}" "${BASE[@]}" --set "generation.commit_threshold=$tau" --limit "$DIAG_N"
+    done
+    for tau in $DIAG_TAUS; do        # T_train rollouts + frozen-base LOO statistics
+        par_diag "tau${tau#0.}" "${DEVSET[@]}" --set "generation.commit_threshold=$tau" \
+            --set "training.max_rollout_attempts=$DIAG_K" --limit "$DIAG_N"
+    done
 fi
 
 # ---- Phase 1: training -------------------------------------------------------------------------------------------
