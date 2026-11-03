@@ -36,6 +36,7 @@ class DistCtx:
             torch.cuda.set_device(device)
         if self.enabled and not dist.is_initialized():
             backend = "nccl" if device is not None and device.type == "cuda" else "gloo"
+            backend = os.environ.get("DOPSD_DIST_BACKEND", backend)  # gloo when ranks share a GPU
             # Ranks only meet at update boundaries; joint updates (K continuations per state) can differ by
             # more than the 10-minute default before the first collective.
             dist.init_process_group(backend, timeout=timedelta(hours=2))

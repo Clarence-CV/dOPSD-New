@@ -12,7 +12,8 @@
 #   train  train-sibling: TRAIN_STEPS updates, QPU questions per GPU per update, checkpoint every SAVE_EVERY
 #   eval   dev_fast (first DEV_N) at tau 0.7: base and checkpoints EVAL_STEPS; pick by accuracy, then fewer steps,
 #          then earlier; FINAL_TEST=1: MATH-500 test, base vs selected, at tau 0.7 and 0.95, paired summary
-# Knobs: RUN, CONFIG, DIAG_N (64), DEV_N (128), TRAIN_STEPS (400), QPU (3 on one GPU, else 1), SAVE_EVERY (50),
+# Knobs: RUN, CONFIG, DIAG_N (64), DEV_N (128), TRAIN_STEPS (400), TPG (training processes per GPU, 2; >1 uses gloo),
+#        QPU (questions per process per update; 2 when NG*TPG < 3, else 1), SAVE_EVERY (50),
 #        EVAL_STEPS ("100 200 300 400"), FINAL_TEST (1), N_TEST (all 500), TESTS=1 (CPU tests first), DEV=1 (small
 #        sizes for the 2-hour dev queue), MOE_IMPL (override model.moe_impl), PPG (evaluation/diag processes per GPU, 1),
 #        LOO_BATCH (Teacher rows per forward, 4).
@@ -53,7 +54,9 @@ NG=$(nvidia-smi -L | wc -l)
 DIAG_N="${DIAG_N:-64}"
 DEV_N="${DEV_N:-128}"
 TRAIN_STEPS="${TRAIN_STEPS:-400}"
-if (( NG == 1 )); then QPU="${QPU:-3}"; else QPU="${QPU:-1}"; fi   # 3 questions per update either way
+TPG="${TPG:-2}"                                                     # training processes per GPU (GH200 96 GB: 2 x ~42 GB)
+NTR=$((NG * TPG))
+QPU="${QPU:-$(( NTR >= 3 ? 1 : 2 ))}"                               # questions per process per update
 SAVE_EVERY="${SAVE_EVERY:-50}"
 EVAL_STEPS="${EVAL_STEPS:-100 200 300 400}"
 FINAL_TEST="${FINAL_TEST:-1}"
@@ -63,6 +66,7 @@ PPG="${PPG:-1}"
 LOO_BATCH="${LOO_BATCH:-4}"
 if [[ "${DEV:-0}" == "1" ]]; then
     DIAG_N="${DIAG_N_DEV:-12}"; DEV_N=8; TRAIN_STEPS=4; QPU=1; SAVE_EVERY=2; EVAL_STEPS="2 4"; FINAL_TEST=0
+    PPG="${PPG_DEV:-2}"
 fi
 S=(--config "$CONFIG" --set "training.loo_batch_size=$LOO_BATCH")
 [[ -n "${MOE_IMPL:-}" ]] && S+=(--set "model.moe_impl=\"$MOE_IMPL\"")
@@ -84,7 +88,7 @@ cp "$CONFIG" "$OUT/meta/config.json"
 cp .code_revision "$OUT/meta/code_revision.txt" 2>/dev/null || true
 cp .code_status "$OUT/meta/code_status.txt" 2>/dev/null || true
 nvidia-smi > "$OUT/meta/nvidia_smi.txt" 2>&1 || true
-echo "$SLURM_JOB_ID $(hostname) $(date -Is) STAGES=$STAGES DEV=${DEV:-0} NG=$NG QPU=$QPU" >> "$OUT/meta/jobs.txt"
+echo "$SLURM_JOB_ID $(hostname) $(date -Is) STAGES=$STAGES DEV=${DEV:-0} NG=$NG TPG=$TPG QPU=$QPU PPG=$PPG" >> "$OUT/meta/jobs.txt"
 [[ -s "$OUT/meta/inspect.json" ]] || timeout 900 python -m selective_draft.cli inspect "${S[@]}" > "$OUT/meta/inspect.json" \
     || { rm -f "$OUT/meta/inspect.json"; echo "model load/inspect failed or took over 15 min"; exit 7; }
 
@@ -145,7 +149,8 @@ if has train; then
     CK=$(latest_ckpt "$TRAIN")
     if [[ "$CK" != *"-$TRAIN_STEPS" ]]; then
         RES=(); [[ -n "$CK" ]] && RES=(--resume "$CK")
-        torchrun --standalone --nproc_per_node="$NG" -m selective_draft.cli train-sibling "${S[@]}" \
+        BK=(); (( TPG > 1 )) && BK=(env DOPSD_DIST_BACKEND=gloo)
+        "${BK[@]}" torchrun --standalone --nproc_per_node="$NTR" -m selective_draft.cli train-sibling "${S[@]}" \
             --set 'data.split="train"' --set "sibling.questions_per_update=$QPU" \
             --max-steps "$TRAIN_STEPS" --save-every "$SAVE_EVERY" --output-dir "$TRAIN" "${RES[@]}" \
             > "$OUT/logs/train.log" 2>&1

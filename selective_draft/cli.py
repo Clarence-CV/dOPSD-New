@@ -41,7 +41,9 @@ def _device(args) -> torch.device:
     if device.type == "cuda":
         local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         if device.index is None:
-            device = torch.device("cuda", local_rank)
+            # LOCAL_RANK modulo the visible GPUs: several ranks may share one GPU (e.g. 2 training processes on one
+            # 96 GB GH200, with DOPSD_DIST_BACKEND=gloo since NCCL refuses two ranks on the same device)
+            device = torch.device("cuda", local_rank % max(1, torch.cuda.device_count()))
         elif int(os.environ.get("WORLD_SIZE", "1")) > 1 and device.index != local_rank:
             raise ValueError("distributed CUDA runs must use their LOCAL_RANK device")
         torch.cuda.set_device(device)  # before loading weights or creating NCCL collectives
