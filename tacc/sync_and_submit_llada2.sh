@@ -11,17 +11,18 @@ cd "$(dirname "$0")/.."
 H="${TACC_HOST:-ls6}"
 ssh -O check "$H" >/dev/null 2>&1 || { echo "no $H master connection; run: ssh -fN $H"; exit 1; }
 REMOTE_WORK=$(ssh "$H" 'echo $WORK')
-DEST="$REMOTE_WORK/inf385t/dOPSD-sd"
+DEST="$REMOTE_WORK/inf385t/${DEST_NAME:-dOPSD-sd}"   # DEST_NAME=dOPSD-sib for the sibling-opsd branch
 rsync -az --delete --exclude '.git/' --exclude 'outputs/' --exclude 'logs/' --exclude '__pycache__/' \
       --exclude 'checkpoints/' --exclude 'wandb/' ./ "$H:$DEST/"
 git rev-parse HEAD > /tmp/sd_rev && git status --short > /tmp/sd_status
 scp -q /tmp/sd_rev "$H:$DEST/.code_revision"; scp -q /tmp/sd_status "$H:$DEST/.code_status"
 echo "synced to $DEST at $(cat /tmp/sd_rev)$( [[ -s /tmp/sd_status ]] && echo ' (+uncommitted changes)')"
-ssh "$H" "qlimits 2>/dev/null | grep -E 'Queue|gpu-a100' || true"
+ssh "$H" "qlimits 2>/dev/null | grep -E 'Queue|gpu-a100|^gh' || true"
+SCRIPT="${SCRIPT:-tacc/llada2_pipeline.slurm}"   # tacc/sibling_pipeline.slurm for sibling OPSD
 PASS=""
-for v in RUN STAGES SMOKE EVAL_SPLIT EVAL_SUBSPLIT N_EVAL READOUT_STEPS JOINT_STEPS READOUT_SELECT CONFIG STATE_SETS VAL_N CONF_N TRAIN_N DEV_N FINAL_TEST JOINT_EVAL_STEPS TESTS MOECHECK_STATES MOECHECK_NGEN MOE_IMPL; do
+for v in PPG LOO_BATCH DEV DIAG_N DIAG_N_DEV DEV_N TRAIN_STEPS QPU EVAL_STEPS N_TEST RUN STAGES SMOKE EVAL_SPLIT EVAL_SUBSPLIT N_EVAL READOUT_STEPS JOINT_STEPS READOUT_SELECT CONFIG STATE_SETS VAL_N CONF_N TRAIN_N DEV_N FINAL_TEST JOINT_EVAL_STEPS TESTS MOECHECK_STATES MOECHECK_NGEN MOE_IMPL; do
     [[ -n "${!v:-}" ]] && PASS+="$v='${!v}' "
 done
 if [[ "${DRY:-0}" == "1" ]]; then echo "DRY=1: not submitting"; exit 0; fi
-ssh "$H" "cd $DEST && mkdir -p logs && env $PASS sbatch --parsable ${SBATCH_ARGS:-} tacc/llada2_pipeline.slurm" | tee /tmp/llada2_jobid
+ssh "$H" "cd $DEST && mkdir -p logs && env $PASS sbatch --parsable ${SBATCH_ARGS:-} $SCRIPT" | tee /tmp/llada2_jobid
 echo "submitted job $(cat /tmp/llada2_jobid); monitor: ssh "$H" 'squeue -u \$USER'"

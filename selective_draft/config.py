@@ -90,6 +90,22 @@ class TrainingConfig:
 
 
 @dataclass
+class SiblingConfig:
+    """Sibling OPSD (doc/plan_a_loo_defer.md): LoRA student, leave-one-out sibling Teacher on verified aggressive
+    rollouts. The rollout / decoding threshold is generation.commit_threshold; attempts and temperature come from
+    training.max_rollout_attempts / rollout_temperature."""
+    lora_rank: int = 0  # 0 = no LoRA (every other stage); > 0 attaches adapters at load time
+    lora_alpha: float = 32.0
+    lora_targets: List[str] = field(default_factory=lambda: ["attention.query_key_value", "attention.dense"])
+    learning_rate: float = 2e-5
+    alpha_mix: Optional[float] = None  # weight of onehot(c) in the target; None = 2*tau - 1 (parallel commit => fixed point)
+    anchor_weight: float = 0.1  # KL(p0 || p) on the block's other MASK positions
+    states_per_rollout: int = 8  # parallel-commit states drawn from the successful rollout
+    max_positions_per_state: int = 4  # supervised co-committed positions per state (all siblings stay revealed)
+    questions_per_update: int = 1  # questions per rank per optimizer update
+
+
+@dataclass
 class EvaluationConfig:
     commit_thresholds: Optional[List[float]] = None  # sweep; None -> generation.commit_threshold
     warmup: int = 1
@@ -109,6 +125,7 @@ class Config:
     guidance: GuidanceConfig = field(default_factory=GuidanceConfig)
     generation: GenerationConfig = field(default_factory=GenerationConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    sibling: SiblingConfig = field(default_factory=SiblingConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     trace: TraceConfig = field(default_factory=TraceConfig)
 
@@ -217,7 +234,22 @@ class Config:
             if not (0.0 <= float(thr) <= 1.0):
                 raise ValueError("evaluation.commit_thresholds entries must be in [0, 1]")
         _choice("trace.level", tc.level, {"none", "state_only"})
+        sb = self.sibling
+        if sb.lora_rank < 0 or sb.states_per_rollout < 1 or sb.max_positions_per_state < 1 or sb.questions_per_update < 1:
+            raise ValueError("sibling: lora_rank >= 0, states_per_rollout/max_positions_per_state/questions_per_update >= 1")
+        if sb.alpha_mix is not None and not (0.0 <= sb.alpha_mix <= 1.0):
+            raise ValueError("sibling.alpha_mix must be in [0, 1] or null")
+        if sb.anchor_weight < 0:
+            raise ValueError("sibling.anchor_weight must be >= 0")
         return self
+
+    def sibling_alpha(self) -> float:
+        """Weight of onehot(c) in the Teacher target. Default 2*tau - 1: then t(c) >= tau <=> q(c) >= 1/2, so a parallel
+        commit of the target is a leave-one-out fixed point, and 1 - alpha < tau (the Teacher alone never pushes another
+        token over the threshold) whenever tau > 2/3."""
+        if self.sibling.alpha_mix is not None:
+            return float(self.sibling.alpha_mix)
+        return min(1.0, max(0.0, 2.0 * float(self.generation.commit_threshold) - 1.0))
 
 
 def _choice(name: str, value: Any, allowed: set) -> None:

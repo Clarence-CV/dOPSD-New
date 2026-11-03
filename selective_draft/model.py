@@ -21,6 +21,7 @@ import torch.nn.functional as F
 from .backend import LLaDA2MiniBackend
 from .config import GuidanceConfig
 from .decoding import choose_tokens
+from .lora import LoRAAdapters
 from .modules import EarlyReadoutAdapter, MessageInjector, soft_message
 
 MODES = ("off", "group_readout", "group_soft")
@@ -77,7 +78,7 @@ class _Scratch:
 
 
 class GuidedModel(nn.Module):
-    def __init__(self, base: nn.Module, backend: LLaDA2MiniBackend, cfg: GuidanceConfig):
+    def __init__(self, base: nn.Module, backend: LLaDA2MiniBackend, cfg: GuidanceConfig, lora_cfg=None):
         super().__init__()
         self.base = base
         self.backend = backend
@@ -89,6 +90,9 @@ class GuidedModel(nn.Module):
         self.readout = EarlyReadoutAdapter(backend.d_model, cfg.readout_rank).to(device=device, dtype=torch.float32)
         self.injector = MessageInjector(backend.d_model, cfg.injector_rank).to(device=device, dtype=torch.float32)
         self._scratch: Optional[_Scratch] = None
+        # Sibling OPSD student: LoRA hooks on the frozen base (zero update at init); None for every other stage.
+        self.lora = (LoRAAdapters(base, lora_cfg.lora_rank, lora_cfg.lora_alpha, tuple(lora_cfg.lora_targets))
+                     if lora_cfg is not None and int(lora_cfg.lora_rank) > 0 else None)
         if cfg.early_layer is not None:
             self.backend.boundary_module(cfg.early_layer)  # validates the layer index now
 
@@ -103,11 +107,16 @@ class GuidedModel(nn.Module):
         return next(self.base.parameters()).device
 
     def set_stage(self, stage: Optional[str]) -> List[nn.Parameter]:
-        """stage: 'readout' | 'joint' | None (nothing trainable). Returns the trainable params."""
+        """stage: 'readout' | 'joint' | 'sibling' (LoRA) | None (nothing trainable). Returns the trainable params."""
+        if stage == "sibling" and self.lora is None:
+            raise ValueError("stage 'sibling' needs LoRA adapters (sibling.lora_rank > 0)")
         for p in self.readout.parameters():
             p.requires_grad_(stage == "readout")
         for p in self.injector.parameters():
             p.requires_grad_(stage == "joint")
+        if self.lora is not None:
+            for p in self.lora.parameters():
+                p.requires_grad_(stage == "sibling")
         return [p for p in self.parameters() if p.requires_grad]
 
     def trainable_parameter_names(self) -> List[str]:
@@ -128,6 +137,8 @@ class GuidedModel(nn.Module):
     def module_state_dict(self) -> dict:
         d = {f"readout.{k}": v for k, v in self.readout.state_dict().items()}
         d.update({f"injector.{k}": v for k, v in self.injector.state_dict().items()})
+        if self.lora is not None:
+            d.update({f"lora.{k}": v for k, v in self.lora.state_dict().items()})
         return d
 
     def load_module_state_dict(self, sd: dict, strict: bool = True) -> None:
@@ -135,6 +146,18 @@ class GuidedModel(nn.Module):
         j = {k[len("injector."):]: v for k, v in sd.items() if k.startswith("injector.")}
         if strict and (not r or not j):
             raise KeyError("module state dict must contain both readout.* and injector.*")
+        lo = {k[len("lora."):]: v for k, v in sd.items() if k.startswith("lora.")}
+        if lo and self.lora is None:
+            raise KeyError("snapshot holds LoRA adapters but the model has none (set sibling.lora_rank)")
+        if self.lora is not None:
+            if strict and not lo:
+                raise KeyError("the model has LoRA adapters but the snapshot holds no lora.* tensors")
+            cur = self.lora.state_dict()
+            for k, v in lo.items():
+                if k not in cur or tuple(cur[k].shape) != tuple(v.shape):
+                    raise ValueError(f"lora.{k}: shape/key mismatch with the current adapters")
+            if lo:
+                self.lora.load_state_dict(lo, strict=True)
         for name, mod, part in (("readout", self.readout, r), ("injector", self.injector, j)):
             for k, v in part.items():
                 cur = mod.state_dict()[k]
@@ -148,6 +171,13 @@ class GuidedModel(nn.Module):
         if self._scratch is not None:
             raise RuntimeError("base_forward called while a guided forward is in progress")
         return self.backend.forward_logits(input_ids)
+
+    def teacher_forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Frozen pretrained model: native forward with every LoRA hook switched off (sibling Teacher / reference)."""
+        if self.lora is None:
+            return self.base_forward(input_ids)
+        with self.lora.disabled():
+            return self.base_forward(input_ids)
 
     def readout_log_probs(self, hidden_rows: torch.Tensor) -> torch.Tensor:
         """[n, d] boundary hidden -> [n, V] fp32 log-probs through g_phi + frozen norm/head (grad kept)."""

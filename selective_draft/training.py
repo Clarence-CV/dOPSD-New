@@ -123,7 +123,8 @@ class BaseTrainer:
         gm.assert_base_frozen()
         if not self.params:
             raise RuntimeError("no trainable parameters for this stage")
-        lr = cfg.training.learning_rate_readout if self.stage == "readout" else cfg.training.learning_rate_guidance
+        lr = {"readout": cfg.training.learning_rate_readout,
+              "sibling": cfg.sibling.learning_rate}.get(self.stage, cfg.training.learning_rate_guidance)
         self.learning_rate = lr
         self.optimizer = torch.optim.AdamW(self.params, lr=lr, weight_decay=cfg.training.weight_decay,
                                           betas=(cfg.training.adam_beta1, cfg.training.adam_beta2))

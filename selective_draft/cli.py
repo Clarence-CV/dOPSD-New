@@ -1,7 +1,7 @@
 """python -m selective_draft.cli <command> --config CONFIG [--set section.field=value ...]
 
 commands: prepare-data | inspect | collect | layer-profile | train-readout | readout-sweep | train-joint | evaluate |
-          merge-eval | memprobe | moe-check
+          merge-eval | memprobe | moe-check | train-sibling | sibling-diag
 Real-model commands run on a TACC compute node; the fake backend runs everything on CPU."""
 
 from __future__ import annotations
@@ -223,6 +223,58 @@ def cmd_train_joint(args):
     print(json.dumps({"final": last, "snapshot": os.path.join(args.output_dir, "snapshot")}, default=float))
 
 
+def cmd_train_sibling(args):
+    from .sibling_opsd import SiblingOPSDTrainer
+    from .training import run_training
+    cfg = _cfg(args)
+    if cfg.data.split != "train":
+        raise SystemExit("train-sibling requires data.split=train")
+    if cfg.sibling.lora_rank < 1:
+        raise SystemExit("train-sibling requires sibling.lora_rank >= 1")
+    if args.max_steps is not None:
+        cfg.training.max_steps = args.max_steps
+    if args.save_every is not None:
+        cfg.training.save_every = args.save_every
+    gm, tok, _ = _build(cfg, args)
+    examples = load_split(cfg, tok)
+    if args.limit:
+        examples = examples[: args.limit]
+    _dump_resolved(cfg, args.output_dir, {"command": "train-sibling", "n_examples": len(examples),
+                                        "alpha": cfg.sibling_alpha()})
+    trainer = SiblingOPSDTrainer(gm, cfg, args.output_dir, examples, tok)
+    last = run_training(trainer, cfg.training.max_steps, cfg.training.save_every, args.resume)
+    print(json.dumps({"final": last, "snapshot": os.path.join(args.output_dir, "snapshot")}, default=float))
+
+
+def cmd_sibling_diag(args):
+    from .sibling_opsd import run_sibling_diag, summarize_sibling_diag
+    cfg = _cfg(args)
+    if not args.summarize_only:
+        gm, tok, snap_id = _build(cfg, args, args.snapshot)
+        examples = load_split(cfg, tok)
+        if args.limit:
+            examples = examples[: args.limit]
+        si, sn = _shard(args.shard)
+        if si == 0:
+            _dump_resolved(cfg, args.output_dir, {"command": "sibling-diag", "snapshot": snap_id,
+                                                "n_examples": len(examples)})
+        run_sibling_diag(gm, tok, examples, cfg, args.output_dir, (si, sn))
+    if not args.shard or args.summarize_only:
+        print(json.dumps(summarize_sibling_diag(args.output_dir), indent=1, default=float))
+
+
+def cmd_sibling_memprobe(args):
+    from .sibling_opsd import sibling_memprobe
+    cfg = _cfg(args)
+    gm, _, _ = _build(cfg, args)
+    res = sibling_memprobe(gm, cfg, args.lengths, args.group, args.loo_batches)
+    os.makedirs(args.output_dir, exist_ok=True)
+    with open(os.path.join(args.output_dir, "sibling_memprobe.json"), "w") as f:
+        json.dump({"results": res, "gpu": torch.cuda.get_device_name() if torch.cuda.is_available() else None,
+                   "total_gib": torch.cuda.get_device_properties(0).total_memory / 2 ** 30 if torch.cuda.is_available() else None},
+                  f, indent=1)
+
+
 def cmd_memprobe(args):
     """Peak GPU memory of one Joint training step at the given sequence lengths (synthetic state)."""
     from .memprobe import probe
@@ -331,6 +383,20 @@ def main(argv=None):
     p = sub.add_parser("train-joint", help="stage 2: root_success_v2 Joint training of the message injector")
     _common(p); p.add_argument("--readout-snapshot"); p.add_argument("--max-steps", type=int)
     p.add_argument("--save-every", type=int); p.add_argument("--resume"); p.set_defaults(fn=cmd_train_joint)
+
+    p = sub.add_parser("train-sibling", help="sibling OPSD: LoRA student, LOO sibling Teacher on verified aggressive rollouts")
+    _common(p); p.add_argument("--max-steps", type=int); p.add_argument("--save-every", type=int)
+    p.add_argument("--limit", type=int); p.add_argument("--resume"); p.set_defaults(fn=cmd_train_sibling)
+
+    p = sub.add_parser("sibling-diag", help="Phase 0: frozen-base LOO statistics of parallel commits in tau/T rollouts")
+    _common(p); p.add_argument("--snapshot"); p.add_argument("--limit", type=int)
+    p.add_argument("--shard", help="I/N; run --summarize-only afterwards")
+    p.add_argument("--summarize-only", action="store_true"); p.set_defaults(fn=cmd_sibling_diag)
+
+    p = sub.add_parser("sibling-memprobe", help="peak memory/time of one sibling training state at long lengths")
+    _common(p); p.add_argument("--lengths", type=int, nargs="+", default=[1024, 2048, 2336])
+    p.add_argument("--group", type=int, default=8); p.add_argument("--loo-batches", type=int, nargs="+", default=[4, 8])
+    p.set_defaults(fn=cmd_sibling_memprobe)
 
     p = sub.add_parser("memprobe", help="peak GPU memory of one Joint training step at worst-case lengths")
     _common(p); p.add_argument("--snapshot"); p.add_argument("--group", type=int, default=32)
