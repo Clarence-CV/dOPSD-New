@@ -16,6 +16,9 @@ export WANDB_MODE=offline  # project convention; nothing here logs to W&B
 # loaded, so it stays.
 # Vista (GH200, aarch64) has no cuda/12.8 module; its newest is cuda/12.6.
 if [[ "$(uname -m)" == "aarch64" ]]; then CUDA_MODULE=cuda/12.6; else CUDA_MODULE=cuda/12.8; fi
+# Vista's default modules set CC=nvc (NVIDIA HPC SDK). Triton compiles its CUDA driver stub with $CC at first use and
+# nvc fails on it (dev job 1118187: CalledProcessError in triton/runtime/build.py), so the fused MoE kernel never ran.
+if [[ "$(uname -m)" == "aarch64" ]]; then export CC=/usr/bin/gcc CXX=/usr/bin/g++; fi
 module load "$CUDA_MODULE" >/dev/null 2>&1 || echo "[env.sh] WARN: could not load $CUDA_MODULE"
 export CUDA_HOME="${CUDA_HOME:-${TACC_CUDA_DIR:-}}"
 mkdir -p "$HF_HOME" "$PIP_CACHE_DIR" "$TORCH_EXTENSIONS_DIR" "$TRITON_CACHE_DIR" "$XDG_CACHE_HOME"
