@@ -286,9 +286,10 @@ class SiblingOPSDTrainer(BaseTrainer):
             with open(self.ledger_path, "a") as f:
                 f.write(json.dumps(ledger, default=str) + "\n")
         t_rollout = time.perf_counter() - t_start
-        global_n = self.dist.sum_scalar(len(items), self.device)
+        global_n = self.dist.sum_scalar(len(items), self.device)  # blocks until every rank finished its rollouts
+        t_wait = time.perf_counter() - t_start - t_rollout
         rec: Dict[str, float] = {"question_round": rnd, "outcomes": ",".join(outcomes), "local_states": len(items),
-                                 "rollout_seconds": t_rollout, **self._onpolicy(ledgers)}
+                                 "rollout_seconds": t_rollout, "wait_seconds": t_wait, **self._onpolicy(ledgers)}
         if global_n == 0:
             self._skip_update()
             rec.update(skipped=1, round_seconds=time.perf_counter() - t_start)
@@ -311,7 +312,7 @@ class SiblingOPSDTrainer(BaseTrainer):
             for k, v in st.items():
                 agg[k] = agg.get(k, 0.0) + v
         rec.update({k: v / max(1, used) for k, v in agg.items()})
-        rec["loss_seconds"] = time.perf_counter() - t_start - t_rollout
+        rec["loss_seconds"] = time.perf_counter() - t_start - t_rollout - t_wait
         rec.update(self._apply_update(local_sum, used, global_n))
         rec["loss"] = local_sum / used if used else None
         busy = time.perf_counter() - t_start
