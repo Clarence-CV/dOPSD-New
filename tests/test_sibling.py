@@ -62,6 +62,26 @@ def test_alpha_rule_makes_parallel_commit_a_fixed_point_and_never_redirects():
         assert (float(t[0, 0]) >= 0.7) == expect_commit, (qc, float(t[0, 0]))
         assert float(t[0, 1:].max()) < 0.7  # another token can never pass tau from the Teacher alone
     assert abs(_cfg(**{"sibling.alpha_mix": 0.25}).sibling_alpha() - 0.25) < 1e-12
+    # the cap never binds above 2/3: the capped target equals the plain mixture at tau = 0.7
+    q = torch.softmax(torch.randn(3, V) * 3, -1)
+    tok = torch.tensor([0, 4, 7])
+    assert torch.allclose(mixed_target(q.log(), tok, a, 0.7), mixed_target(q.log(), tok, a), atol=1e-7)
+
+
+def test_cap_keeps_fixed_point_rule_and_prevents_redirect_below_two_thirds():
+    cfg = _cfg(**{"generation.commit_threshold": 0.5})
+    a = cfg.sibling_alpha()
+    assert a == 0.0
+    V = 50
+    for qc, qv, expect_commit in ((0.9, 0.05, True), (0.55, 0.40, True), (0.45, 0.50, False), (0.05, 0.90, False)):
+        q = torch.full((1, V), (1 - qc - qv) / (V - 2))
+        q[0, 0], q[0, 1] = qc, qv
+        t = mixed_target(q.log(), torch.tensor([0]), a, 0.5, 0.01)
+        assert abs(float(t.sum()) - 1) < 1e-5 and bool((t >= 0).all())
+        assert (float(t[0, 0]) >= 0.5) == expect_commit, (qc, float(t[0, 0]))
+        assert float(t[0, 1:].max()) < 0.5, "no other token may reach tau"
+    # without the cap the strongly disagreeing Teacher would redirect to token 1
+    assert float(mixed_target(q.log(), torch.tensor([0]), a)[0, 1]) >= 0.5
 
 
 def test_loo_teacher_reveals_every_sibling_but_the_target():

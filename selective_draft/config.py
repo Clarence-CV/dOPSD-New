@@ -99,6 +99,7 @@ class SiblingConfig:
     lora_targets: List[str] = field(default_factory=lambda: ["attention.query_key_value", "attention.dense"])
     learning_rate: float = 2e-5
     alpha_mix: Optional[float] = None  # weight of onehot(c) in the target; None = 2*tau - 1 (parallel commit => fixed point)
+    cap_margin: float = 0.01  # tokens other than c are capped at tau - cap_margin in the target (binds for tau <= 2/3)
     anchor_weight: float = 0.1  # KL(p0 || p) on the block's other MASK positions
     states_per_rollout: int = 8  # parallel-commit states drawn from the successful rollout
     max_positions_per_state: int = 4  # supervised co-committed positions per state (all siblings stay revealed)
@@ -239,14 +240,16 @@ class Config:
             raise ValueError("sibling: lora_rank >= 0, states_per_rollout/max_positions_per_state/questions_per_update >= 1")
         if sb.alpha_mix is not None and not (0.0 <= sb.alpha_mix <= 1.0):
             raise ValueError("sibling.alpha_mix must be in [0, 1] or null")
+        if not (0.0 < sb.cap_margin < 0.5):
+            raise ValueError("sibling.cap_margin must be in (0, 0.5)")
         if sb.anchor_weight < 0:
             raise ValueError("sibling.anchor_weight must be >= 0")
         return self
 
     def sibling_alpha(self) -> float:
-        """Weight of onehot(c) in the Teacher target. Default 2*tau - 1: then t(c) >= tau <=> q(c) >= 1/2, so a parallel
-        commit of the target is a leave-one-out fixed point, and 1 - alpha < tau (the Teacher alone never pushes another
-        token over the threshold) whenever tau > 2/3."""
+        """Weight of onehot(c) in the Teacher target. Default max(0, 2*tau - 1): then t(c) >= tau <=> q(c) >= 1/2, so a
+        parallel commit of the target is a leave-one-out fixed point. No redirect: 1 - alpha < tau for tau > 2/3; below
+        that the cap in sibling_opsd.mixed_target keeps every other token under tau."""
         if self.sibling.alpha_mix is not None:
             return float(self.sibling.alpha_mix)
         return min(1.0, max(0.0, 2.0 * float(self.generation.commit_threshold) - 1.0))

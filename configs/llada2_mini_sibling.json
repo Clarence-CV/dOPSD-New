@@ -1,5 +1,5 @@
 {
-  "_comment": "Sibling OPSD on LLaDA2.0-mini / MATH (doc/plan_a_loo_defer.md). Same model, data, prompt and DMax decoding rules as llada2_mini_math.json, but the aggressive threshold tau=0.7 for rollouts and evaluation (override generation.commit_threshold for the 0.95 reference). The student is base + LoRA (rank 32 on every attention query_key_value and dense); the Teacher is the frozen base with the co-committed siblings revealed (leave-one-out); target t = alpha*onehot(c) + (1-alpha)*q with alpha = 2*tau - 1 = 0.4 (sibling.alpha_mix=null). Rollouts: T=0.9, up to 8 attempts, stop at the first verified answer. Base-model evaluations set sibling.lora_rank=0.",
+  "_comment": "Sibling OPSD on LLaDA2.0-mini / MATH (doc/plan_a_loo_defer.md). Same model, data, prompt and DMax decoding rules as llada2_mini_math.json, but the aggressive threshold tau=0.5 for rollouts and evaluation (Phase 0, job 1118270: at 0.7 sibling conflicts are ~1% and accuracy losses come from other paths; at 0.5 they are 3.7% and cause glitch->truncation failures) (override generation.commit_threshold for the 0.95 reference). The student is base + LoRA (rank 32 on every attention query_key_value and dense); the Teacher is the frozen base with the co-committed siblings revealed (leave-one-out); target t = alpha*onehot(c) + (1-alpha)*q with alpha = max(0, 2*tau - 1) = 0 at tau 0.5 (sibling.alpha_mix=null), every other token capped at tau - cap_margin = 0.49 with the excess spread uniformly (parallel commit <=> q(c) >= 1/2, no redirect). Rollouts: T=0.9, up to 4 attempts, stop at the first verified answer. Base-model evaluations set sibling.lora_rank=0.",
   "model": {
     "path": "inclusionAI/LLaDA2.0-mini", "backend": "llada2_mini",
     "revision": "dad945cac317da394b390f82c7b40691d8a881ed", "dtype": "bfloat16", "moe_impl": "fused",
@@ -14,17 +14,17 @@
   },
   "guidance": {"early_layer": null, "mode": "off"},
   "generation": {
-    "commit_threshold": 0.7, "max_new_tokens": 2048, "block_length": 32, "temperature": 0.0,
+    "commit_threshold": 0.5, "max_new_tokens": 2048, "block_length": 32, "temperature": 0.0,
     "early_stop": true, "cache_mode": "none"
   },
   "training": {
-    "rollout_temperature": 0.9, "max_rollout_attempts": 8, "loo_batch_size": 4,
+    "rollout_temperature": 0.9, "max_rollout_attempts": 4, "loo_batch_size": 4,
     "adam_beta1": 0.9, "adam_beta2": 0.99, "weight_decay": 0.0, "grad_clip": 1.0, "warmup_updates": 10,
-    "max_steps": 400, "save_every": 50, "max_consecutive_empty_updates": 200, "seed": 42
+    "max_steps": 300, "save_every": 25, "max_consecutive_empty_updates": 200, "seed": 42
   },
   "sibling": {
     "lora_rank": 32, "lora_alpha": 32.0, "lora_targets": ["attention.query_key_value", "attention.dense"],
-    "learning_rate": 2e-5, "alpha_mix": null, "anchor_weight": 0.1,
+    "learning_rate": 2e-5, "alpha_mix": null, "cap_margin": 0.01, "anchor_weight": 0.1,
     "states_per_rollout": 8, "max_positions_per_state": 4, "questions_per_update": 1
   },
   "evaluation": {"commit_thresholds": null, "warmup": 1, "repeats": 1},

@@ -53,12 +53,12 @@ CONFIG="${CONFIG:-configs/llada2_mini_sibling.json}"
 NG=$(nvidia-smi -L | wc -l)
 DIAG_N="${DIAG_N:-64}"
 DEV_N="${DEV_N:-128}"
-TRAIN_STEPS="${TRAIN_STEPS:-400}"
+TRAIN_STEPS="${TRAIN_STEPS:-300}"
 TPG="${TPG:-2}"                                                     # training processes per GPU (GH200 96 GB: 2 x ~42 GB)
 NTR=$((NG * TPG))
 QPU="${QPU:-$(( NTR >= 3 ? 1 : 2 ))}"                               # questions per process per update
-SAVE_EVERY="${SAVE_EVERY:-50}"
-EVAL_STEPS="${EVAL_STEPS:-100 200 300 400}"
+SAVE_EVERY="${SAVE_EVERY:-25}"
+EVAL_STEPS="${EVAL_STEPS:-75 150 225 300}"
 FINAL_TEST="${FINAL_TEST:-1}"
 N_TEST="${N_TEST:-}"
 TESTS="${TESTS:-0}"
@@ -129,6 +129,7 @@ latest_ckpt() { local best="" bs=-1 d s
     for d in "$1"/checkpoint-step-*; do [[ -f "$d/COMPLETE" ]] || continue; s=${d##*-}; (( s > bs )) && { bs=$s; best=$d; }; done
     echo "$best"; }
 DEVSET=(--set 'data.split="dev"' --set 'data.subsplit="dev_fast"')
+TT=$(python -c "import json;print(str(json.load(open('$CONFIG'))['generation']['commit_threshold']).replace('0.',''))")   # tau tag of the run
 
 # ---- memory / speed probe of one training state ---------------------------------------------------------------------
 if has memprobe; then
@@ -167,26 +168,26 @@ fi
 # ---- evaluation -----------------------------------------------------------------------------------------------------
 if has eval; then
     D=("${DEVSET[@]}" --limit "$DEV_N")
-    par_eval devfast_base_t70 "${D[@]}" "${BASE[@]}"
+    par_eval devfast_base_t${TT} "${D[@]}" "${BASE[@]}"
     for st in $EVAL_STEPS; do
         CK="$OUT/train/checkpoint-step-$st"
         [[ -f "$CK/COMPLETE" ]] || { stamp "no $CK; skipped"; continue; }
-        par_eval "devfast_step${st}_t70" "${D[@]}" --snapshot "$CK/snapshot"
+        par_eval "devfast_step${st}_t${TT}" "${D[@]}" --snapshot "$CK/snapshot"
     done
-    python - "$OUT" $EVAL_STEPS <<'PY'
+    python - "$OUT" "$TT" $EVAL_STEPS <<'PY'
 import json, os, sys
-out, steps = sys.argv[1], [int(s) for s in sys.argv[2:]]
+out, tt, steps = sys.argv[1], sys.argv[2], [int(s) for s in sys.argv[3:]]
 first = lambda p: next(iter(json.load(open(p))["summaries"].values()))
 rows = []
 for st in steps:
-    p = f"{out}/eval/devfast_step{st}_t70/summary.json"
+    p = f"{out}/eval/devfast_step{st}_t{tt}/summary.json"
     if os.path.exists(p):
         s = first(p)
         rows.append({"step": st, "accuracy": s["accuracy"], "mean_row_steps": s["mean_row_steps"],
                      "tpf_dinfer_mean": s["tpf_dinfer_mean"]})
-base = first(f"{out}/eval/devfast_base_t70/summary.json")
+base = first(f"{out}/eval/devfast_base_t{tt}/summary.json")
 best = min(rows, key=lambda r: (-r["accuracy"], r["mean_row_steps"], r["step"])) if rows else None
-sel = {"rule": "max dev_fast accuracy at tau 0.7, then min mean_row_steps, then earliest step",
+sel = {"rule": f"max dev_fast accuracy at the run's tau (tag t{tt}), then min mean_row_steps, then earliest step",
        "selected_step": best and best["step"], "checkpoint": best and f"{out}/train/checkpoint-step-{best['step']}",
        "candidates": rows, "base": {k: base[k] for k in ("accuracy", "mean_row_steps", "tpf_dinfer_mean")}}
 json.dump(sel, open(f"{out}/eval/selection.json", "w"), indent=1)
@@ -195,18 +196,18 @@ PY
     SELCK=$(python -c "import json;print(json.load(open('$OUT/eval/selection.json'))['checkpoint'] or '')")
     if [[ "$FINAL_TEST" == "1" && -n "$SELCK" ]]; then
         T=(--set 'data.split="test"'); [[ -n "$N_TEST" ]] && T+=(--limit "$N_TEST")
-        par_eval test_base_t70 "${T[@]}" "${BASE[@]}"
-        par_eval test_sel_t70 "${T[@]}" --snapshot "$SELCK/snapshot"
+        par_eval test_base_t${TT} "${T[@]}" "${BASE[@]}"
+        par_eval test_sel_t${TT} "${T[@]}" --snapshot "$SELCK/snapshot"
         par_eval test_base_t95 "${T[@]}" "${BASE[@]}" "${T95[@]}"
         par_eval test_sel_t95 "${T[@]}" "${T95[@]}" --snapshot "$SELCK/snapshot"
-        python - "$OUT/eval" <<'PY'
+        python - "$OUT/eval" "$TT" <<'PY'
 import glob, json, sys
-ev = sys.argv[1]
+ev, tt = sys.argv[1], sys.argv[2]
 def rows(d):
     p = [x for x in sorted(glob.glob(f"{ev}/{d}/rows_*.jsonl")) if ".shard" not in x][0]
     return {r["example_id"]: r for r in map(json.loads, open(p))}
 res = {}
-for t in ("t70", "t95"):
+for t in (f"t{tt}", "t95"):
     b, s = rows(f"test_base_{t}"), rows(f"test_sel_{t}")
     ids = sorted(set(b) & set(s)); n = len(ids)
     m = lambda d, k: sum(d[i][k] for i in ids) / n

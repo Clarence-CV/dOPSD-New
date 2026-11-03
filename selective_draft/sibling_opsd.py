@@ -5,9 +5,11 @@ and T_train, up to K attempts, stopping at the first answer the verifier accepts
 that committed >= 2 tokens (before the first EOS) is a candidate state S with group C and committed tokens c.
 
 Teacher for a supervised position i in C: the frozen base (LoRA off) on S with every OTHER member of C revealed as c_j
-and i still MASK (leave-one-out) -> q_i. Target t_i = alpha * onehot(c_i) + (1 - alpha) * q_i with alpha = 2*tau - 1
-(Config.sibling_alpha), so t_i(c_i) >= tau <=> q_i(c_i) >= 1/2: a parallel commit of the target is a LOO fixed point,
-and the Teacher alone never pushes another token over tau (1 - alpha < tau for tau > 2/3).
+and i still MASK (leave-one-out) -> q_i. Target (mixed_target):
+    t_i(c_i)    = alpha + (1 - alpha) * q_i(c_i),   alpha = max(0, 2*tau - 1)   (Config.sibling_alpha)
+    t_i(v != c) = min((1 - alpha) * q_i(v), tau - cap_margin); the removed mass is spread uniformly over the vocabulary
+so t_i(c_i) >= tau <=> q_i(c_i) >= 1/2 (a parallel commit of the target is a LOO fixed point), and no other token
+reaches tau in the target (no redirect). For tau > 2/3 the cap never binds (1 - alpha < tau); for tau <= 2/3 it does.
 
 Student: base + LoRA on S (siblings still MASK), one forward with grad -> p_i. Loss per state:
     mean_i KL(t_i || p_i) + anchor_weight * mean_k KL(p0_k || p_k)   (k = the block's other MASK positions,
@@ -102,9 +104,20 @@ def loo_teacher(gm, x: torch.Tensor, cpos: torch.Tensor, ctok: torch.Tensor, sup
     return torch.cat(out)
 
 
-def mixed_target(log_q: torch.Tensor, tok: torch.Tensor, alpha: float) -> torch.Tensor:
+def mixed_target(log_q: torch.Tensor, tok: torch.Tensor, alpha: float, tau: Optional[float] = None,
+                 cap_margin: float = 0.01) -> torch.Tensor:
+    """t = alpha*onehot(c) + (1-alpha)*q, then (tau given) every token other than c is capped at tau - cap_margin and the
+    removed mass is spread uniformly over the whole vocabulary: the Teacher can lower c (defer) but never nominate a
+    replacement above the threshold."""
+    rows = torch.arange(len(tok), device=log_q.device)
     t = (1.0 - alpha) * log_q.exp()
-    t[torch.arange(len(tok), device=t.device), tok] += alpha
+    t[rows, tok] += alpha
+    if tau is not None:
+        cap = float(tau) - float(cap_margin)
+        other = torch.ones_like(t, dtype=torch.bool)
+        other[rows, tok] = False
+        excess = ((t - cap).clamp_min(0.0) * other).sum(-1, keepdim=True)
+        t = torch.where(other, t.clamp_max(cap), t) + excess / t.shape[-1]
     return t
 
 
@@ -167,9 +180,10 @@ class SiblingOPSDTrainer(BaseTrainer):
         self.state.update({"question_round": 0, **{k: 0 for k in COUNTERS}, "busy_seconds": 0.0})
         self.ledger_path = os.path.join(out_dir, f"question_attempts_rank{self.dist.rank}.jsonl")
         self.alpha = cfg.sibling_alpha()
+        self.tau = float(cfg.generation.commit_threshold)
         self.qpu = int(cfg.sibling.questions_per_update)
         if self.dist.rank == 0:
-            print(f"[sibling] tau={cfg.generation.commit_threshold} alpha={self.alpha:.3f} T={cfg.training.rollout_temperature} "
+            print(f"[sibling] tau={cfg.generation.commit_threshold} alpha={self.alpha:.3f} cap={self.tau - cfg.sibling.cap_margin:.3f} T={cfg.training.rollout_temperature} "
                   f"K={cfg.training.max_rollout_attempts} lora={gm.lora.describe()}")
 
     @property
@@ -226,7 +240,7 @@ class SiblingOPSDTrainer(BaseTrainer):
     def state_loss(self, roll: dict, step: dict, sup_idx: List[int]):
         x, spos, stok, log_q, p0_sup, anchor, p0_anchor = teacher_view(self.gm, roll, step, sup_idx,
                                                                        self.cfg.training.loo_batch_size)
-        t = mixed_target(log_q, stok, self.alpha)
+        t = mixed_target(log_q, stok, self.alpha, self.tau, self.cfg.sibling.cap_margin)
         logits = self.gm(x, mode="off").logits[0]  # Student: base + LoRA, siblings still MASK
         kl_t = kl_from_probs(t, logits[spos])
         loss = kl_t.mean()
@@ -246,6 +260,8 @@ class SiblingOPSDTrainer(BaseTrainer):
                      "q_c": sum(pst["q_c"]) / len(stok), "p0_c": sum(pst["p0_c"]) / len(stok),
                      "kl_q_p0": sum(pst["kl_q_p0"]) / len(stok),
                      "target_c": float(t[rows, stok].mean()),
+                     "cap_bound_frac": float((((1 - self.alpha) * log_q.exp()).scatter(1, stok[:, None], 0.0).max(-1).values
+                                              > tau - self.cfg.sibling.cap_margin).float().mean()),
                      "target_commit_frac": float((t[rows, stok] >= tau).float().mean()),
                      "student_p_c": float(ps[rows, stok].mean()),
                      "student_commit_frac": float((ps[rows, stok] >= tau).float().mean())}
@@ -439,7 +455,7 @@ def sibling_memprobe(gm, cfg, lengths=(1024, 2048, 2336), group: int = 8, loo_ba
                     t0 = time.perf_counter()
                     x, spos, stok, log_q, p0_sup, anchor, p0_anchor = teacher_view(gm, roll, step, sup, lb)
                     torch.cuda.synchronize(dev); t1 = time.perf_counter()
-                    t = mixed_target(log_q, stok, cfg.sibling_alpha())
+                    t = mixed_target(log_q, stok, cfg.sibling_alpha(), cfg.generation.commit_threshold, cfg.sibling.cap_margin)
                     logits = gm(x, mode="off").logits[0]
                     loss = kl_from_probs(t, logits[spos]).mean() + cfg.sibling.anchor_weight * forward_kl(
                         F.log_softmax(p0_anchor, -1), logits[anchor]).mean()
