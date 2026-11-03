@@ -12,9 +12,9 @@
 #   train  train-sibling: TRAIN_STEPS updates, QPU questions per GPU per update, checkpoint every SAVE_EVERY
 #   eval   dev_fast (first DEV_N) at tau 0.7: base and checkpoints EVAL_STEPS; pick by accuracy, then fewer steps,
 #          then earlier; FINAL_TEST=1: MATH-500 test, base vs selected, at tau 0.7 and 0.95, paired summary
-# Knobs: RUN, CONFIG, DIAG_N (64), DEV_N (128), TRAIN_STEPS (400), TPG (training processes per GPU, 2; >1 uses gloo),
+# Knobs: RUN, CONFIG, DIAG_N (64), DEV_N (128), TRAIN_STEPS (500), TPG (training processes per GPU, 2; >1 uses gloo),
 #        QPU (questions per process per update; 2 when NG*TPG < 3, else 1), SAVE_EVERY (50),
-#        EVAL_STEPS ("100 200 300 400"), FINAL_TEST (1), N_TEST (all 500), TESTS=1 (CPU tests first), DEV=1 (small
+#        EVAL_STEPS ("125 250 375 500"), FINAL_TEST (1), N_TEST (all 500), TESTS=1 (CPU tests first), DEV=1 (small
 #        sizes for the 2-hour dev queue), MOE_IMPL (override model.moe_impl), PPG (evaluation/diag processes per GPU, 1),
 #        LOO_BATCH (Teacher rows per forward, 4), DIAG_TAUS ("0.7 0.95"), DIAG_EVAL_TAUS ("0.95 0.7"), DIAG_K (8).
 # Monitoring: nvidia-smi samples (utilisation, memory, power) every 30 s -> $OUT/logs/gpu_monitor_<job>.csv;
@@ -53,12 +53,12 @@ CONFIG="${CONFIG:-configs/llada2_mini_sibling.json}"
 NG=$(nvidia-smi -L | wc -l)
 DIAG_N="${DIAG_N:-64}"
 DEV_N="${DEV_N:-128}"
-TRAIN_STEPS="${TRAIN_STEPS:-300}"
+TRAIN_STEPS="${TRAIN_STEPS:-500}"
 TPG="${TPG:-2}"                                                     # training processes per GPU (GH200 96 GB: 2 x ~42 GB)
 NTR=$((NG * TPG))
 QPU="${QPU:-$(( NTR >= 3 ? 1 : 2 ))}"                               # questions per process per update
 SAVE_EVERY="${SAVE_EVERY:-25}"
-EVAL_STEPS="${EVAL_STEPS:-75 150 225 300}"
+EVAL_STEPS="${EVAL_STEPS:-125 250 375 500}"
 FINAL_TEST="${FINAL_TEST:-1}"
 N_TEST="${N_TEST:-}"
 TESTS="${TESTS:-0}"
