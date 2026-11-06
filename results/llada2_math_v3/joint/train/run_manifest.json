@@ -1,0 +1,26 @@
+{
+ "command": "train-joint",
+ "readout_snapshot": "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/readout/train/checkpoint-step-150/snapshot@readout",
+ "n_examples": 6000,
+ "code_revision": "ea8496fbfaa2+dirty",
+ "argv": [
+  "/work/11277/yilunai0430/ls6/inf385t/dOPSD-sd/selective_draft/cli.py",
+  "train-joint",
+  "--config",
+  "configs/llada2_mini_math.json",
+  "--set",
+  "guidance.early_layer=17",
+  "--set",
+  "guidance.mode=\"group_soft\"",
+  "--set",
+  "data.split=\"train\"",
+  "--max-steps",
+  "200",
+  "--save-every",
+  "25",
+  "--output-dir",
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/joint/train",
+  "--readout-snapshot",
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/readout/train/checkpoint-step-150/snapshot"
+ ]
+}

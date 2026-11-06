@@ -1,0 +1,17 @@
+{
+ "n": 500,
+ "base_acc": 0.748,
+ "joint_acc": 0.762,
+ "fixed": 17,
+ "broken": 10,
+ "base_mean_steps": 389.968,
+ "joint_mean_steps": 371.034,
+ "base_mean_latency_s": 27.777223011605443,
+ "joint_mean_latency_s": 27.73075678404048,
+ "base_tpf_dinfer_mean": 2.8672252804839076,
+ "joint_tpf_dinfer_mean": 2.9477424681351825,
+ "base_mean_nfe_dinfer": 400.638,
+ "joint_mean_nfe_dinfer": 382.124,
+ "base_truncation": 0.258,
+ "joint_truncation": 0.246
+}

@@ -1,0 +1,14 @@
+  ok   test_argmax_mask_positions_are_excluded_and_a_stuck_block_falls_back
+  ok   test_block_end_stop_drop_eos_view_and_dinfer_nfe
+  ok   test_block_mask_hides_future_blocks_and_mixes_inside_a_block
+  ok   test_dinfer_commit_rule_ge_tie_tolerance_and_empty_rows
+  ok   test_dinfer_forward_accounting_hand_cases
+  ok   test_floor_length_policy_matches_the_eval_harness_bucketing
+  ok   test_greedy_ignores_rng_floored_length_and_absolute_grid
+  ok   test_group_never_includes_positions_outside_the_guidance_mask
+  ok   test_group_takes_every_position_at_or_above_tau_and_nothing_else
+  ok   test_moe_autograd_path_is_bit_identical_and_routes_input_gradients
+  ok   test_prefix_cache_reproduces_the_uncached_decoder_token_for_token
+  ok   test_prefix_forward_matches_the_same_prefix_inside_a_longer_window
+ALL PASSED (0 failures)
+[W1104 22:29:36.859641776 AllocatorConfig.cpp:28] Warning: PYTORCH_CUDA_ALLOC_CONF is deprecated, use PYTORCH_ALLOC_CONF instead (function operator())

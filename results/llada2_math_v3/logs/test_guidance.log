@@ -1,0 +1,9 @@
+  ok   test_boundary_is_the_early_layer_output
+  ok   test_forward_kl_properties
+  ok   test_gradient_paths
+  ok   test_hook_lifecycle_and_nesting
+  ok   test_parity_off_readout_zero_injector_scale0_and_closed_group
+  ok   test_soft_message_matches_enumeration_and_the_message_matters
+  ok   test_train_mode_keeps_base_eval_and_module_state_roundtrip
+ALL PASSED (0 failures)
+[W1104 22:29:59.687453828 AllocatorConfig.cpp:28] Warning: PYTORCH_CUDA_ALLOC_CONF is deprecated, use PYTORCH_ALLOC_CONF instead (function operator())

@@ -1,0 +1,166 @@
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading checkpoint shards:   0%|          | 0/7 [00:00<?, ?it/s]Loading checkpoint shards:  14%|█▍        | 1/7 [00:01<00:09,  1.57s/it]Loading checkpoint shards:  29%|██▊       | 2/7 [00:03<00:07,  1.52s/it]Loading checkpoint shards:  43%|████▎     | 3/7 [00:04<00:06,  1.52s/it]Loading checkpoint shards:  57%|█████▋    | 4/7 [00:06<00:04,  1.52s/it]Loading checkpoint shards:  71%|███████▏  | 5/7 [00:07<00:03,  1.53s/it]Loading checkpoint shards:  86%|████████▌ | 6/7 [00:09<00:01,  1.53s/it]Loading checkpoint shards: 100%|██████████| 7/7 [00:09<00:00,  1.26s/it]Loading checkpoint shards: 100%|██████████| 7/7 [00:09<00:00,  1.41s/it]
+checkpoint-step-100 {"n_states": 48, "tau": 0.8, "KL_all": 2.0347619705135003, "KL_all_se": 0.12496790494456031, "agreement_all": 0.4528014427050948, "KL_selected": 2.4193202907867404, "agreement_selected": 0.5944884915066802, "group_coverage": 0.8888888888888888, "group_coverage_denominator": 45, "selected_positions": 257, "fidelity_abs_mean": 0.4224171222183955, "fidelity_abs_p90": 0.9005273580551147, "fidelity_signed_mean": 0.4044291171814217, "special_pred": 0.0018939394503831863}
+checkpoint-step-125 {"n_states": 48, "tau": 0.8, "KL_all": 1.8542717808741145, "KL_all_se": 0.1125396360041771, "agreement_all": 0.4180100631589691, "KL_selected": 2.139805524734159, "agreement_selected": 0.6136396603451835, "group_coverage": 0.8666666666666667, "group_coverage_denominator": 45, "selected_positions": 229, "fidelity_abs_mean": 0.3879397463330015, "fidelity_abs_p90": 0.8829752802848816, "fidelity_signed_mean": 0.36154779037013324, "special_pred": 0.0037878789007663727}
+checkpoint-step-150 {"n_states": 48, "tau": 0.8, "KL_all": 1.7670514840477456, "KL_all_se": 0.10844424693727944, "agreement_all": 0.43143652255336445, "KL_selected": 2.1166048052356294, "agreement_selected": 0.6398864459732304, "group_coverage": 0.7777777777777778, "group_coverage_denominator": 45, "selected_positions": 221, "fidelity_abs_mean": 0.3653821442191957, "fidelity_abs_p90": 0.8697200417518616, "fidelity_signed_mean": 0.3360321461075571, "special_pred": 0.0037878789007663727}
+checkpoint-step-175 {"n_states": 48, "tau": 0.8, "KL_all": 1.7446321931590016, "KL_all_se": 0.10693596577454084, "agreement_all": 0.43339032695318264, "KL_selected": 2.139114615942041, "agreement_selected": 0.6278483291467031, "group_coverage": 0.8222222222222222, "group_coverage_denominator": 45, "selected_positions": 208, "fidelity_abs_mean": 0.3573743298363227, "fidelity_abs_p90": 0.8795120120048523, "fidelity_signed_mean": 0.32943818589242607, "special_pred": 0.0037878789007663727}
+checkpoint-step-200 {"n_states": 48, "tau": 0.8, "KL_all": 1.7398453642769407, "KL_all_se": 0.10711991281657407, "agreement_all": 0.43276059643055004, "KL_selected": 2.144526075976698, "agreement_selected": 0.6163733653400255, "group_coverage": 0.8666666666666667, "group_coverage_denominator": 45, "selected_positions": 213, "fidelity_abs_mean": 0.3629331946932654, "fidelity_abs_p90": 0.8723098039627075, "fidelity_signed_mean": 0.3348099894366914, "special_pred": 0.0037878789007663727}
+checkpoint-step-25 {"n_states": 48, "tau": 0.8, "KL_all": 3.021885085334361, "KL_all_se": 0.19702763358741804, "agreement_all": 0.4066400589266171, "KL_selected": 3.482316679883491, "agreement_selected": 0.5141158252954483, "group_coverage": 0.9555555555555556, "group_coverage_denominator": 45, "selected_positions": 371, "fidelity_abs_mean": 0.5186172408074382, "fidelity_abs_p90": 0.9305121302604675, "fidelity_signed_mean": 0.5094039497189123, "special_pred": 0.0}
+checkpoint-step-50 {"n_states": 48, "tau": 0.8, "KL_all": 2.5652991094296644, "KL_all_se": 0.16527733651970863, "agreement_all": 0.4043317314547797, "KL_selected": 2.9067477644906226, "agreement_selected": 0.5624748583262166, "group_coverage": 0.9111111111111111, "group_coverage_denominator": 45, "selected_positions": 320, "fidelity_abs_mean": 0.4634638306684792, "fidelity_abs_p90": 0.9189828634262085, "fidelity_signed_mean": 0.4518852879293263, "special_pred": 0.0018939394503831863}
+checkpoint-step-75 {"n_states": 48, "tau": 0.8, "KL_all": 2.212743920623325, "KL_all_se": 0.1334880056541219, "agreement_all": 0.413491186996301, "KL_selected": 2.769050354583432, "agreement_selected": 0.5966442492992982, "group_coverage": 0.8444444444444444, "group_coverage_denominator": 45, "selected_positions": 289, "fidelity_abs_mean": 0.4393312220548676, "fidelity_abs_p90": 0.9029836654663086, "fidelity_signed_mean": 0.426972314045091, "special_pred": 0.0018939394503831863}
+{
+ "reference_levels": {
+  "kl_improvement": 0.2,
+  "agreement_selected": 0.9,
+  "group_coverage": 0.5,
+  "selected_positions": 128,
+  "fidelity_abs_mean": 0.05
+ },
+ "gates": {
+  "kl_improvement": 0.2,
+  "agreement_selected": 0.9,
+  "group_coverage": 0.5,
+  "selected_positions": 128,
+  "fidelity_abs_mean": 0.05
+ },
+ "table": {
+  "step0": {
+   "step": 0,
+   "KL_all": 3.9631309277198548,
+   "KL_all_se": 0.2583365317938283,
+   "kl_gain_mean": 0.0,
+   "kl_gain_ci_low": 0.0,
+   "checks": {
+    "agreement_selected": false,
+    "group_coverage": true,
+    "fidelity": false
+   },
+   "passed": false,
+   "meets_reference_levels": false
+  },
+  "checkpoint-step-100": {
+   "step": 100,
+   "KL_all": 2.0347619705135003,
+   "KL_all_se": 0.12496790494456031,
+   "kl_gain_mean": 1.9283689572063547,
+   "kl_gain_ci_low": 1.5383253755566937,
+   "checks": {
+    "agreement_selected": false,
+    "group_coverage": true,
+    "fidelity": false,
+    "kl_improvement": true
+   },
+   "passed": false,
+   "meets_reference_levels": false
+  },
+  "checkpoint-step-125": {
+   "step": 125,
+   "KL_all": 1.8542717808741145,
+   "KL_all_se": 0.1125396360041771,
+   "kl_gain_mean": 2.1088591468457403,
+   "kl_gain_ci_low": 1.680672450590464,
+   "checks": {
+    "agreement_selected": false,
+    "group_coverage": true,
+    "fidelity": false,
+    "kl_improvement": true
+   },
+   "passed": false,
+   "meets_reference_levels": false
+  },
+  "checkpoint-step-150": {
+   "step": 150,
+   "KL_all": 1.7670514840477456,
+   "KL_all_se": 0.10844424693727944,
+   "kl_gain_mean": 2.1960794436721094,
+   "kl_gain_ci_low": 1.7642922795625662,
+   "checks": {
+    "agreement_selected": false,
+    "group_coverage": true,
+    "fidelity": false,
+    "kl_improvement": true
+   },
+   "passed": false,
+   "meets_reference_levels": false
+  },
+  "checkpoint-step-175": {
+   "step": 175,
+   "KL_all": 1.7446321931590016,
+   "KL_all_se": 0.10693596577454084,
+   "kl_gain_mean": 2.2184987345608533,
+   "kl_gain_ci_low": 1.7887504517987205,
+   "checks": {
+    "agreement_selected": false,
+    "group_coverage": true,
+    "fidelity": false,
+    "kl_improvement": true
+   },
+   "passed": false,
+   "meets_reference_levels": false
+  },
+  "checkpoint-step-200": {
+   "step": 200,
+   "KL_all": 1.7398453642769407,
+   "KL_all_se": 0.10711991281657407,
+   "kl_gain_mean": 2.2232855634429143,
+   "kl_gain_ci_low": 1.7944087028245121,
+   "checks": {
+    "agreement_selected": false,
+    "group_coverage": true,
+    "fidelity": false,
+    "kl_improvement": true
+   },
+   "passed": false,
+   "meets_reference_levels": false
+  },
+  "checkpoint-step-25": {
+   "step": 25,
+   "KL_all": 3.021885085334361,
+   "KL_all_se": 0.19702763358741804,
+   "kl_gain_mean": 0.9412458423854938,
+   "kl_gain_ci_low": 0.7350790409427039,
+   "checks": {
+    "agreement_selected": false,
+    "group_coverage": true,
+    "fidelity": false,
+    "kl_improvement": true
+   },
+   "passed": false,
+   "meets_reference_levels": false
+  },
+  "checkpoint-step-50": {
+   "step": 50,
+   "KL_all": 2.5652991094296644,
+   "KL_all_se": 0.16527733651970863,
+   "kl_gain_mean": 1.3978318182901905,
+   "kl_gain_ci_low": 1.122110585630071,
+   "checks": {
+    "agreement_selected": false,
+    "group_coverage": true,
+    "fidelity": false,
+    "kl_improvement": true
+   },
+   "passed": false,
+   "meets_reference_levels": false
+  },
+  "checkpoint-step-75": {
+   "step": 75,
+   "KL_all": 2.212743920623325,
+   "KL_all_se": 0.1334880056541219,
+   "kl_gain_mean": 1.7503870070965302,
+   "kl_gain_ci_low": 1.4107134739180767,
+   "checks": {
+    "agreement_selected": false,
+    "group_coverage": true,
+    "fidelity": false,
+    "kl_improvement": true
+   },
+   "passed": false,
+   "meets_reference_levels": false
+  }
+ },
+ "selected": "checkpoint-step-150",
+ "best_by_kl": "checkpoint-step-200",
+ "status": "selected_on_val_no_gate"
+}
+[W1104 23:06:20.577582517 AllocatorConfig.cpp:28] Warning: PYTORCH_CUDA_ALLOC_CONF is deprecated, use PYTORCH_ALLOC_CONF instead (function operator())

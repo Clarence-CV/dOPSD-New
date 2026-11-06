@@ -1,0 +1,40 @@
+{
+ "command": "readout-sweep",
+ "states": [
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/states/readout_val"
+ ],
+ "checkpoints": [
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/readout/train/checkpoint-step-100",
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/readout/train/checkpoint-step-125",
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/readout/train/checkpoint-step-150",
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/readout/train/checkpoint-step-175",
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/readout/train/checkpoint-step-200",
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/readout/train/checkpoint-step-25",
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/readout/train/checkpoint-step-50",
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/readout/train/checkpoint-step-75"
+ ],
+ "n_states": 48,
+ "code_revision": "ea8496fbfaa2+dirty",
+ "argv": [
+  "/work/11277/yilunai0430/ls6/inf385t/dOPSD-sd/selective_draft/cli.py",
+  "readout-sweep",
+  "--config",
+  "configs/llada2_mini_math.json",
+  "--set",
+  "guidance.early_layer=17",
+  "--states",
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/states/readout_val",
+  "--checkpoints",
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/readout/train/checkpoint-step-100",
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/readout/train/checkpoint-step-125",
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/readout/train/checkpoint-step-150",
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/readout/train/checkpoint-step-175",
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/readout/train/checkpoint-step-200",
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/readout/train/checkpoint-step-25",
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/readout/train/checkpoint-step-50",
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/readout/train/checkpoint-step-75",
+  "--select",
+  "--output-dir",
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/readout/val"
+ ]
+}

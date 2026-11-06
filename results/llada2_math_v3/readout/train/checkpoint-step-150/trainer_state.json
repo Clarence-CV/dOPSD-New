@@ -1,0 +1,9 @@
+{
+ "stage": "readout",
+ "optimizer_step": 150,
+ "rollout_round": 0,
+ "data_cursor": 150,
+ "states_seen": 150,
+ "skipped_updates": 0,
+ "consecutive_empty": 0
+}

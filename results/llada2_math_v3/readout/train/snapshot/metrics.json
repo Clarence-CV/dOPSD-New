@@ -1,0 +1,10 @@
+{
+ "grad_norm": 6.209892749786377,
+ "global_states": 3.0,
+ "learning_rate": 3.084187958485307e-08,
+ "local_loss_mean": 1.5216155052185059,
+ "loss": 1.5216155052185059,
+ "top1_agree": 0.5769230723381042,
+ "draft_above_tau": 0.03846153989434242,
+ "n_positions": 26.0
+}

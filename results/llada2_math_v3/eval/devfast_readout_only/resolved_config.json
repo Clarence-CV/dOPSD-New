@@ -1,0 +1,85 @@
+{
+  "data": {
+    "dataset_id": "ankner/math-500",
+    "dataset_revision": "412eb03a7193aed402c5e4009fc958c66e61b937",
+    "limit": null,
+    "manifest_sizes": {
+      "analysis": 500,
+      "dev": 500,
+      "train": 6000
+    },
+    "prompt_recipe": "dmax_boxed",
+    "seed": 42,
+    "split": "dev",
+    "split_manifest": "configs/math_split_manifest_v1.json",
+    "subsplit": "dev_fast",
+    "task": "math",
+    "test_dataset_id": "HuggingFaceH4/MATH-500",
+    "test_dataset_revision": "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be"
+  },
+  "evaluation": {
+    "commit_thresholds": [
+      0.95
+    ],
+    "limit": null,
+    "repeats": 1,
+    "warmup": 1
+  },
+  "generation": {
+    "block_length": 32,
+    "cache_mode": "none",
+    "commit_threshold": 0.95,
+    "dinfer_expected_tpf": 4,
+    "dinfer_unroll": 4,
+    "early_stop": true,
+    "max_new_tokens": 2048,
+    "temperature": 0.0
+  },
+  "guidance": {
+    "early_layer": 17,
+    "group_threshold": 0.8,
+    "injector_rank": 64,
+    "message_vocab_chunk": 16384,
+    "mode": "group_readout",
+    "readout_position_chunk": 8,
+    "readout_rank": 64,
+    "scale": 1.0
+  },
+  "model": {
+    "attn_implementation": "sdpa",
+    "backend": "llada2_mini",
+    "dtype": "bfloat16",
+    "eos_token_id": 156892,
+    "fake_kwargs": {},
+    "mask_token_id": 156895,
+    "moe_impl": "fused",
+    "path": "inclusionAI/LLaDA2.0-mini",
+    "revision": "dad945cac317da394b390f82c7b40691d8a881ed",
+    "trust_remote_code": true
+  },
+  "trace": {
+    "level": "none"
+  },
+  "training": {
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.99,
+    "filter_correct_only": false,
+    "grad_clip": 1.0,
+    "learning_rate_guidance": 0.0001,
+    "learning_rate_readout": 0.0005,
+    "log_every": 1,
+    "loo_batch_size": 1,
+    "max_consecutive_empty_updates": 200,
+    "max_positions_per_state": 32,
+    "max_rollout_attempts": 8,
+    "max_steps": 50,
+    "microbatch_states": 1,
+    "readout_lr_schedule": "cosine",
+    "readout_states_per_rollout": 4,
+    "rollout_temperature": 0.9,
+    "save_every": 25,
+    "seed": 42,
+    "warmup_updates": 5,
+    "weight_decay": 0.1
+  }
+}

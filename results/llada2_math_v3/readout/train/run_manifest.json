@@ -1,0 +1,28 @@
+{
+ "command": "train-readout",
+ "init_snapshot": "none",
+ "states": [
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/states/readout_train"
+ ],
+ "code_revision": "ea8496fbfaa2+dirty",
+ "argv": [
+  "/work/11277/yilunai0430/ls6/inf385t/dOPSD-sd/selective_draft/cli.py",
+  "train-readout",
+  "--config",
+  "configs/llada2_mini_math.json",
+  "--set",
+  "guidance.early_layer=17",
+  "--set",
+  "training.readout_states_per_rollout=4",
+  "--set",
+  "training.filter_correct_only=false",
+  "--states",
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/states/readout_train",
+  "--max-steps",
+  "200",
+  "--save-every",
+  "25",
+  "--output-dir",
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/readout/train"
+ ]
+}

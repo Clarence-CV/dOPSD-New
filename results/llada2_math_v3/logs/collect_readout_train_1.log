@@ -1,0 +1,57 @@
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading checkpoint shards:   0%|          | 0/7 [00:00<?, ?it/s]Loading checkpoint shards:  14%|█▍        | 1/7 [00:01<00:07,  1.29s/it]Loading checkpoint shards:  29%|██▊       | 2/7 [00:02<00:06,  1.27s/it]Loading checkpoint shards:  43%|████▎     | 3/7 [00:03<00:05,  1.27s/it]Loading checkpoint shards:  57%|█████▋    | 4/7 [00:05<00:03,  1.32s/it]Loading checkpoint shards:  71%|███████▏  | 5/7 [00:06<00:02,  1.33s/it]Loading checkpoint shards:  86%|████████▌ | 6/7 [00:07<00:01,  1.30s/it]Loading checkpoint shards: 100%|██████████| 7/7 [00:08<00:00,  1.08s/it]Loading checkpoint shards: 100%|██████████| 7/7 [00:08<00:00,  1.20s/it]
+Using the latest cached version of the dataset since ankner/math-500 couldn't be found on the Hugging Face Hub (offline mode is enabled).
+Found the latest cached dataset configuration 'default' at /work/11277/yilunai0430/ls6/inf385t/hf/datasets/ankner___math-500/default/0.0.0/412eb03a7193aed402c5e4009fc958c66e61b937 (last modified on Sun Sep 27 21:08:17 2026).
+Using the latest cached version of the dataset since HuggingFaceH4/MATH-500 couldn't be found on the Hugging Face Hub (offline mode is enabled).
+Found the latest cached dataset configuration 'default' at /work/11277/yilunai0430/ls6/inf385t/hf/datasets/HuggingFaceH4___math-500/default/0.0.0/6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be (last modified on Sun Sep 27 21:08:18 2026).
+[collect] 2/128 nfe=601 correct=True
+[collect] 5/128 nfe=834 correct=False
+[collect] 8/128 nfe=1164 correct=False
+[collect] 11/128 nfe=882 correct=False
+[collect] 14/128 nfe=240 correct=True
+[collect] 17/128 nfe=56 correct=True
+[collect] 20/128 nfe=229 correct=True
+[collect] 23/128 nfe=107 correct=True
+[collect] 26/128 nfe=362 correct=True
+[collect] 29/128 nfe=68 correct=True
+[collect] 32/128 nfe=77 correct=True
+[collect] 35/128 nfe=1108 correct=False
+[collect] 38/128 nfe=670 correct=False
+[collect] 41/128 nfe=1052 correct=False
+[collect] 44/128 nfe=102 correct=True
+[collect] 47/128 nfe=400 correct=True
+[collect] 50/128 nfe=1201 correct=False
+[collect] 53/128 nfe=301 correct=True
+[collect] 56/128 nfe=547 correct=True
+[collect] 59/128 nfe=115 correct=True
+[collect] 62/128 nfe=578 correct=True
+[collect] 65/128 nfe=856 correct=False
+[collect] 68/128 nfe=98 correct=True
+[collect] 71/128 nfe=111 correct=True
+[collect] 74/128 nfe=59 correct=True
+[collect] 77/128 nfe=179 correct=True
+[collect] 80/128 nfe=101 correct=True
+[collect] 83/128 nfe=264 correct=True
+[collect] 86/128 nfe=107 correct=True
+[collect] 89/128 nfe=825 correct=True
+[collect] 92/128 nfe=383 correct=True
+[collect] 95/128 nfe=105 correct=True
+[collect] 98/128 nfe=235 correct=True
+[collect] 101/128 nfe=164 correct=True
+[collect] 104/128 nfe=794 correct=True
+[collect] 107/128 nfe=392 correct=True
+[collect] 110/128 nfe=1235 correct=False
+[collect] 113/128 nfe=154 correct=True
+[collect] 116/128 nfe=1101 correct=True
+[collect] 119/128 nfe=65 correct=True
+[collect] 122/128 nfe=91 correct=True
+[collect] 125/128 nfe=469 correct=False
+[collect] 128/128 nfe=158 correct=True
+{
+ "rollouts": 43,
+ "steps": 18640,
+ "mean_steps": 433.48837209302326,
+ "accuracy": 0.7674418604651163,
+ "mean_commit": 2.4207081545064377
+}
+[W1104 23:03:51.434526855 AllocatorConfig.cpp:28] Warning: PYTORCH_CUDA_ALLOC_CONF is deprecated, use PYTORCH_ALLOC_CONF instead (function operator())

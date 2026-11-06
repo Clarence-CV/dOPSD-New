@@ -1,0 +1,20 @@
+{
+ "selected": "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/readout/train/checkpoint-step-150",
+ "confirm_passed": false,
+ "manual_override": false,
+ "confirm": {
+  "step": 150,
+  "KL_all": 1.4532216206094593,
+  "KL_all_se": 0.10508359467787279,
+  "kl_gain_mean": 1.7165272056227348,
+  "kl_gain_ci_low": 1.423235009688263,
+  "checks": {
+   "agreement_selected": false,
+   "group_coverage": true,
+   "fidelity": false,
+   "kl_improvement": true
+  },
+  "passed": false,
+  "meets_reference_levels": false
+ }
+}

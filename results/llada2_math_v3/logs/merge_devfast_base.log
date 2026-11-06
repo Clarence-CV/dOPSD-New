@@ -1,0 +1,29 @@
+{
+ "thr0.95": {
+  "n": 128,
+  "accuracy": 0.7890625,
+  "accuracy_se": 0.03606015710475929,
+  "unparsed": 0,
+  "truncation_rate": 0.21875,
+  "mean_row_steps": 376.96875,
+  "median_row_steps": 208.0,
+  "p90_row_steps": 978,
+  "mean_output_tokens": 958.6171875,
+  "p90_output_tokens": 2035,
+  "max_output_tokens": 2048,
+  "tokens_per_step": 2.5429619497637406,
+  "tpf_dinfer_mean": 2.924868722790973,
+  "tpf_dinfer_pooled": 2.471857373086221,
+  "mean_nfe_dinfer": 387.8125,
+  "latency_total_s": 3410.0816733976826,
+  "latency_median_s": 11.172979446593672,
+  "latency_p90_s": 78.55863972753286,
+  "group_steps_per_row": 0.0,
+  "group_coverage_receiver_steps": 0.0,
+  "group_committed_frac": 0.0,
+  "group_identity_changed_frac": 0.0,
+  "fallback_per_row": 197.15625,
+  "mask_argmax_fallbacks": 0,
+  "cache_used_frac": 0.0
+ }
+}

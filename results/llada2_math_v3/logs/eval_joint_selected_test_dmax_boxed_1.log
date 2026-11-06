@@ -1,0 +1,36 @@
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading checkpoint shards:   0%|          | 0/7 [00:00<?, ?it/s]Loading checkpoint shards:  14%|█▍        | 1/7 [00:01<00:10,  1.78s/it]Loading checkpoint shards:  29%|██▊       | 2/7 [00:03<00:07,  1.50s/it]Loading checkpoint shards:  43%|████▎     | 3/7 [00:04<00:05,  1.39s/it]Loading checkpoint shards:  57%|█████▋    | 4/7 [00:05<00:04,  1.38s/it]Loading checkpoint shards:  71%|███████▏  | 5/7 [00:06<00:02,  1.33s/it]Loading checkpoint shards:  86%|████████▌ | 6/7 [00:08<00:01,  1.31s/it]Loading checkpoint shards: 100%|██████████| 7/7 [00:08<00:00,  1.07s/it]Loading checkpoint shards: 100%|██████████| 7/7 [00:08<00:00,  1.26s/it]
+Using the latest cached version of the dataset since ankner/math-500 couldn't be found on the Hugging Face Hub (offline mode is enabled).
+Found the latest cached dataset configuration 'default' at /work/11277/yilunai0430/ls6/inf385t/hf/datasets/ankner___math-500/default/0.0.0/412eb03a7193aed402c5e4009fc958c66e61b937 (last modified on Sun Sep 27 21:08:17 2026).
+Using the latest cached version of the dataset since HuggingFaceH4/MATH-500 couldn't be found on the Hugging Face Hub (offline mode is enabled).
+Found the latest cached dataset configuration 'default' at /work/11277/yilunai0430/ls6/inf385t/hf/datasets/HuggingFaceH4___math-500/default/0.0.0/6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be (last modified on Sun Sep 27 21:08:18 2026).
+{
+ "thr0.95": {
+  "n": 167,
+  "accuracy": 0.7604790419161677,
+  "accuracy_se": 0.03302608919021766,
+  "unparsed": 0,
+  "truncation_rate": 0.24550898203592814,
+  "mean_row_steps": 369.4071856287425,
+  "median_row_steps": 208,
+  "p90_row_steps": 935,
+  "mean_output_tokens": 959.1017964071856,
+  "p90_output_tokens": 2035,
+  "max_output_tokens": 2047,
+  "tokens_per_step": 2.596326854808643,
+  "tpf_dinfer_mean": 2.998287513915023,
+  "tpf_dinfer_pooled": 2.520456977402908,
+  "mean_nfe_dinfer": 380.52694610778445,
+  "latency_total_s": 4594.155354237184,
+  "latency_median_s": 11.829408251680434,
+  "latency_p90_s": 78.54137707687914,
+  "group_steps_per_row": 287.92215568862275,
+  "group_coverage_receiver_steps": 0.8167935041108921,
+  "group_committed_frac": 0.41139533265382144,
+  "group_identity_changed_frac": 0.3102708632666511,
+  "fallback_per_row": 194.23353293413174,
+  "mask_argmax_fallbacks": 0,
+  "cache_used_frac": 0.0
+ }
+}
+[W1105 20:53:47.993960567 AllocatorConfig.cpp:28] Warning: PYTORCH_CUDA_ALLOC_CONF is deprecated, use PYTORCH_ALLOC_CONF instead (function operator())

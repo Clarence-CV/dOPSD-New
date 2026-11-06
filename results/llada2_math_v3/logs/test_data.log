@@ -1,0 +1,7 @@
+  ok   test_dmax_math_scorer_when_its_dependencies_are_installed
+  ok   test_dmax_prompt_is_one_user_turn_with_the_eval_harness_wording
+  ok   test_last_boxed_handles_nesting_and_spaced_form
+  ok   test_subsplits_follow_the_documented_slices_and_are_disjoint
+  ok   test_toy_scorer_compares_the_last_number
+ALL PASSED (0 failures)
+[W1104 22:30:34.468496256 AllocatorConfig.cpp:28] Warning: PYTORCH_CUDA_ALLOC_CONF is deprecated, use PYTORCH_ALLOC_CONF instead (function operator())

@@ -1,0 +1,13 @@
+{
+ "question_round": 204,
+ "outcome": "loo_rejected",
+ "local_states": 0,
+ "round_seconds": 5.6036584582179785,
+ "global_question_visits": 615.0,
+ "global_accepted_states": 420.0,
+ "grad_norm": 2.7591476440429688,
+ "global_states": 2.0,
+ "learning_rate": 0.0001,
+ "local_loss_mean": 0.0,
+ "loss": null
+}

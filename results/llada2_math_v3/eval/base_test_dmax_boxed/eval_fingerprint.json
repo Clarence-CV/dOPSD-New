@@ -1,0 +1,44 @@
+{
+ "model": {
+  "path": "inclusionAI/LLaDA2.0-mini",
+  "revision": "dad945cac317da394b390f82c7b40691d8a881ed",
+  "backend": "llada2_mini",
+  "dtype": "bfloat16",
+  "attn_implementation": "sdpa",
+  "fake_kwargs": {},
+  "moe_impl": "fused"
+ },
+ "generation": {
+  "commit_threshold": 0.95,
+  "max_new_tokens": 2048,
+  "block_length": 32,
+  "temperature": 0.0,
+  "early_stop": true,
+  "cache_mode": "none",
+  "dinfer_expected_tpf": 4,
+  "dinfer_unroll": 4
+ },
+ "data": {
+  "task": "math",
+  "dataset_id": "ankner/math-500",
+  "dataset_revision": "412eb03a7193aed402c5e4009fc958c66e61b937",
+  "test_dataset_id": "HuggingFaceH4/MATH-500",
+  "test_dataset_revision": "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be",
+  "split": "test",
+  "subsplit": null,
+  "split_manifest": "configs/math_split_manifest_v1.json",
+  "prompt_recipe": "dmax_boxed"
+ },
+ "guidance": {
+  "mode": "off",
+  "early_layer": 17,
+  "scale": 1.0,
+  "group_threshold": 0.8
+ },
+ "snapshot_id": "none",
+ "thresholds": [
+  0.95
+ ],
+ "seed": 42,
+ "hash": "018a8a7b7ac581c8"
+}

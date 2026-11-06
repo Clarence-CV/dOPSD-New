@@ -1,0 +1,54 @@
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading checkpoint shards:   0%|          | 0/7 [00:00<?, ?it/s]Loading checkpoint shards:  14%|█▍        | 1/7 [00:01<00:09,  1.52s/it]Loading checkpoint shards:  29%|██▊       | 2/7 [00:03<00:07,  1.57s/it]Loading checkpoint shards:  43%|████▎     | 3/7 [00:04<00:06,  1.57s/it]Loading checkpoint shards:  57%|█████▋    | 4/7 [00:06<00:04,  1.53s/it]Loading checkpoint shards:  71%|███████▏  | 5/7 [00:07<00:03,  1.54s/it]Loading checkpoint shards:  86%|████████▌ | 6/7 [00:09<00:01,  1.49s/it]Loading checkpoint shards: 100%|██████████| 7/7 [00:09<00:00,  1.22s/it]Loading checkpoint shards: 100%|██████████| 7/7 [00:09<00:00,  1.39s/it]
+checkpoint-step-150 {"n_states": 48, "tau": 0.8, "KL_all": 1.4532216206094593, "KL_all_se": 0.10508359467787279, "agreement_all": 0.497284569311887, "KL_selected": 1.6843299402191607, "agreement_selected": 0.7068346265289519, "group_coverage": 0.8409090909090909, "group_coverage_denominator": 44, "selected_positions": 210, "fidelity_abs_mean": 0.3750869509719667, "fidelity_abs_p90": 0.8932623863220215, "fidelity_signed_mean": 0.34126153417995997, "special_pred": 0.006340580061078072}
+{
+ "reference_levels": {
+  "kl_improvement": 0.2,
+  "agreement_selected": 0.9,
+  "group_coverage": 0.5,
+  "selected_positions": 128,
+  "fidelity_abs_mean": 0.05
+ },
+ "gates": {
+  "kl_improvement": 0.2,
+  "agreement_selected": 0.9,
+  "group_coverage": 0.5,
+  "selected_positions": 128,
+  "fidelity_abs_mean": 0.05
+ },
+ "table": {
+  "step0": {
+   "step": 0,
+   "KL_all": 3.169748826232194,
+   "KL_all_se": 0.23208665047104995,
+   "kl_gain_mean": 0.0,
+   "kl_gain_ci_low": 0.0,
+   "checks": {
+    "agreement_selected": false,
+    "group_coverage": true,
+    "fidelity": false
+   },
+   "passed": false,
+   "meets_reference_levels": false
+  },
+  "checkpoint-step-150": {
+   "step": 150,
+   "KL_all": 1.4532216206094593,
+   "KL_all_se": 0.10508359467787279,
+   "kl_gain_mean": 1.7165272056227348,
+   "kl_gain_ci_low": 1.423235009688263,
+   "checks": {
+    "agreement_selected": false,
+    "group_coverage": true,
+    "fidelity": false,
+    "kl_improvement": true
+   },
+   "passed": false,
+   "meets_reference_levels": false
+  }
+ },
+ "selected": "checkpoint-step-150",
+ "best_by_kl": "checkpoint-step-150",
+ "status": "selected_on_val_no_gate"
+}
+[W1104 23:06:57.670967187 AllocatorConfig.cpp:28] Warning: PYTORCH_CUDA_ALLOC_CONF is deprecated, use PYTORCH_ALLOC_CONF instead (function operator())

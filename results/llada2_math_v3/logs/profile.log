@@ -1,0 +1,19 @@
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading checkpoint shards:   0%|          | 0/7 [00:00<?, ?it/s]Loading checkpoint shards:  14%|█▍        | 1/7 [00:01<00:11,  1.88s/it]Loading checkpoint shards:  29%|██▊       | 2/7 [00:03<00:10,  2.01s/it]Loading checkpoint shards:  43%|████▎     | 3/7 [00:06<00:08,  2.13s/it]Loading checkpoint shards:  57%|█████▋    | 4/7 [00:08<00:05,  1.99s/it]Loading checkpoint shards:  71%|███████▏  | 5/7 [00:10<00:04,  2.07s/it]Loading checkpoint shards:  86%|████████▌ | 6/7 [00:12<00:02,  2.05s/it]Loading checkpoint shards: 100%|██████████| 7/7 [00:13<00:00,  1.66s/it]Loading checkpoint shards: 100%|██████████| 7/7 [00:13<00:00,  1.87s/it]
+{
+ "rule": "l_star = earliest l < L with C_l >= max_{l<L} C_l - SE_boot(C_best); SE over questions",
+ "tau": 0.8,
+ "n_states": 48,
+ "n_with_final_confident": 37,
+ "n_layers": 20,
+ "early_layer": 19,
+ "status": "selected_on_val",
+ "l_best": 19,
+ "C_best": 0.8271599484456552,
+ "C_best_se": 0.03952299957442242,
+ "l_star": 19,
+ "C_star": 0.8271599484456552,
+ "group2_coverage_at_l_star": 0.8541666666666666,
+ "tail_layers": 1
+}
+[W1031 06:52:04.063077259 AllocatorConfig.cpp:28] Warning: PYTORCH_CUDA_ALLOC_CONF is deprecated, use PYTORCH_ALLOC_CONF instead (function operator())

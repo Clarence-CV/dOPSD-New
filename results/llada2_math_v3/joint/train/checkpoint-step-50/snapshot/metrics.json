@@ -1,0 +1,22 @@
+{
+ "question_round": 49,
+ "outcome": "accepted",
+ "local_states": 1,
+ "round_seconds": 43.05363274924457,
+ "group_size": 7.0,
+ "kl_sum": 2.512951612472534,
+ "reference_agreement": 0.8571429252624512,
+ "draft_reference_agreement": 0.7142857313156128,
+ "high_conf_wrong": 0.0,
+ "delta_norm": 11.634511947631836,
+ "teacher_forwards": 7.0,
+ "outside_kl": 0.003963228780776262,
+ "outside_commit_flips": 0.0,
+ "global_question_visits": 150.0,
+ "global_accepted_states": 101.0,
+ "grad_norm": 0.4470663368701935,
+ "global_states": 3.0,
+ "learning_rate": 0.0001,
+ "local_loss_mean": 0.3589931130409241,
+ "loss": 0.3589931130409241
+}

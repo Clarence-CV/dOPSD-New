@@ -1,0 +1,22 @@
+{
+ "rule": "l_star = earliest l < L with C_l >= max_{l<L} C_l - SE_boot(C_best); SE over questions",
+ "tau": 0.8,
+ "n_states": 48,
+ "n_with_final_confident": 37,
+ "n_layers": 20,
+ "early_layer": 17,
+ "status": "manual_override_by_user",
+ "l_best": 19,
+ "C_best": 0.8271599484456552,
+ "C_best_se": 0.03952299957442242,
+ "l_star": 19,
+ "C_star": 0.8271599484456552,
+ "group2_coverage_at_l_star": 0.8541666666666666,
+ "tail_layers": 3,
+ "states": [
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/states/readout_val"
+ ],
+ "code_revision": "6c050880fc1b+dirty",
+ "auto_selected_layer": 19,
+ "override_note": "user chose L17 on 2026-10-31 to look at the phenomenon; the raw-lens rule picked 19 (1 tail layer)"
+}

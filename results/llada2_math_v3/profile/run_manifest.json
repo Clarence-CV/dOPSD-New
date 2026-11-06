@@ -1,0 +1,18 @@
+{
+ "command": "layer-profile",
+ "states": [
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/states/readout_val"
+ ],
+ "n_states": 48,
+ "code_revision": "6c050880fc1b+dirty",
+ "argv": [
+  "/work/11277/yilunai0430/ls6/inf385t/dOPSD-sd/selective_draft/cli.py",
+  "layer-profile",
+  "--config",
+  "configs/llada2_mini_math.json",
+  "--states",
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/states/readout_val",
+  "--output-dir",
+  "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/profile"
+ ]
+}

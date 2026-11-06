@@ -1,0 +1,43 @@
+{
+ "rule": "max dev_fast accuracy, then min mean_row_steps, then earliest step",
+ "selected_step": 50,
+ "checkpoint": "/scratch/11277/yilunai0430/dopsd/llada2/llada2_math_v3/joint/train/checkpoint-step-50",
+ "candidates": [
+  {
+   "step": 25,
+   "accuracy": 0.7890625,
+   "mean_row_steps": 391.546875,
+   "latency_median_s": 12.14029932860285
+  },
+  {
+   "step": 50,
+   "accuracy": 0.7890625,
+   "mean_row_steps": 370.6484375,
+   "latency_median_s": 11.314565447159111
+  },
+  {
+   "step": 100,
+   "accuracy": 0.78125,
+   "mean_row_steps": 366.890625,
+   "latency_median_s": 11.064584949053824
+  },
+  {
+   "step": 150,
+   "accuracy": 0.75,
+   "mean_row_steps": 347.703125,
+   "latency_median_s": 11.202310875058174
+  },
+  {
+   "step": 200,
+   "accuracy": 0.765625,
+   "mean_row_steps": 345.7734375,
+   "latency_median_s": 9.800276088993996
+  }
+ ],
+ "fallback": null,
+ "base": {
+  "accuracy": 0.7890625,
+  "mean_row_steps": 376.96875,
+  "latency_median_s": 11.172979446593672
+ }
+}
