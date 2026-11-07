@@ -7,11 +7,16 @@
 #   main run:   TACC_HOST=vista SCRIPT=tacc/sibling_pipeline.slurm RUN=sib_v1 SBATCH_ARGS="-p gh -t 40:00:00" ...
 # Stages (STAGES, in this order):
 #   memprobe  peak memory / time of one training state at N = 1024/2048/2336 (synthetic), Teacher batch 4 and 8
+#   maskprobe sibling-maskprobe on MP_N (40) train questions: base p(MASK) at masked positions; then for each lr in MP_LRS
+#             ("2e-5 1e-4") MP_STEPS (30) updates of MP_BATCH (8) states (half with a defer row) on the mask_sink target,
+#             tracking p(MASK) on defer / commit / anchor rows on train and held-out states
 #   diag   Phase 0 on dev:dev_fast (first DIAG_N): base greedy accuracy at tau 0.95 and 0.7; sibling-diag rollouts
 #          (T=0.9, up to 8 attempts) at tau 0.7 and 0.95 with frozen-base leave-one-out statistics
 #   train  train-sibling: TRAIN_STEPS updates, QPU questions per GPU per update, checkpoint every SAVE_EVERY
 #   eval   dev_fast (first DEV_N) at tau 0.7: base and checkpoints EVAL_STEPS; pick by accuracy, then fewer steps,
 #          then earlier; FINAL_TEST=1: MATH-500 test, base vs selected, at tau 0.7 and 0.95, paired summary
+#   sweep  needs eval/selection.json: MATH-500 test, base and selected checkpoint at every tau in SWEEP_TAUS
+#          ("0.9 0.8 0.7"); writes eval/sweep.json with all test_{base,sel}_t* summaries (accuracy-TPF curves)
 # Knobs: RUN, CONFIG, DIAG_N (64), DEV_N (128), TRAIN_STEPS (500), TPG (training processes per GPU, 2; >1 uses gloo),
 #        QPU (questions per process per update; 2 when NG*TPG < 3, else 1), SAVE_EVERY (50),
 #        EVAL_STEPS ("125 250 375 500"), FINAL_TEST (1), N_TEST (all 500), TESTS=1 (CPU tests first), DEV=1 (small
@@ -75,7 +80,7 @@ S=(--config "$CONFIG" --set "training.loo_batch_size=$LOO_BATCH")
 [[ -n "${MOE_IMPL:-}" ]] && S+=(--set "model.moe_impl=\"$MOE_IMPL\"")
 BASE=(--set sibling.lora_rank=0)                                    # frozen base, no adapters
 T95=(--set generation.commit_threshold=0.95)
-mkdir -p "$OUT"/{meta,eval,diag,train,logs,memprobe}
+mkdir -p "$OUT"/{meta,eval,diag,train,logs,memprobe,maskprobe}
 nvidia-smi --query-gpu=timestamp,index,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw \
     --format=csv -l 30 > "$OUT/logs/gpu_monitor_${SLURM_JOB_ID:-local}.csv" 2>/dev/null &
 MONITOR_PID=$!
@@ -137,6 +142,16 @@ if has memprobe; then
         "${S[@]}" --output-dir "$OUT/memprobe" > "$OUT/logs/memprobe.log" 2>&1 \
         || { echo "memprobe failed (continuing); see $OUT/logs/memprobe.log"; tail -30 "$OUT/logs/memprobe.log"; }
     stamp "memprobe: $(grep '^{' "$OUT/logs/memprobe.log" | tr '\n' ' ' | head -c 1500)"
+fi
+
+# ---- MASK-sink probe: can LoRA learn t(MASK) on defer rows, and does MASK leak elsewhere? ---------------------------
+if has maskprobe; then
+    MP="$OUT/maskprobe"
+    [[ -f "$MP/maskprobe.json" ]] || CUDA_VISIBLE_DEVICES=0 python -m selective_draft.cli sibling-maskprobe "${S[@]}" \
+        --set 'data.split="train"' --set 'sibling.target="mask_sink"' --limit "${MP_N:-40}" \
+        --lrs ${MP_LRS:-2e-5 1e-4} --steps "${MP_STEPS:-30}" --batch "${MP_BATCH:-8}" --output-dir "$MP" \
+        > "$OUT/logs/maskprobe.log" 2>&1 || { echo "maskprobe failed; see $OUT/logs/maskprobe.log"; tail -30 "$OUT/logs/maskprobe.log"; exit 1; }
+    stamp "maskprobe: $(tail -1 "$OUT/logs/maskprobe.log" | head -c 3000)"
 fi
 
 # ---- Phase 0: diagnostics on the frozen base --------------------------------------------------------------------
@@ -221,6 +236,32 @@ json.dump(res, open(f"{ev}/paired_test.json", "w"), indent=1)
 print("paired", json.dumps(res))
 PY
     fi
+fi
+
+# ---- threshold sweep: accuracy-TPF curves of base vs the selected checkpoint ------------------------------------------
+if has sweep; then
+    SELCK=$(python -c "import json;print(json.load(open('$OUT/eval/selection.json'))['checkpoint'] or '')")
+    [[ -n "$SELCK" ]] || { echo "sweep: no selected checkpoint in $OUT/eval/selection.json"; exit 1; }
+    T=(--set 'data.split="test"'); [[ -n "$N_TEST" ]] && T+=(--limit "$N_TEST")
+    for tau in ${SWEEP_TAUS:-0.9 0.8 0.7}; do
+        TS=(--set "generation.commit_threshold=$tau")
+        par_eval "test_base_t${tau#0.}" "${T[@]}" "${BASE[@]}" "${TS[@]}"
+        par_eval "test_sel_t${tau#0.}" "${T[@]}" "${TS[@]}" --snapshot "$SELCK/snapshot"
+    done
+    python - "$OUT/eval" <<'PY'
+import glob, json, os, sys
+ev = sys.argv[1]; res = []
+for p in sorted(glob.glob(f"{ev}/test_*_t*/summary.json")):
+    name = os.path.basename(os.path.dirname(p)); _, model, tag = name.split("_")
+    for k, v in json.load(open(p))["summaries"].items():
+        res.append({"model": model, "tau": float(k[3:]), "n": v["n"], "accuracy": v["accuracy"],
+                    "accuracy_se": v["accuracy_se"], "tpf": v["tpf_dinfer_mean"], "steps": v["mean_row_steps"],
+                    "truncation": v["truncation_rate"], "tokens": v["mean_output_tokens"],
+                    "latency_median_s": v["latency_median_s"]})
+res.sort(key=lambda r: (r["model"], -r["tau"]))
+json.dump(res, open(f"{ev}/sweep.json", "w"), indent=1)
+for r in res: print("sweep", r["model"], r["tau"], round(r["accuracy"], 3), round(r["tpf"], 2), round(r["truncation"], 3))
+PY
 fi
 
 BACKUP="$WORK/inf385t/results/sibling/$RUN"

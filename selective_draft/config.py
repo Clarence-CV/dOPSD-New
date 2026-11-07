@@ -100,6 +100,7 @@ class SiblingConfig:
     learning_rate: float = 2e-5
     alpha_mix: Optional[float] = None  # weight of onehot(c) in the target; None = 2*tau - 1 (parallel commit => fixed point)
     cap_margin: float = 0.01  # tokens other than c are capped at tau - cap_margin in the target (binds for tau <= 2/3)
+    target: str = "capped_uniform"  # capped_uniform | mask_sink | copy (see sibling_opsd.mixed_target)
     anchor_weight: float = 0.1  # KL(p0 || p) on the block's other MASK positions
     states_per_rollout: int = 8  # parallel-commit states drawn from the successful rollout
     max_positions_per_state: int = 4  # supervised co-committed positions per state (all siblings stay revealed)
@@ -244,6 +245,7 @@ class Config:
             raise ValueError("sibling.cap_margin must be in (0, 0.5)")
         if sb.anchor_weight < 0:
             raise ValueError("sibling.anchor_weight must be >= 0")
+        _choice("sibling.target", sb.target, {"capped_uniform", "mask_sink", "copy"})
         return self
 
     def sibling_alpha(self) -> float:

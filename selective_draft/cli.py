@@ -1,7 +1,7 @@
 """python -m selective_draft.cli <command> --config CONFIG [--set section.field=value ...]
 
 commands: prepare-data | inspect | collect | layer-profile | train-readout | readout-sweep | train-joint | evaluate |
-          merge-eval | memprobe | moe-check | train-sibling | sibling-diag
+          merge-eval | memprobe | moe-check | train-sibling | sibling-diag | sibling-maskprobe
 Real-model commands run on a TACC compute node; the fake backend runs everything on CPU."""
 
 from __future__ import annotations
@@ -277,6 +277,22 @@ def cmd_sibling_memprobe(args):
                   f, indent=1)
 
 
+def cmd_sibling_maskprobe(args):
+    from .sibling_opsd import sibling_maskprobe
+    cfg = _cfg(args)
+    if cfg.sibling.lora_rank < 1:
+        raise SystemExit("sibling-maskprobe requires sibling.lora_rank >= 1")
+    gm, tok, _ = _build(cfg, args)
+    examples = load_split(cfg, tok)
+    if args.limit:
+        examples = examples[: args.limit]
+    _dump_resolved(cfg, args.output_dir, {"command": "sibling-maskprobe", "n_examples": len(examples),
+                                        "lrs": args.lrs, "steps": args.steps, "batch": args.batch})
+    res = sibling_maskprobe(gm, tok, examples, cfg, args.output_dir, args.lrs, args.steps, args.batch, args.eval_every)
+    print(json.dumps({"base": res["base"], "final": [{"lr": r["lr"], **r["history"][-1]} for r in res["runs"]]},
+                     default=float))
+
+
 def cmd_memprobe(args):
     """Peak GPU memory of one Joint training step at the given sequence lengths (synthetic state)."""
     from .memprobe import probe
@@ -399,6 +415,11 @@ def main(argv=None):
     _common(p); p.add_argument("--lengths", type=int, nargs="+", default=[1024, 2048, 2336])
     p.add_argument("--group", type=int, default=8); p.add_argument("--loo-batches", type=int, nargs="+", default=[4, 8])
     p.set_defaults(fn=cmd_sibling_memprobe)
+
+    p = sub.add_parser("sibling-maskprobe", help="can LoRA learn the mask_sink target, and does MASK leak elsewhere")
+    _common(p); p.add_argument("--limit", type=int); p.add_argument("--lrs", type=float, nargs="+", default=[2e-5, 1e-4])
+    p.add_argument("--steps", type=int, default=30); p.add_argument("--batch", type=int, default=8)
+    p.add_argument("--eval-every", type=int, default=5); p.set_defaults(fn=cmd_sibling_maskprobe)
 
     p = sub.add_parser("memprobe", help="peak GPU memory of one Joint training step at worst-case lengths")
     _common(p); p.add_argument("--snapshot"); p.add_argument("--group", type=int, default=32)

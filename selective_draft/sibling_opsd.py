@@ -105,13 +105,42 @@ def loo_teacher(gm, x: torch.Tensor, cpos: torch.Tensor, ctok: torch.Tensor, sup
 
 
 def mixed_target(log_q: torch.Tensor, tok: torch.Tensor, alpha: float, tau: Optional[float] = None,
-                 cap_margin: float = 0.01) -> torch.Tensor:
-    """t = alpha*onehot(c) + (1-alpha)*q, then (tau given) every token other than c is capped at tau - cap_margin and the
-    removed mass is spread uniformly over the whole vocabulary: the Teacher can lower c (defer) but never nominate a
-    replacement above the threshold."""
+                 cap_margin: float = 0.01, mode: str = "capped_uniform", p_student: Optional[torch.Tensor] = None,
+                 mask_id: Optional[int] = None) -> torch.Tensor:
+    """Target t over the vocabulary for supervised positions with trajectory tokens `tok` (= c).
+
+    capped_uniform: t = alpha*onehot(c) + (1-alpha)*q, then (tau given) every token other than c is capped at
+        tau - cap_margin and the removed mass is spread uniformly over the whole vocabulary.
+    mask_sink (needs tau, p_student = the Student's own detached probabilities on the same rows, mask_id):
+        t(c) = alpha + (1-alpha) q(c), exactly as above, so t(c) >= tau <=> q(c) >= 1/2 (LOO fixed point).
+        Commit rows (t(c) >= tau): t(v) = min((1-alpha) q(v), tau - cap_margin) for real tokens v != c.
+        Defer rows (t(c) < tau): t(v) = min((1-alpha) q(v), p_student(v), tau - cap_margin): no real token gains
+            probability over what the Student already gave it (the Teacher can veto c but never nominate a replacement).
+        t(MASK) = everything left (>= (1-alpha) q(MASK)): the decoder never commits a position whose argmax is MASK,
+            so the freed mass means "keep this position masked for now"; no real token absorbs it.
+    copy: t = onehot(c) (alpha = 1; the SwiftDLM-style hard target on newly committed tokens, a control)."""
     rows = torch.arange(len(tok), device=log_q.device)
+    if mode == "copy":
+        t = torch.zeros_like(log_q)
+        t[rows, tok] = 1.0
+        return t
     t = (1.0 - alpha) * log_q.exp()
     t[rows, tok] += alpha
+    if mode == "mask_sink":
+        if tau is None or p_student is None or mask_id is None:
+            raise ValueError("mask_sink needs tau, p_student and mask_id")
+        if bool((tok == mask_id).any()):
+            raise ValueError("a supervised trajectory token cannot be MASK")
+        tc = t[rows, tok].clone()
+        cap = float(tau) - float(cap_margin)
+        defer = (tc < float(tau))[:, None]
+        lim = torch.where(defer, torch.minimum(t, p_student.to(t.dtype)), t).clamp_max(cap)
+        lim[rows, tok] = tc
+        lim[:, mask_id] = 0.0
+        lim[:, mask_id] = (1.0 - lim.sum(-1)).clamp_min(0.0)
+        return lim
+    if mode != "capped_uniform":
+        raise ValueError(f"unknown target mode {mode!r}")
     if tau is not None:
         cap = float(tau) - float(cap_margin)
         other = torch.ones_like(t, dtype=torch.bool)
@@ -161,6 +190,33 @@ def position_stats(log_q: torch.Tensor, tok: torch.Tensor, p0_logits: torch.Tens
             "q_top": q.max(-1).values.tolist()}
 
 
+def mask_stats(t: torch.Tensor, ps: torch.Tensor, tok: torch.Tensor, tau: float, mask_id: int,
+               pa: Optional[torch.Tensor] = None, p0a: Optional[torch.Tensor] = None,
+               p0s: Optional[torch.Tensor] = None) -> Dict[str, float]:
+    """MASK-probability monitors. t / ps: target / Student probabilities on the supervised rows; pa / p0a: Student /
+    frozen base on the anchor rows (the block's other MASK positions); p0s: frozen base on the supervised rows.
+    defer rows = target says t(c) < tau. A row "would defer" when no real token reaches tau or its argmax is MASK."""
+    rows = torch.arange(len(tok), device=tok.device)
+    defer = t[rows, tok] < tau
+    real = ps.clone()
+    real[:, mask_id] = 0.0
+    would_defer = (real.max(-1).values < tau) | (ps.argmax(-1) == mask_id)
+    f = lambda v, m: float(v[m].mean()) if bool(m.any()) else float("nan")
+    out = {"defer_target_frac": float(defer.float().mean()), "target_mask": float(t[:, mask_id].mean()),
+           "student_mask_sup": float(ps[:, mask_id].mean()),
+           "student_mask_defer": f(ps[:, mask_id], defer), "student_mask_commit": f(ps[:, mask_id], ~defer),
+           "student_c_defer": f(ps[rows, tok], defer), "student_would_defer_on_defer": f(would_defer.float(), defer),
+           "student_would_defer_on_commit": f(would_defer.float(), ~defer)}
+    if p0s is not None:
+        out["base_mask_sup"] = float(p0s[:, mask_id].mean())
+    if pa is not None:
+        out.update(student_mask_anchor=float(pa[:, mask_id].mean()), student_mask_anchor_max=float(pa[:, mask_id].max()),
+                   student_mask_argmax_anchor=float((pa.argmax(-1) == mask_id).float().mean()))
+    if p0a is not None:
+        out.update(base_mask_anchor=float(p0a[:, mask_id].mean()), base_mask_anchor_max=float(p0a[:, mask_id].max()))
+    return out
+
+
 # ----------------------------------------------------------------------------- trainer
 class SiblingOPSDTrainer(BaseTrainer):
     stage = "sibling"
@@ -182,9 +238,14 @@ class SiblingOPSDTrainer(BaseTrainer):
         self.alpha = cfg.sibling_alpha()
         self.tau = float(cfg.generation.commit_threshold)
         self.qpu = int(cfg.sibling.questions_per_update)
+        self.target_mode = cfg.sibling.target
+        self.mask_id = int(gm.backend.mask_token_id)
+        if self.target_mode == "mask_sink" and self.tau < 0.5:
+            raise ValueError("sibling.target=mask_sink needs commit_threshold >= 0.5 (below it alpha is clipped to 0 "
+                             "and t(c) >= tau no longer implies a LOO fixed point)")
         if self.dist.rank == 0:
             print(f"[sibling] tau={cfg.generation.commit_threshold} alpha={self.alpha:.3f} cap={self.tau - cfg.sibling.cap_margin:.3f} T={cfg.training.rollout_temperature} "
-                  f"K={cfg.training.max_rollout_attempts} lora={gm.lora.describe()}")
+                  f"K={cfg.training.max_rollout_attempts} target={self.target_mode} lora={gm.lora.describe()}")
 
     @property
     def finished(self) -> bool:
@@ -240,8 +301,10 @@ class SiblingOPSDTrainer(BaseTrainer):
     def state_loss(self, roll: dict, step: dict, sup_idx: List[int]):
         x, spos, stok, log_q, p0_sup, anchor, p0_anchor = teacher_view(self.gm, roll, step, sup_idx,
                                                                        self.cfg.training.loo_batch_size)
-        t = mixed_target(log_q, stok, self.alpha, self.tau, self.cfg.sibling.cap_margin)
         logits = self.gm(x, mode="off").logits[0]  # Student: base + LoRA, siblings still MASK
+        p_stu = logits[spos].detach().float().softmax(-1)
+        t = mixed_target(log_q, stok, self.alpha, self.tau, self.cfg.sibling.cap_margin, self.target_mode, p_stu,
+                         self.mask_id)
         kl_t = kl_from_probs(t, logits[spos])
         loss = kl_t.mean()
         anchor_kl = None
@@ -264,7 +327,11 @@ class SiblingOPSDTrainer(BaseTrainer):
                                               > tau - self.cfg.sibling.cap_margin).float().mean()),
                      "target_commit_frac": float((t[rows, stok] >= tau).float().mean()),
                      "student_p_c": float(ps[rows, stok].mean()),
-                     "student_commit_frac": float((ps[rows, stok] >= tau).float().mean())}
+                     "student_commit_frac": float((ps[rows, stok] >= tau).float().mean()),
+                     **mask_stats(t, ps, stok, tau, self.mask_id,
+                                  logits[anchor].float().softmax(-1) if anchor.numel() else None,
+                                  F.softmax(p0_anchor, -1) if p0_anchor is not None else None,
+                                  F.softmax(p0_sup, -1))}
         return loss, stats
 
     def update(self) -> Dict[str, float]:
@@ -309,9 +376,11 @@ class SiblingOPSDTrainer(BaseTrainer):
             local_sum += float(loss.detach())
             self._bump("states_used")
             self._bump("supervised_positions", int(st["n_sup"]))
-            for k, v in st.items():
-                agg[k] = agg.get(k, 0.0) + v
-        rec.update({k: v / max(1, used) for k, v in agg.items()})
+            for k, v in st.items():  # NaN = the monitor had no rows in this state (e.g. no defer position)
+                if v == v:
+                    s_, n_ = agg.get(k, (0.0, 0))
+                    agg[k] = (s_ + v, n_ + 1)
+        rec.update({k: s_ / n_ for k, (s_, n_) in agg.items()})
         rec["loss_seconds"] = time.perf_counter() - t_start - t_rollout - t_wait
         rec.update(self._apply_update(local_sum, used, global_n))
         rec["loss"] = local_sum / used if used else None
@@ -456,8 +525,10 @@ def sibling_memprobe(gm, cfg, lengths=(1024, 2048, 2336), group: int = 8, loo_ba
                     t0 = time.perf_counter()
                     x, spos, stok, log_q, p0_sup, anchor, p0_anchor = teacher_view(gm, roll, step, sup, lb)
                     torch.cuda.synchronize(dev); t1 = time.perf_counter()
-                    t = mixed_target(log_q, stok, cfg.sibling_alpha(), cfg.generation.commit_threshold, cfg.sibling.cap_margin)
                     logits = gm(x, mode="off").logits[0]
+                    t = mixed_target(log_q, stok, cfg.sibling_alpha(), cfg.generation.commit_threshold,
+                                     cfg.sibling.cap_margin, cfg.sibling.target,
+                                     logits[spos].detach().float().softmax(-1), gm.backend.mask_token_id)
                     loss = kl_from_probs(t, logits[spos]).mean() + cfg.sibling.anchor_weight * forward_kl(
                         F.log_softmax(p0_anchor, -1), logits[anchor]).mean()
                     loss.backward()
@@ -474,4 +545,172 @@ def sibling_memprobe(gm, cfg, lengths=(1024, 2048, 2336), group: int = 8, loo_ba
                 row.update(oom=True)
             print(json.dumps(row), flush=True)
             res.append(row)
+    return res
+
+
+# ----------------------------------------------------------------------------- MASK-sink probe
+def _row_metrics(t, ps, tok, tau, mask_id, pa=None, p0a_log=None):
+    """Per-row tensors for the probe: supervised rows (target defer flag, Student p(MASK), p(c), would-defer) and anchor
+    rows (Student p(MASK), argmax MASK, KL(p0 || p))."""
+    rows = torch.arange(len(tok), device=tok.device)
+    real = ps.clone()
+    real[:, mask_id] = 0.0
+    out = {"defer": t[rows, tok] < tau, "p_mask": ps[:, mask_id], "p_c": ps[rows, tok],
+           "would_defer": (real.max(-1).values < tau) | (ps.argmax(-1) == mask_id),
+           "argmax_mask": ps.argmax(-1) == mask_id, "kl_t": kl_from_probs(t, ps.clamp_min(1e-30).log())}
+    if pa is not None:
+        out.update(a_p_mask=pa[:, mask_id], a_argmax_mask=pa.argmax(-1) == mask_id,
+                   a_kl=forward_kl(p0a_log, pa.clamp_min(1e-30).log()))
+    return out
+
+
+def sibling_maskprobe(gm, tokenizer, examples: List[Example], cfg, out_dir: str, lrs=(2e-5, 1e-4), steps: int = 30,
+                      batch: int = 8, eval_every: int = 5, holdout_frac: float = 0.25, max_eval_states: int = 48) -> dict:
+    """Can the Student learn the mask_sink target, and does MASK leak to positions that should not defer?
+
+    1. Base rollouts (fresh LoRA = base) at (tau, T_train), up to K attempts, first correct kept; parallel states and
+       frozen-base LOO Teacher exactly as in training; cached on the CPU. Reports base p(MASK) on supervised and anchor
+       rows (does LLaDA2 ever give MASK mass at a masked position?).
+    2. Questions split into train / held-out. For each lr: reset LoRA, `steps` AdamW updates of the real training
+       loss (mask_sink target + anchor), each on `batch` train states, half of them drawn from states that contain a
+       defer row (q(c) < 1/2): a stress test with far more MASK pressure than training (~4% defer rows).
+    3. Every `eval_every` updates, no-grad Student metrics on the train defer states and on held-out states: p(MASK) and
+       would-defer on defer rows vs commit rows, and on anchor rows (leak), KL(p0 || p) on anchors (drift)."""
+    dev, mask_id, tau, sb = gm.device, int(gm.backend.mask_token_id), float(cfg.generation.commit_threshold), cfg.sibling
+    alpha, seed = cfg.sibling_alpha(), cfg.training.seed
+    if tau < 0.5:
+        raise ValueError("maskprobe needs commit_threshold >= 0.5")
+    os.makedirs(out_dir, exist_ok=True)
+    params = gm.set_stage("sibling")
+    init = {k: v.detach().clone() for k, v in gm.lora.state_dict().items()}
+    t0 = time.perf_counter()
+    states, qinfo = [], []
+    for qi, ex in enumerate(examples):
+        success, n_att = None, 0
+        for a in range(cfg.training.max_rollout_attempts):
+            rng = torch.Generator(device=dev).manual_seed(derived_seed(seed, ex.example_id, "maskprobe", a))
+            roll = sibling_rollout(gm, tokenizer, ex, cfg, rng, cfg.training.rollout_temperature, {"attempt": a})
+            n_att += 1
+            if roll["is_correct"]:
+                success = roll
+                break
+        qinfo.append({"example_id": ex.example_id, "attempts": n_att, "solved": success is not None})
+        if success is None:
+            continue
+        par = parallel_steps(success)
+        for k in pick(len(par), sb.states_per_rollout, derived_seed(seed, ex.example_id, "maskprobe", "states")):
+            step, ok = par[k]
+            sub = [ok[j] for j in pick(len(ok), sb.max_positions_per_state,
+                                       derived_seed(seed, ex.example_id, "maskprobe", int(step["step_id"])))]
+            x, spos, stok, log_q, p0_sup, anchor, p0_anchor = teacher_view(gm, success, step, sub,
+                                                                           cfg.training.loo_batch_size)
+            tc = alpha + (1 - alpha) * log_q.exp()[torch.arange(len(stok), device=dev), stok]
+            states.append({"q": qi, "x": x.cpu(), "spos": spos.cpu(), "stok": stok.cpu(), "log_q": log_q.cpu(),
+                           "p0_sup_log": F.log_softmax(p0_sup, -1).cpu(), "anchor": anchor.cpu(),
+                           "p0a_log": F.log_softmax(p0_anchor, -1).cpu() if p0_anchor is not None else None,
+                           "has_defer": bool((tc < tau).any())})
+        print(f"[maskprobe] q{qi} attempts={n_att} solved={success is not None} states={len(states)} "
+              f"defer_states={sum(s['has_defer'] for s in states)} {time.perf_counter() - t0:.0f}s", flush=True)
+    if not states:
+        raise RuntimeError("no parallel states collected")
+    collect_s = time.perf_counter() - t0
+
+    # base MASK statistics
+    cat = lambda key: torch.cat([s[key] for s in states if s[key] is not None])
+    p0s_mask, q_mask = cat("p0_sup_log")[:, mask_id].exp(), cat("log_q")[:, mask_id].exp()
+    p0a_mask = cat("p0a_log")[:, mask_id].exp() if any(s["p0a_log"] is not None for s in states) else torch.zeros(1)
+    q_c = torch.cat([s["log_q"].exp()[torch.arange(len(s["stok"])), s["stok"]] for s in states])
+    qd = lambda v: {"mean": float(v.mean()), "p99": float(v.float().quantile(0.99)) if v.numel() > 1 else float(v.max()),
+                    "max": float(v.max()), "frac_gt_1e-3": float((v > 1e-3).float().mean())}
+    base = {"questions": len(examples), "solved": sum(q["solved"] for q in qinfo), "states": len(states),
+            "defer_states": sum(s["has_defer"] for s in states), "sup_rows": int(q_c.numel()),
+            "defer_rows": int((alpha + (1 - alpha) * q_c < tau).sum()), "anchor_rows": int(p0a_mask.numel()),
+            "base_p_mask_sup": qd(p0s_mask), "teacher_q_mask_sup": qd(q_mask), "base_p_mask_anchor": qd(p0a_mask),
+            "collect_seconds": collect_s}
+    print("[maskprobe] base " + json.dumps(base), flush=True)
+
+    nq = len(examples)
+    held_q = set(range(nq - max(1, int(round(holdout_frac * nq))), nq))
+    train = [s for s in states if s["q"] not in held_q]
+    held = [s for s in states if s["q"] in held_q][:max_eval_states]
+    tr_def, tr_oth = [s for s in train if s["has_defer"]], [s for s in train if not s["has_defer"]]
+    if not tr_def:
+        raise RuntimeError("no train state with a defer row; raise the number of questions")
+    evalsets = {"train_defer": tr_def[:max_eval_states], "heldout": held}
+
+    def to_dev(s):
+        return (s["x"].to(dev), s["spos"].to(dev), s["stok"].to(dev), s["log_q"].to(dev), s["anchor"].to(dev),
+                s["p0a_log"].to(dev) if s["p0a_log"] is not None else None)
+
+    @torch.no_grad()
+    def evaluate(step_no):
+        rec = {"step": step_no}
+        for name, ss in evalsets.items():
+            acc: Dict[str, List[torch.Tensor]] = {}
+            for s in ss:
+                x, spos, stok, log_q, anchor, p0a = to_dev(s)
+                logits = gm(x, mode="off").logits[0].float()
+                ps = logits[spos].softmax(-1)
+                t = mixed_target(log_q, stok, alpha, tau, sb.cap_margin, "mask_sink", ps, mask_id)
+                pa = logits[anchor].softmax(-1) if anchor.numel() else None
+                for k, v in _row_metrics(t, ps, stok, tau, mask_id, pa, p0a).items():
+                    acc.setdefault(k, []).append(v.float().cpu())
+                del logits
+            if not acc:
+                continue
+            c = {k: torch.cat(v) for k, v in acc.items()}
+            d = c["defer"].bool()
+            m = lambda key, sel: float(c[key][sel].mean()) if bool(sel.any()) else None
+            rec[name] = {"defer_rows": int(d.sum()), "commit_rows": int((~d).sum()),
+                         "p_mask_defer": m("p_mask", d), "p_mask_commit": m("p_mask", ~d),
+                         "p_c_defer": m("p_c", d), "p_c_commit": m("p_c", ~d),
+                         "would_defer_on_defer": m("would_defer", d), "would_defer_on_commit": m("would_defer", ~d),
+                         "argmax_mask_defer": m("argmax_mask", d), "kl_target_sup": float(c["kl_t"].mean())}
+            if "a_p_mask" in c:
+                rec[name].update(anchor_rows=int(c["a_p_mask"].numel()), p_mask_anchor=float(c["a_p_mask"].mean()),
+                                 p_mask_anchor_max=float(c["a_p_mask"].max()),
+                                 argmax_mask_anchor=float(c["a_argmax_mask"].float().mean()),
+                                 kl_p0_anchor=float(c["a_kl"].mean()))
+        print("[maskprobe] eval " + json.dumps(rec), flush=True)
+        return rec
+
+    runs = []
+    for lr in lrs:
+        gm.lora.load_state_dict(init)
+        opt = torch.optim.AdamW(params, lr=float(lr), weight_decay=cfg.training.weight_decay,
+                                betas=(cfg.training.adam_beta1, cfg.training.adam_beta2))
+        g = torch.Generator().manual_seed(seed)
+        hist, t1 = [evaluate(0)], time.perf_counter()
+        for it in range(1, steps + 1):
+            nd = min(len(tr_def), batch // 2) if tr_oth else min(len(tr_def), batch)
+            pick_d = torch.randperm(len(tr_def), generator=g)[:nd].tolist()
+            pick_o = torch.randperm(len(tr_oth), generator=g)[:batch - nd].tolist() if tr_oth else []
+            bs = [tr_def[i] for i in pick_d] + [tr_oth[i] for i in pick_o]
+            tot = 0.0
+            for s in bs:
+                x, spos, stok, log_q, anchor, p0a = to_dev(s)
+                logits = gm(x, mode="off").logits[0]
+                ps = logits[spos].detach().float().softmax(-1)
+                t = mixed_target(log_q, stok, alpha, tau, sb.cap_margin, "mask_sink", ps, mask_id)
+                loss = kl_from_probs(t, logits[spos]).mean()
+                if p0a is not None and sb.anchor_weight > 0:
+                    loss = loss + sb.anchor_weight * forward_kl(p0a, logits[anchor]).mean()
+                (loss / len(bs)).backward()
+                tot += float(loss.detach())
+                del logits, loss
+            for grp in opt.param_groups:
+                grp["lr"] = float(lr) * min(1.0, it / cfg.training.warmup_updates)
+            gn = float(torch.nn.utils.clip_grad_norm_(params, cfg.training.grad_clip))
+            opt.step()
+            opt.zero_grad(set_to_none=True)
+            print(f"[maskprobe] lr={lr} step={it} loss={tot / len(bs):.4f} grad_norm={gn:.3f}", flush=True)
+            if it % eval_every == 0 or it == steps:
+                hist.append(dict(evaluate(it), loss=tot / len(bs), grad_norm=gn))
+        runs.append({"lr": float(lr), "steps": steps, "batch": batch, "train_seconds": time.perf_counter() - t1,
+                     "history": hist})
+    gm.lora.load_state_dict(init)
+    res = {"tau": tau, "alpha": alpha, "mask_id": mask_id, "train_states": len(train), "train_defer_states": len(tr_def),
+           "heldout_states": len(held), "base": base, "runs": runs, "questions": qinfo}
+    with open(os.path.join(out_dir, "maskprobe.json"), "w") as f:
+        json.dump(res, f, indent=1)
     return res

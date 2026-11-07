@@ -12,7 +12,7 @@ from _helpers import MASK, build, mini_config, run_all
 from selective_draft.checkpoint import load_snapshot, save_snapshot
 from selective_draft.data import load_split
 from selective_draft.sibling_opsd import (SiblingOPSDTrainer, loo_teacher, mixed_target, parallel_steps,
-                                          run_sibling_diag, sibling_rollout, summarize_sibling_diag)
+                                          run_sibling_diag, sibling_maskprobe, sibling_rollout, summarize_sibling_diag)
 from selective_draft.training import run_training
 
 
@@ -214,6 +214,98 @@ def test_diag_rows_and_summary():
             for a in r["attempts"]:
                 for p in a["positions"]:
                     assert 0.0 <= p["q_c"] <= 1.0 and p["group_size"] >= 2
+
+
+def _check_mask_sink(q, p_stu, tok, tau=0.5, margin=0.01):
+    t = mixed_target(q.log(), tok, max(0.0, 2 * tau - 1), tau, margin, "mask_sink", p_stu, MASK)
+    rows = torch.arange(len(tok))
+    alpha = max(0.0, 2 * tau - 1)
+    assert torch.allclose(t.sum(-1), torch.ones(len(tok)), atol=1e-5) and bool((t >= 0).all())
+    tc = alpha + (1 - alpha) * q[rows, tok]
+    assert torch.allclose(t[rows, tok], tc, atol=1e-7), "t(c) is the plain mixture: the 1/2 line is unchanged"
+    real = t.clone()
+    real[rows, tok] = 0.0
+    real[:, MASK] = 0.0
+    assert float(real.max()) < tau, "no other real token may reach tau"
+    assert bool((t[:, MASK] >= (1 - alpha) * q[:, MASK] - 1e-6).all()), "MASK only gains (up to fp32 rounding of q)"
+    for r in range(len(tok)):
+        others = [v for v in range(q.shape[1]) if v not in (int(tok[r]), MASK)]
+        if float(tc[r]) < tau:  # defer row: real tokens only go down relative to the Student
+            assert bool((t[r, others] <= p_stu[r, others] + 1e-7).all())
+            assert bool((t[r, others] <= (1 - alpha) * q[r, others] + 1e-7).all())
+        else:  # commit row: Teacher shape (capped); c stays the argmax over everything, MASK included
+            assert torch.allclose(t[r, others], ((1 - alpha) * q[r, others]).clamp_max(tau - margin), atol=1e-7)
+            assert int(t[r].argmax()) == int(tok[r])
+    return t
+
+
+def test_mask_sink_defers_without_nominating_and_keeps_the_half_line():
+    V = 50
+    cases = ((0.9, 0.05, 0.95, 0.03, True), (0.55, 0.40, 0.7, 0.2, True), (0.45, 0.50, 0.6, 0.35, False),
+             (0.05, 0.90, 0.585, 0.40, False), (0.40, 0.30, 0.8, 0.1, False))
+    for qc, qv, sc, sv, commit in cases:
+        q = torch.full((1, V), (1 - qc - qv) / (V - 2))
+        q[0, 0], q[0, 1] = qc, qv
+        p = torch.full((1, V), (1 - sc - sv) / (V - 2))
+        p[0, 0], p[0, 1] = sc, sv
+        t = _check_mask_sink(q, p, torch.tensor([0]))
+        assert (float(t[0, 0]) >= 0.5) == commit
+        if not commit:
+            assert float(t[0, 1]) <= sv + 1e-7, "the Teacher's favourite is not raised"
+            assert int(t[0].argmax()) in (MASK, 0, 1)  # c may stay the argmax below tau (only the fallback writes it)
+    # strong veto: the freed mass lands on MASK, which becomes the argmax (the decoder never commits it)
+    q = torch.full((1, V), 0.05 / (V - 2)); q[0, 0], q[0, 1] = 0.05, 0.90
+    p = torch.full((1, V), 0.015 / (V - 2)); p[0, 0], p[0, 1] = 0.585, 0.40
+    t = _check_mask_sink(q, p, torch.tensor([0]))
+    assert int(t[0].argmax()) == MASK and float(t[0, MASK]) > 0.5
+    # random rows, tau 0.5 and 0.7
+    g = torch.Generator().manual_seed(0)
+    for tau in (0.5, 0.7):
+        q = torch.softmax(torch.randn(64, V, generator=g) * 3, -1)
+        p = torch.softmax(torch.randn(64, V, generator=g) * 3, -1)
+        tok = torch.randint(4, V, (64,), generator=g)
+        _check_mask_sink(q, p, tok, tau)
+
+
+def test_copy_target_is_onehot():
+    q = torch.softmax(torch.randn(3, 20), -1)
+    t = mixed_target(q.log(), torch.tensor([5, 6, 7]), 0.0, 0.5, 0.01, "copy")
+    assert torch.equal(t, torch.nn.functional.one_hot(torch.tensor([5, 6, 7]), 20).float())
+
+
+def test_mask_sink_trainer_logs_mask_monitors_and_rejects_low_tau():
+    cfg = _cfg(**{"generation.commit_threshold": 0.5, "sibling.target": "mask_sink"})
+    with tempfile.TemporaryDirectory() as d, patch("selective_draft.sibling_opsd.grade", side_effect=_text_grade):
+        gm, tok, _ = build(cfg)
+        examples = load_split(cfg, tok)
+        _freeze_vocab(tok, examples)
+        tr = SiblingOPSDTrainer(gm, cfg, d, examples, tok)
+        run_training(tr, 6, 0)
+        logs = [json.loads(l) for l in open(os.path.join(d, "log_rank0.jsonl"))]
+        used = [r for r in logs if r.get("loss") is not None]
+        assert used and all("target_mask" in r and "student_mask_sup" in r and "defer_target_frac" in r for r in used)
+        assert all(r["loss"] == r["loss"] for r in used), "no NaN loss"
+    try:
+        gm, tok, _ = build(_cfg(**{"sibling.target": "mask_sink"}))  # commit_threshold 0.3
+        SiblingOPSDTrainer(gm, _cfg(**{"sibling.target": "mask_sink"}), tempfile.mkdtemp(), load_split(_cfg(), tok), tok)
+        raise AssertionError("mask_sink at tau < 0.5 must be rejected")
+    except ValueError:
+        pass
+
+
+def test_maskprobe_runs_and_resets_lora():
+    cfg = _cfg(**{"generation.commit_threshold": 0.5, "sibling.target": "mask_sink", "sibling.states_per_rollout": 8})
+    with tempfile.TemporaryDirectory() as d, patch("selective_draft.sibling_opsd.grade", side_effect=_text_grade):
+        gm, tok, _ = build(cfg)
+        examples = load_split(cfg, tok)
+        _freeze_vocab(tok, examples)
+        res = sibling_maskprobe(gm, tok, examples, cfg, d, lrs=(0.05,), steps=4, batch=4, eval_every=2)
+        assert os.path.exists(os.path.join(d, "maskprobe.json"))
+        assert res["base"]["states"] > 0 and res["train_defer_states"] > 0
+        hist = res["runs"][0]["history"]
+        assert [h["step"] for h in hist] == [0, 2, 4]
+        assert hist[0]["train_defer"]["defer_rows"] > 0
+        assert all(float(p.abs().sum()) == 0 for p in gm.lora.B.values()), "LoRA is reset after the probe"
 
 
 if __name__ == "__main__":
