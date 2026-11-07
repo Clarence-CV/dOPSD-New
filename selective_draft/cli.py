@@ -243,7 +243,11 @@ def cmd_train_sibling(args):
         examples = examples[: args.limit]
     _dump_resolved(cfg, args.output_dir, {"command": "train-sibling", "n_examples": len(examples),
                                         "alpha": cfg.sibling_alpha()})
-    trainer = SiblingOPSDTrainer(gm, cfg, args.output_dir, examples, tok)
+    if cfg.sibling.target == "path":
+        from .path_opsd import PathOPSDTrainer
+        trainer = PathOPSDTrainer(gm, cfg, args.output_dir, examples, tok)
+    else:
+        trainer = SiblingOPSDTrainer(gm, cfg, args.output_dir, examples, tok)
     last = run_training(trainer, cfg.training.max_steps, cfg.training.save_every, args.resume)
     print(json.dumps({"final": last, "snapshot": os.path.join(args.output_dir, "snapshot")}, default=float))
 

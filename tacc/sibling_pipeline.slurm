@@ -21,7 +21,10 @@
 #        QPU (questions per process per update; 2 when NG*TPG < 3, else 1), SAVE_EVERY (50),
 #        EVAL_STEPS ("125 250 375 500"), FINAL_TEST (1), N_TEST (all 500), TESTS=1 (CPU tests first), DEV=1 (small
 #        sizes for the 2-hour dev queue), MOE_IMPL (override model.moe_impl), PPG (evaluation/diag processes per GPU, 1),
-#        LOO_BATCH (Teacher rows per forward, 4), DIAG_TAUS ("0.7 0.95"), DIAG_EVAL_TAUS ("0.95 0.7"), DIAG_K (8).
+#        LOO_BATCH (Teacher rows per forward, 4), DIAG_TAUS ("0.7 0.95"), DIAG_EVAL_TAUS ("0.95 0.7"), DIAG_K (8),
+#        EVAL_TAU (dev selection / test threshold; default = the config's commit_threshold. Path OPSD: 0.95; the final
+#        test then runs at EVAL_TAU, the config's tau and 0.95, deduplicated).
+# Path OPSD (doc/plan_path_opsd.md): CONFIG=configs/llada2_mini_path.json EVAL_TAU=0.95 STAGES="train eval".
 # Monitoring: nvidia-smi samples (utilisation, memory, power) every 30 s -> $OUT/logs/gpu_monitor_<job>.csv;
 #        train/log_rank0.jsonl has per-update loss terms, LOO statistics, on-policy accuracy/TPF, timing and peak memory.
 #SBATCH --job-name=sibling
@@ -79,7 +82,6 @@ fi
 S=(--config "$CONFIG" --set "training.loo_batch_size=$LOO_BATCH")
 [[ -n "${MOE_IMPL:-}" ]] && S+=(--set "model.moe_impl=\"$MOE_IMPL\"")
 BASE=(--set sibling.lora_rank=0)                                    # frozen base, no adapters
-T95=(--set generation.commit_threshold=0.95)
 mkdir -p "$OUT"/{meta,eval,diag,train,logs,memprobe,maskprobe}
 nvidia-smi --query-gpu=timestamp,index,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw \
     --format=csv -l 30 > "$OUT/logs/gpu_monitor_${SLURM_JOB_ID:-local}.csv" 2>/dev/null &
@@ -89,7 +91,7 @@ stamp() { echo "[sibling $(date +%H:%M:%S)] $*"; }
 has() { [[ " $STAGES " == *" $1 "* ]]; }
 
 if [[ "$TESTS" == "1" ]]; then
-    for t in sibling decoder guidance training data; do python tests/test_$t.py > "$OUT/logs/test_$t.log" 2>&1 || { echo "CPU test $t FAILED"; tail -20 "$OUT/logs/test_$t.log"; exit 6; }; done
+    for t in sibling path decoder guidance training data; do python tests/test_$t.py > "$OUT/logs/test_$t.log" 2>&1 || { echo "CPU test $t FAILED"; tail -20 "$OUT/logs/test_$t.log"; exit 6; }; done
     stamp "CPU tests passed"
 fi
 cp "$CONFIG" "$OUT/meta/config.json"
@@ -134,7 +136,11 @@ latest_ckpt() { local best="" bs=-1 d s
     for d in "$1"/checkpoint-step-*; do [[ -f "$d/COMPLETE" ]] || continue; s=${d##*-}; (( s > bs )) && { bs=$s; best=$d; }; done
     echo "$best"; }
 DEVSET=(--set 'data.split="dev"' --set 'data.subsplit="dev_fast"')
-TT=$(python -c "import json;print(str(json.load(open('$CONFIG'))['generation']['commit_threshold']).replace('0.',''))")   # tau tag of the run
+CFG_TAU=$(python -c "import json;print(json.load(open('$CONFIG'))['generation']['commit_threshold'])")
+tag() { echo "${1#0.}"; }
+TT=$(tag "$CFG_TAU")                                    # tau tag of the run (Teacher / rollout threshold)
+EVAL_TAU="${EVAL_TAU:-$CFG_TAU}"; ET=$(tag "$EVAL_TAU")  # evaluation threshold (dev selection, first test tau)
+EV=(--set "generation.commit_threshold=$EVAL_TAU")
 
 # ---- memory / speed probe of one training state ---------------------------------------------------------------------
 if has memprobe; then
@@ -183,13 +189,13 @@ fi
 # ---- evaluation -----------------------------------------------------------------------------------------------------
 if has eval; then
     D=("${DEVSET[@]}" --limit "$DEV_N")
-    par_eval devfast_base_t${TT} "${D[@]}" "${BASE[@]}"
+    par_eval devfast_base_t${ET} "${D[@]}" "${BASE[@]}" "${EV[@]}"
     for st in $EVAL_STEPS; do
         CK="$OUT/train/checkpoint-step-$st"
         [[ -f "$CK/COMPLETE" ]] || { stamp "no $CK; skipped"; continue; }
-        par_eval "devfast_step${st}_t${TT}" "${D[@]}" --snapshot "$CK/snapshot"
+        par_eval "devfast_step${st}_t${ET}" "${D[@]}" "${EV[@]}" --snapshot "$CK/snapshot"
     done
-    python - "$OUT" "$TT" $EVAL_STEPS <<'PY'
+    python - "$OUT" "$ET" $EVAL_STEPS <<'PY'
 import json, os, sys
 out, tt, steps = sys.argv[1], sys.argv[2], [int(s) for s in sys.argv[3:]]
 first = lambda p: next(iter(json.load(open(p))["summaries"].values()))
@@ -211,18 +217,19 @@ PY
     SELCK=$(python -c "import json;print(json.load(open('$OUT/eval/selection.json'))['checkpoint'] or '')")
     if [[ "$FINAL_TEST" == "1" && -n "$SELCK" ]]; then
         T=(--set 'data.split="test"'); [[ -n "$N_TEST" ]] && T+=(--limit "$N_TEST")
-        par_eval test_base_t${TT} "${T[@]}" "${BASE[@]}"
-        par_eval test_sel_t${TT} "${T[@]}" --snapshot "$SELCK/snapshot"
-        par_eval test_base_t95 "${T[@]}" "${BASE[@]}" "${T95[@]}"
-        par_eval test_sel_t95 "${T[@]}" "${T95[@]}" --snapshot "$SELCK/snapshot"
-        python - "$OUT/eval" "$TT" <<'PY'
+        FT=(); for tau in "$EVAL_TAU" "$CFG_TAU" 0.95; do [[ " ${FT[*]} " == *" $tau "* ]] || FT+=("$tau"); done
+        for tau in "${FT[@]}"; do
+            par_eval "test_base_t$(tag "$tau")" "${T[@]}" "${BASE[@]}" --set "generation.commit_threshold=$tau"
+            par_eval "test_sel_t$(tag "$tau")" "${T[@]}" --set "generation.commit_threshold=$tau" --snapshot "$SELCK/snapshot"
+        done
+        python - "$OUT/eval" $(for tau in "${FT[@]}"; do tag "$tau"; done) <<'PY'
 import glob, json, sys
-ev, tt = sys.argv[1], sys.argv[2]
+ev, tags = sys.argv[1], sys.argv[2:]
 def rows(d):
     p = [x for x in sorted(glob.glob(f"{ev}/{d}/rows_*.jsonl")) if ".shard" not in x][0]
     return {r["example_id"]: r for r in map(json.loads, open(p))}
 res = {}
-for t in (f"t{tt}", "t95"):
+for t in (f"t{x}" for x in tags):
     b, s = rows(f"test_base_{t}"), rows(f"test_sel_{t}")
     ids = sorted(set(b) & set(s)); n = len(ids)
     m = lambda d, k: sum(d[i][k] for i in ids) / n
