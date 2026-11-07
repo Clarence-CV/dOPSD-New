@@ -1,5 +1,5 @@
 {
-  "_comment": "Hybrid Path OPSD, basic version (doc/plan_path_opsd.md), LLaDA2.0-mini / MATH. Same model, data, prompt and decoding rules as llada2_mini_sibling.json. Teacher = current model (base + LoRA r32) at tau=0.5 (generation.commit_threshold), T=0.9, 8 attempts, the correct rollout with the fewest steps (sibling.path_select=shortest). Student = same model teacher-forced on that path: CE on every step's committed tokens, zero once p(c) >= sibling.path_cap = 0.95 (the evaluation threshold; the pipeline evaluates with EVAL_TAU=0.95, greedy). No LOO, no anchor in the loss; KL(p0||p) logged every 10 updates.",
+  "_comment": "Hybrid Path OPSD, basic version (doc/plan_path_opsd.md), LLaDA2.0-mini / MATH. Same model, data, prompt and decoding rules as llada2_mini_sibling.json. Teacher = current model (base + LoRA r32) at tau=0.5 (generation.commit_threshold), T=0.9, pass@8: up to 8 attempts, stop at the first verified-correct rollout (sibling.path_select=first; the dev job 1127490 ran shortest). Student = same model teacher-forced on that path: CE on every step's committed tokens, zero once p(c) >= sibling.path_cap = 0.95 (the evaluation threshold; the pipeline evaluates with EVAL_TAU=0.95, greedy). No LOO, no anchor in the loss; KL(p0||p) logged every 10 updates.",
   "model": {
     "path": "inclusionAI/LLaDA2.0-mini",
     "backend": "llada2_mini",
@@ -65,7 +65,7 @@
     "questions_per_update": 1,
     "target": "path",
     "path_cap": 0.95,
-    "path_select": "shortest",
+    "path_select": "first",
     "path_kl_every": 10
   },
   "evaluation": {
