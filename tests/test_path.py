@@ -26,7 +26,7 @@ def _cfg(**over):
 
 def test_capped_ce_stops_at_the_cap():
     V = 10
-    for pc in (0.2, 0.9, 0.95, 0.99):
+    for pc in (0.2, 0.9, 0.96, 0.99):  # not exactly 0.95: log(0.95) rounding differs across CPUs (aarch64)
         logits = torch.full((1, V), math.log((1 - pc) / (V - 1)))
         logits[0, 3] = math.log(pc)
         logits.requires_grad_(True)
