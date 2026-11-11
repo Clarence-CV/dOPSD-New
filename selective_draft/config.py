@@ -109,6 +109,15 @@ class SiblingConfig:
     path_cap: float = 0.95  # CE is zero once p(c) >= path_cap; set it to the evaluation threshold
     path_select: str = "shortest"  # shortest = run every attempt, keep the correct one with the fewest steps | first
     path_kl_every: int = 10  # log KL(p0 || p) on the drawn states every N updates (monitor only, not in the loss)
+    # frozen = the pretrained model (LoRA off) samples the paths with seeds independent of the training step, so the
+    # targets are a fixed dataset (no self-sharpening loop); current = the model being trained (path_v1, collapsed)
+    path_teacher: str = "frozen"
+    # directory of `cli collect-paths` shards (paths*.pt): train on the stored frozen-teacher paths instead of sampling
+    # them online; "" = online sampling with the same seeds
+    path_source: str = ""
+    # target=drafter (selective_draft/drafter_opsd.py): verified self-drafter
+    content_weight: float = 1.0  # capped CE on the accepted rollout's commits; 0 = the no-content ablation
+    first_attempt_greedy: bool = True  # attempt 0 at T=0 (the deployed decoder), later attempts at rollout_temperature
 
 
 @dataclass
@@ -249,10 +258,13 @@ class Config:
             raise ValueError("sibling.cap_margin must be in (0, 0.5)")
         if sb.anchor_weight < 0:
             raise ValueError("sibling.anchor_weight must be >= 0")
-        _choice("sibling.target", sb.target, {"capped_uniform", "mask_sink", "copy", "path"})
+        _choice("sibling.target", sb.target, {"capped_uniform", "mask_sink", "copy", "path", "drafter"})
         _choice("sibling.path_select", sb.path_select, {"shortest", "first"})
+        _choice("sibling.path_teacher", sb.path_teacher, {"frozen", "current"})
         if not (0.0 < sb.path_cap < 1.0) or sb.path_kl_every < 0:
             raise ValueError("sibling.path_cap must be in (0, 1) and sibling.path_kl_every >= 0")
+        if sb.content_weight < 0:
+            raise ValueError("sibling.content_weight must be >= 0")
         return self
 
     def sibling_alpha(self) -> float:

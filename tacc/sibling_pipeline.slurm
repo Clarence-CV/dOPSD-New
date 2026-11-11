@@ -12,6 +12,9 @@
 #             tracking p(MASK) on defer / commit / anchor rows on train and held-out states
 #   diag   Phase 0 on dev:dev_fast (first DIAG_N): base greedy accuracy at tau 0.95 and 0.7; sibling-diag rollouts
 #          (T=0.9, up to 8 attempts) at tau 0.7 and 0.95 with frozen-base leave-one-out statistics
+#   paths  Path OPSD only: collect-paths on the first PATHS_N training questions (default 1.2 x the questions the
+#          training consumes) with NG*PPG processes -> $OUT/paths/paths.shard*.pt; train then reads them
+#          (sibling.path_source) instead of sampling teacher paths online
 #   train  train-sibling: TRAIN_STEPS updates, QPU questions per GPU per update, checkpoint every SAVE_EVERY
 #   eval   dev_fast (first DEV_N) at tau 0.7: base and checkpoints EVAL_STEPS; pick by accuracy, then fewer steps,
 #          then earlier; FINAL_TEST=1: MATH-500 test, base vs selected, at tau 0.7 and 0.95, paired summary
@@ -24,7 +27,8 @@
 #        LOO_BATCH (Teacher rows per forward, 4), DIAG_TAUS ("0.7 0.95"), DIAG_EVAL_TAUS ("0.95 0.7"), DIAG_K (8),
 #        EVAL_TAU (dev selection / test threshold; default = the config's commit_threshold. Path OPSD: 0.95; the final
 #        test then runs at EVAL_TAU, the config's tau and 0.95, deduplicated).
-# Path OPSD (doc/plan_path_opsd.md): CONFIG=configs/llada2_mini_path.json EVAL_TAU=0.95 STAGES="train eval".
+# Path OPSD (doc/plan_path_opsd.md): CONFIG=configs/llada2_mini_path.json EVAL_TAU=0.95 STAGES="paths train eval"
+#        (PATHS_N overrides the number of questions; PATH_SOURCE reuses the paths of another run).
 # Monitoring: nvidia-smi samples (utilisation, memory, power) every 30 s -> $OUT/logs/gpu_monitor_<job>.csv;
 #        train/log_rank0.jsonl has per-update loss terms, LOO statistics, on-policy accuracy/TPF, timing and peak memory.
 #SBATCH --job-name=sibling
@@ -75,6 +79,7 @@ DIAG_TAUS="${DIAG_TAUS:-0.7 0.95}"             # sibling-diag thresholds
 DIAG_EVAL_TAUS="${DIAG_EVAL_TAUS:-0.95 0.7}"   # greedy base evaluations in the diag stage
 DIAG_K="${DIAG_K:-8}"                          # rollout attempts per question in sibling-diag
 LOO_BATCH="${LOO_BATCH:-4}"
+PATH_SOURCE="${PATH_SOURCE:-}"                 # Path OPSD: directory of collect-paths shards from another run
 if [[ "${DEV:-0}" == "1" ]]; then
     DIAG_N="${DIAG_N_DEV:-12}"; DEV_N=8; TRAIN_STEPS=4; QPU=1; SAVE_EVERY=2; EVAL_STEPS="2 4"; FINAL_TEST=0
     PPG="${PPG_DEV:-2}"
@@ -91,7 +96,7 @@ stamp() { echo "[sibling $(date +%H:%M:%S)] $*"; }
 has() { [[ " $STAGES " == *" $1 "* ]]; }
 
 if [[ "$TESTS" == "1" ]]; then
-    for t in sibling path decoder guidance training data; do python tests/test_$t.py > "$OUT/logs/test_$t.log" 2>&1 || { echo "CPU test $t FAILED"; tail -20 "$OUT/logs/test_$t.log"; exit 6; }; done
+    for t in sibling path drafter decoder guidance training data; do python tests/test_$t.py > "$OUT/logs/test_$t.log" 2>&1 || { echo "CPU test $t FAILED"; tail -20 "$OUT/logs/test_$t.log"; exit 6; }; done
     stamp "CPU tests passed"
 fi
 cp "$CONFIG" "$OUT/meta/config.json"
@@ -171,15 +176,35 @@ if has diag; then
     done
 fi
 
+# ---- Path OPSD: frozen-teacher paths, sampled once ------------------------------------------------------------------
+if has paths; then
+    PATHS_N="${PATHS_N:-$(( TRAIN_STEPS * NTR * QPU * 12 / 10 ))}"
+    NS=$((NG * PPG)); pids=()
+    for ((i = 0; i < NS; i++)); do
+        [[ -f "$OUT/paths/summary.shard${i}of${NS}.json" ]] && continue
+        CUDA_VISIBLE_DEVICES=$((i % NG)) python -m selective_draft.cli collect-paths "${S[@]}" "${BASE[@]}" \
+            --set 'data.split="train"' --limit "$PATHS_N" --shard "$i/$NS" --output-dir "$OUT/paths" \
+            > "$OUT/logs/paths_$i.log" 2>&1 & pids+=($!)
+    done
+    bad=0; for p in "${pids[@]}"; do wait "$p" || bad=1; done
+    (( bad == 0 )) || { echo "collect-paths: a shard failed; see $OUT/logs/paths_*.log (rerun resumes)"; exit 1; }
+    PATH_SOURCE="$OUT/paths"
+    stamp "paths: $(python -c "
+import json,glob;S=[json.load(open(f)) for f in glob.glob('$OUT/paths/summary.shard*.json')]
+q=sum(s['questions'] for s in S);a=sum(s['accepted'] for s in S);t=sum(s['attempts'] for s in S)
+print(dict(questions=q,accepted=a,accept_rate=round(a/max(1,q),3),attempts=t,truncated_attempts=sum(s['truncated_attempts'] for s in S),hours=round(max(s['elapsed_s'] for s in S)/3600,2)))")"
+fi
+
 # ---- Phase 1: training -------------------------------------------------------------------------------------------
 if has train; then
     TRAIN="$OUT/train"
     CK=$(latest_ckpt "$TRAIN")
+    PS=(); [[ -n "$PATH_SOURCE" ]] && PS=(--set "sibling.path_source=\"$PATH_SOURCE\"")
     if [[ "$CK" != *"-$TRAIN_STEPS" ]]; then
         RES=(); [[ -n "$CK" ]] && RES=(--resume "$CK")
         BK=(); (( TPG > 1 )) && BK=(env DOPSD_DIST_BACKEND=gloo)
         "${BK[@]}" torchrun --standalone --nproc_per_node="$NTR" -m selective_draft.cli train-sibling "${S[@]}" \
-            --set 'data.split="train"' --set "sibling.questions_per_update=$QPU" \
+            --set 'data.split="train"' --set "sibling.questions_per_update=$QPU" "${PS[@]}" \
             --max-steps "$TRAIN_STEPS" --save-every "$SAVE_EVERY" --output-dir "$TRAIN" "${RES[@]}" \
             > "$OUT/logs/train.log" 2>&1
     fi

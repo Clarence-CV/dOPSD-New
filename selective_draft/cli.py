@@ -246,10 +246,31 @@ def cmd_train_sibling(args):
     if cfg.sibling.target == "path":
         from .path_opsd import PathOPSDTrainer
         trainer = PathOPSDTrainer(gm, cfg, args.output_dir, examples, tok)
+    elif cfg.sibling.target == "drafter":
+        from .drafter_opsd import DrafterOPSDTrainer
+        trainer = DrafterOPSDTrainer(gm, cfg, args.output_dir, examples, tok)
     else:
         trainer = SiblingOPSDTrainer(gm, cfg, args.output_dir, examples, tok)
     last = run_training(trainer, cfg.training.max_steps, cfg.training.save_every, args.resume)
     print(json.dumps({"final": last, "snapshot": os.path.join(args.output_dir, "snapshot")}, default=float))
+
+
+def cmd_collect_paths(args):
+    """Frozen-teacher Path OPSD paths for the training questions (sibling.path_source for train-sibling)."""
+    from .path_opsd import collect_paths
+    cfg = _cfg(args)
+    if cfg.data.split != "train":
+        raise SystemExit("collect-paths requires data.split=train")
+    if cfg.sibling.target != "path":
+        raise SystemExit("collect-paths requires sibling.target=path")
+    gm, tok, _ = _build(cfg, args)
+    examples = load_split(cfg, tok)
+    shard = _shard(args.shard)
+    if shard == (0, 1) or shard[0] == 0:
+        _dump_resolved(cfg, args.output_dir, {"command": "collect-paths", "n_examples": len(examples),
+                                            "limit": args.limit, "shards": shard[1]})
+    summary = collect_paths(gm, tok, cfg, examples, args.output_dir, shard, args.limit)
+    print(json.dumps(summary, default=float))
 
 
 def cmd_sibling_diag(args):
@@ -409,6 +430,11 @@ def main(argv=None):
     p = sub.add_parser("train-sibling", help="sibling OPSD: LoRA student, LOO sibling Teacher on verified aggressive rollouts")
     _common(p); p.add_argument("--max-steps", type=int); p.add_argument("--save-every", type=int)
     p.add_argument("--limit", type=int); p.add_argument("--resume"); p.set_defaults(fn=cmd_train_sibling)
+
+    p = sub.add_parser("collect-paths", help="Path OPSD: sample and store the frozen-teacher paths of the training questions")
+    _common(p); p.add_argument("--limit", type=int, help="first N questions of the trainer's order")
+    p.add_argument("--shard", help="I/N: every N-th of those questions starting at I (one paths.shardIofN.pt each)")
+    p.set_defaults(fn=cmd_collect_paths)
 
     p = sub.add_parser("sibling-diag", help="Phase 0: frozen-base LOO statistics of parallel commits in tau/T rollouts")
     _common(p); p.add_argument("--snapshot"); p.add_argument("--limit", type=int)
